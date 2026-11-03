@@ -27,7 +27,7 @@ export function devReadBridge(): Plugin {
         req.on('data',chunk=>{body+=chunk;if(body.length>4096)req.destroy()})
         req.on('end',()=>{
           let request:Record<string,unknown>
-          try { request=JSON.parse(body);if(!['projects','work_map','status','memory','evidence'].includes(String(request.operation))||(request.operation!=='projects'&&request.project!==project))throw Error() }
+          try { request=JSON.parse(body);if(!['projects','work_map','status','memory','evidence','call_logs'].includes(String(request.operation))||(request.operation!=='projects'&&request.project!==project))throw Error() }
           catch {res.statusCode=400;res.end();return}
           slots++
           const child=execFile(process.env.SESSIONGRAPH_PYTHON||'/Library/Frameworks/Python.framework/Versions/3.12/bin/python3',['-B',path.resolve('runtime/entrypoint.py'),'native-read'],{env:{...process.env,SESSIONGRAPH_RUNTIME_HOME:temporary},timeout:10000,maxBuffer:8*1024*1024},(error,stdout)=>{

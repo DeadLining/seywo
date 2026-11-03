@@ -26,6 +26,7 @@ pub(crate) enum Operation {
     Memory,
     Evidence,
     SummaryCandidates,
+    CallLogs,
 }
 
 fn request(
@@ -34,7 +35,7 @@ fn request(
     id: Option<&str>,
     offset: Option<u64>,
 ) -> Result<Value, String> {
-    if !matches!(operation, Operation::Projects)
+    if (!matches!(operation, Operation::Projects | Operation::CallLogs) || project.is_some())
         && !project.is_some_and(|p| p.len() == 20 && p.bytes().all(|c| c.is_ascii_hexdigit()))
     {
         return Err("缺少有效的项目标识".into());
@@ -49,7 +50,7 @@ fn request(
     {
         return Err("缺少有效的来源标识".into());
     }
-    if offset.is_some_and(|n| !matches!(operation, Operation::Evidence | Operation::WorkMap | Operation::Memory) || n > 50_000_000) {
+    if offset.is_some_and(|n| !matches!(operation, Operation::Evidence | Operation::WorkMap | Operation::Memory | Operation::CallLogs) || n > 50_000_000) {
         return Err("原文偏移无效".into());
     }
     Ok(json!({"operation":operation,"project":project,"id":id,"offset":offset}))
@@ -168,6 +169,7 @@ pub(crate) enum SettingsAction {
     SaveModel,
     SaveProvider,
     TestProvider,
+    RevealProviderKey,
     EnableGraph,
     DisableGraph,
     SaveJev,
@@ -431,6 +433,8 @@ pub(crate) async fn read_session_graph(
     chat: Option<String>,
     view: Option<String>,
     materials: Option<Value>,
+    log_model: Option<String>,
+    log_status: Option<String>,
 ) -> Result<Value, String> {
     let mut payload = request(&operation, project.as_deref(), id.as_deref(), offset)?;
     if let Some(value) = view {
@@ -455,6 +459,15 @@ pub(crate) async fn read_session_graph(
         payload["materials"] = value;
     } else if materials.is_some() {
         return Err("此操作不接受材料查询".into());
+    }
+    if log_model.is_some() || log_status.is_some() {
+        if !matches!(operation, Operation::CallLogs)
+            || log_model.as_ref().is_some_and(|v| v.chars().count()>256)
+            || log_status.as_ref().is_some_and(|v| !matches!(v.as_str(), "all"|"failed"|"succeeded"|"pending")) {
+            return Err("调用日志筛选参数无效".into());
+        }
+        if let Some(value) = log_model { payload["log_model"] = json!(value); }
+        if let Some(value) = log_status { payload["log_status"] = json!(value); }
     }
     let _slot = READ_SLOTS
         .try_acquire()
@@ -545,6 +558,8 @@ mod tests {
             json!({"action":"save_jev","project":PROJECT,"api_key":""}),
             json!({"action":"save_jev","project":PROJECT,"api_key":"a\nb"}),
             json!({"action":"status","api_key":"unexpected"}),
+            json!({"action":"reveal_provider_key","api_key":"unexpected"}),
+            json!({"action":"reveal_provider_key","endpoint":"https://other.test/v1/responses"}),
             json!({"action":"status","project":"../x"}),
             json!({"action":"install_mcp","project":PROJECT,"model":"x"}),
         ] {
@@ -552,6 +567,7 @@ mod tests {
         }
         for payload in [
             json!({"action":"status"}),
+            json!({"action":"reveal_provider_key"}),
             json!({"action":"uninstall_hooks"}),
             json!({"action":"uninstall_mcp"}),
             json!({"action":"save_model","project":PROJECT,"model":"new/model"}),
@@ -569,6 +585,16 @@ mod tests {
         ] {
             assert!(validate_settings(&serde_json::from_value(payload).unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn call_logs_allow_global_or_project_scope_and_bounded_paging() {
+        assert!(request(&Operation::CallLogs, None, None, Some(50)).is_ok());
+        assert!(request(&Operation::CallLogs, Some("aaaaaaaaaaaaaaaaaaaa"), None, None).is_ok());
+        assert!(request(&Operation::CallLogs, Some("../outside"), None, None).is_err());
+        assert!(request(&Operation::CallLogs, None, None, Some(50_000_001)).is_err());
+        assert!(valid_response(&json!({"items":[],"model_calls":0})));
+        assert!(!valid_response(&json!({"items":[],"model_calls":1})));
     }
 
     #[test]

@@ -36,7 +36,7 @@ def test_actual_http_probe_reuses_saved_key_without_writing(app, monkeypatch):
     thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
     endpoint = f'http://127.0.0.1:{server.server_port}/v1/responses'
     save_key(app['state'], endpoint, 'fixture-saved-key')
-    before = {str(p):p.read_bytes() for base in [app['state'],app['codex_home']] for p in base.rglob('*') if p.is_file()}
+    before = {str(p):p.read_bytes() for base in [app['state'],app['codex_home']] for p in base.rglob('*') if p.is_file() and 'call-logs' not in p.parts}
     monkeypatch.setenv('http_proxy','http://127.0.0.1:1')
     try: result = probe(app, endpoint)
     finally: server.shutdown(); server.server_close(); thread.join()
@@ -44,7 +44,7 @@ def test_actual_http_probe_reuses_saved_key_without_writing(app, monkeypatch):
     assert result['provider_test']['elapsed_ms'] >= 0 and result['provider_test']['http_status'] == 200
     assert result['provider_test']['model'] == 'draft-model'
     assert captured == [('/v1/responses','Bearer fixture-saved-key',dict(model='draft-model',input='Reply with OK.',stream=False,store=False,max_output_tokens=16))]
-    after = {str(p):p.read_bytes() for base in [app['state'],app['codex_home']] for p in base.rglob('*') if p.is_file()}
+    after = {str(p):p.read_bytes() for base in [app['state'],app['codex_home']] for p in base.rglob('*') if p.is_file() and 'call-logs' not in p.parts}
     assert before == after
     assert 'fixture-saved-key' not in json.dumps(result)
 
@@ -90,3 +90,17 @@ def test_missing_credential_never_calls_model(app, monkeypatch):
     monkeypatch.setattr('sessiongraph.provider_probe.request.build_opener',lambda *a: pytest.fail('network opened'))
     result = probe(app)
     assert not result['ok'] and result['model_calls']==0 and '凭据' in result['message']
+
+
+def test_probe_creates_one_summary_with_usage_and_no_content(app,monkeypatch):
+    from sessiongraph.call_logs import read
+    class Response(io.BytesIO):
+        status=200;headers={'x-request-id':'provider-fixture'}
+    class Opener:
+        def open(self,*a,**k):return Response(b'{"model":"actual-model","status":"completed","usage":{"input_tokens":3,"output_tokens":1},"output":[{"type":"message","content":[{"type":"output_text","text":"private-output"}]}]}')
+    monkeypatch.setattr('sessiongraph.provider_probe.request.build_opener',lambda *a:Opener())
+    assert probe(app,api_key='fixture-input-key')['ok']
+    rows=read(state=app['state'])['items']
+    assert len(rows)==1 and rows[0]['state']=='probe_ok' and rows[0]['retry_count']==0
+    assert rows[0]['response_model']=='actual-model' and rows[0]['output_tokens']==1
+    assert 'fixture-input-key' not in json.dumps(rows) and 'private-output' not in json.dumps(rows)

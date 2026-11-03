@@ -110,7 +110,8 @@
       "../runtime/sessiongraph/conclusion.py": "sessiongraph/sessiongraph/conclusion.py",
       "../runtime/sessiongraph/evidence_paths.py": "sessiongraph/sessiongraph/evidence_paths.py",
       "../runtime/sessiongraph/provider_probe.py": "sessiongraph/sessiongraph/provider_probe.py",
-      "../runtime/sessiongraph/tier_backfill.py": "sessiongraph/sessiongraph/tier_backfill.py"
+      "../runtime/sessiongraph/tier_backfill.py": "sessiongraph/sessiongraph/tier_backfill.py",
+      "../runtime/sessiongraph/call_logs.py": "sessiongraph/sessiongraph/call_logs.py"
     }
   }
 }

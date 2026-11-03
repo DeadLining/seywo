@@ -176,7 +176,7 @@ it('tests draft configuration without saving or clearing edited credentials, and
  fireEvent.change(screen.getByLabelText('MODEL NAME'),{target:{value:'draft-model'}})
  fireEvent.change(screen.getByLabelText('API KEY'),{target:{value:'fixture-draft-key'}})
  fireEvent.click(screen.getByRole('button',{name:'测试模型'}))
- expect(manage).toHaveBeenLastCalledWith({action:'test_provider',endpoint:'https://draft.test/v1/responses',model:'draft-model',api_key_env:'EXISTING_KEY',api_key:'fixture-draft-key'})
+ expect(manage).toHaveBeenLastCalledWith({action:'test_provider',project:'p1',endpoint:'https://draft.test/v1/responses',model:'draft-model',api_key_env:'EXISTING_KEY',api_key:'fixture-draft-key'})
  expect(screen.getByRole('button',{name:'测试中…'})).toBeDisabled()
  expect(screen.getByRole('button',{name:'保存模型配置'})).toBeDisabled()
  await act(async()=>finish({...provider,message:'模型已连通 · 总耗时 123 ms',model_calls:1}))
@@ -197,4 +197,67 @@ it('tests with stored credentials when the key is blank, and shows failure with 
  expect(await screen.findByRole('alert')).toHaveTextContent('鉴权失败（HTTP 401） · 总耗时 87 ms')
  expect(manage).toHaveBeenLastCalledWith({action:'test_provider',endpoint:provider.endpoint,model:'old',api_key_env:'EXISTING_KEY'})
  expect(screen.getByLabelText('BASE URL')).toHaveValue('https://example.test/v1')
+})
+
+it('masks saved credentials, reveals only on click, and never saves the mask or revealed key',async()=>{
+ const provider={...state,endpoint:'https://saved.test/v1/responses',api_key_configured:true}
+ const manage=vi.fn(async({action})=>action==='reveal_provider_key'?{...provider,api_key:'fixture-saved-key'}:provider)
+ render(<SessionGraphSettings project="p1" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'显示 API KEY'})).toBeEnabled())
+ const key=screen.getByLabelText('API KEY')
+ expect(key).toHaveAttribute('type','password')
+ expect(key).toHaveAttribute('placeholder','••••••••')
+ expect(key).toHaveValue('')
+ expect(manage).toHaveBeenCalledExactlyOnceWith({action:'status',project:'p1'})
+ fireEvent.click(screen.getByRole('button',{name:'显示 API KEY'}))
+ await waitFor(()=>expect(key).toHaveAttribute('type','text'))
+ expect(key).toHaveValue('fixture-saved-key')
+ expect(manage).toHaveBeenLastCalledWith({action:'reveal_provider_key',project:'p1'})
+ fireEvent.click(screen.getByRole('button',{name:'隐藏 API KEY'}))
+ expect(key).toHaveAttribute('type','password')
+ expect(key).toHaveValue('')
+ fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
+ await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'old',endpoint:provider.endpoint,api_key_env:'GRAPH_LLM_API_KEY'}))
+})
+
+it('toggles draft credentials locally and resets masking after a successful save',async()=>{
+ const provider={...state,endpoint:'https://saved.test/v1/responses',api_key_configured:true}
+ const manage=vi.fn().mockResolvedValue(provider)
+ render(<SessionGraphSettings project="p1" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'保存模型配置'})).toBeEnabled())
+ const key=screen.getByLabelText('API KEY')
+ fireEvent.change(key,{target:{value:'fixture-new-key'}})
+ fireEvent.click(screen.getByRole('button',{name:'显示 API KEY'}))
+ expect(key).toHaveValue('fixture-new-key')
+ expect(key).toHaveAttribute('type','text')
+ expect(manage).toHaveBeenCalledTimes(1)
+ fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
+ await waitFor(()=>expect(key).toHaveAttribute('type','password'))
+ expect(key).toHaveValue('')
+ expect(key).toHaveAttribute('placeholder','••••••••')
+ expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'old',endpoint:provider.endpoint,api_key_env:'GRAPH_LLM_API_KEY',api_key:'fixture-new-key'})
+})
+
+it('does not show an old endpoint credential after changing the base URL',async()=>{
+ const provider={...state,endpoint:'https://saved.test/v1/responses',api_key_configured:true}
+ const manage=vi.fn().mockResolvedValue(provider)
+ render(<SessionGraphSettings project="p1" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'显示 API KEY'})).toBeEnabled())
+ fireEvent.change(screen.getByLabelText('BASE URL'),{target:{value:'https://other.test/v1'}})
+ expect(screen.getByLabelText('API KEY')).not.toHaveAttribute('placeholder','••••••••')
+ expect(screen.getByRole('button',{name:'显示 API KEY'})).toBeDisabled()
+ expect(manage).toHaveBeenCalledTimes(1)
+})
+
+it('keeps credentials masked on reveal failure or a changed global configuration',async()=>{
+ const provider={...state,endpoint:'https://saved.test/v1/responses',api_key_configured:true}
+ const manage=vi.fn().mockResolvedValueOnce(provider).mockResolvedValueOnce({...provider,ok:false,message:'读取密钥失败'}).mockResolvedValueOnce({...provider,endpoint:'https://other.test/v1/responses',api_key:'fixture-other-key'})
+ render(<SessionGraphSettings project="p1" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'显示 API KEY'})).toBeEnabled())
+ fireEvent.click(screen.getByRole('button',{name:'显示 API KEY'}))
+ expect(await screen.findByRole('alert')).toHaveTextContent('读取密钥失败')
+ expect(screen.getByLabelText('API KEY')).toHaveAttribute('type','password')
+ fireEvent.click(screen.getByRole('button',{name:'显示 API KEY'}))
+ expect(await screen.findByRole('alert')).toHaveTextContent('模型配置已变更')
+ expect(screen.getByLabelText('API KEY')).toHaveValue('')
 })

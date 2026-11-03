@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import time
+import uuid
 from urllib import error, request
 from urllib.parse import urlsplit
 
@@ -19,22 +20,29 @@ class _NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-def probe_provider(provider: dict, *, state: Path, codex_home: Path, api_key=None):
+def probe_provider(provider: dict, *, state: Path, codex_home: Path, api_key=None, project=""):
     endpoint = validate_endpoint(provider['endpoint'])
     if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()
             or len(api_key) > 2048 or any(ord(c) < 32 for c in api_key)):
         raise ValueError('invalid_api_key')
     started = time.perf_counter()
-    calls, status = 0, None
+    calls, status, active_key = 0, None, ""
+    receipt = dict(id=uuid.uuid4().hex, created_at=time.time(), endpoint=endpoint, model=provider["model"], stage="probe", retry_count=0)
+    from .call_logs import record as record_call
 
-    def result(ok, message):
+    def result(ok, message, code="provider_malformed_response"):
         elapsed = round((time.perf_counter() - started) * 1000)
+        if calls:
+            receipt.update(state="probe_ok" if ok else "probe_failed", elapsed_ms=elapsed, http_status=status)
+            if not ok: receipt["error_code"] = code
+            record_call(receipt, project=project, state=state, secret=active_key)
         return dict(ok=ok, model_calls=calls, message=f'{message} · 总耗时 {elapsed} ms',
                     provider_test=dict(ok=ok, elapsed_ms=elapsed, http_status=status,
                                        model=provider['model']))
 
     def send(key):
-        nonlocal calls, status
+        nonlocal calls, status, active_key
+        active_key = key
         payload = dict(model=provider['model'], input='Reply with OK.', stream=False,
                        store=False, max_output_tokens=16)
         req = request.Request(endpoint, data=json.dumps(payload).encode(), headers={
@@ -44,8 +52,12 @@ def probe_provider(provider: dict, *, state: Path, codex_home: Path, api_key=Non
         if urlsplit(endpoint).hostname in {'localhost', '127.0.0.1', '::1'}:
             handlers.append(request.ProxyHandler({}))
         calls = 1
+        receipt.update(state="started")
+        record_call(receipt, project=project, state=state, secret=key)
         with request.build_opener(*handlers).open(req, timeout=20) as response:
             status = response.status
+            headers = getattr(response, "headers", {}) or {}
+            receipt["provider_request_id"] = headers.get("x-request-id") or headers.get("request-id")
             raw = response.read(64 * 1024 + 1)
         if len(raw) > 64 * 1024:
             return result(False, '测试失败：服务返回的内容过大')
@@ -53,6 +65,8 @@ def probe_provider(provider: dict, *, state: Path, codex_home: Path, api_key=Non
             data = json.loads(raw)
         except (ValueError, UnicodeError):
             return result(False, '测试失败：服务未返回有效的 Responses JSON')
+        if isinstance(data, dict):
+            receipt.update(usage=data.get("usage"), response_model=data.get("model"))
         if not isinstance(data, dict) or data.get('error'):
             return result(False, '测试失败：模型服务返回错误')
         # A bounded reasoning model may consume the tiny budget before emitting text.
@@ -85,16 +99,16 @@ def probe_provider(provider: dict, *, state: Path, codex_home: Path, api_key=Non
             404: '端点或模型不存在，请检查 BASE URL 和 MODEL NAME',
             429: '请求受限或额度不足，请稍后重试',
         }.get(status, '模型服务暂时不可用' if status >= 500 else '模型服务拒绝了测试请求')
-        return result(False, f'测试失败：{message}（HTTP {status}）')
+        return result(False, f'测试失败：{message}（HTTP {status}）', 'provider_http_error')
     except (TimeoutError, socket.timeout):
-        return result(False, '测试超时：20 秒内未完成响应')
+        return result(False, '测试超时：20 秒内未完成响应', 'provider_timeout')
     except error.URLError as exc:
         if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-            return result(False, '测试超时：20 秒内未完成响应')
-        return result(False, '连接失败：请检查 BASE URL、网络和代理')
+            return result(False, '测试超时：20 秒内未完成响应', 'provider_timeout')
+        return result(False, '连接失败：请检查 BASE URL、网络和代理', 'provider_transport')
     except FileNotFoundError:
         return result(False, '测试失败：未找到此端点的有效凭据，请填写 API KEY')
     except (OSError, http.client.HTTPException):
-        return result(False, '连接失败：服务断开或网络不可用')
+        return result(False, '连接失败：服务断开或网络不可用', 'provider_transport')
     except ValueError:
         return result(False, '测试失败：未找到此端点的有效凭据，请填写 API KEY')

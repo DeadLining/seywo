@@ -65,13 +65,13 @@ def read(registry: Path, request: dict):
 
 
 def _read(registry: Path, request: dict, trace):
-    if not isinstance(request, dict) or set(request) - {"operation", "project", "id", "offset", "query", "chat", "materials", "view"}:
+    if not isinstance(request, dict) or set(request) - {"operation", "project", "id", "offset", "query", "chat", "materials", "view", "log_model", "log_status"}:
         raise ValueError("invalid request")
     op = request.get("operation")
-    if op not in {"projects", "work_map", "status", "memory", "evidence", "summary_candidates"}:
+    if op not in {"projects", "work_map", "status", "memory", "evidence", "summary_candidates", "call_logs"}:
         raise ValueError("unsupported operation")
     project, object_id, offset = request.get("project"), request.get("id"), request.get("offset")
-    if op != "projects" and (
+    if (op not in {"projects", "call_logs"} or project is not None) and (
         not isinstance(project, str) or not re.fullmatch("[0-9a-fA-F]{20}", project)
     ):
         raise ValueError("invalid project")
@@ -80,7 +80,7 @@ def _read(registry: Path, request: dict, trace):
     ):
         raise ValueError("invalid id")
     if offset is not None and (
-        op not in {"evidence", "work_map", "memory"} or type(offset) is not int or not 0 <= offset <= 50_000_000
+        op not in {"evidence", "work_map", "memory", "call_logs"} or type(offset) is not int or not 0 <= offset <= 50_000_000
     ):
         raise ValueError("invalid offset")
     view = request.get("view", "all")
@@ -95,6 +95,13 @@ def _read(registry: Path, request: dict, trace):
         validate_query(request.get("materials"))
     elif request.get("materials") is not None:
         raise ValueError("unexpected material query")
+    if op == "call_logs":
+        from .call_logs import read as read_calls
+        return read_calls(project=project, model=request.get("log_model", ""),
+                          status=request.get("log_status", "all"), offset=offset or 0,
+                          state=registry.parent)
+    if request.get("log_model") is not None or request.get("log_status") is not None:
+        raise ValueError("unexpected log filter")
     with trace.phase("catalog"):
         projects = catalog(registry)
     if op == "projects":
