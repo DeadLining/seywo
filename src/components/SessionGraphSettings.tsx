@@ -27,6 +27,8 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(true)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ok:boolean;message:string} | null>(null)
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [confirm, setConfirm] = useState<UninstallAction | null>(null)
@@ -35,27 +37,33 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
   async function run(action: SessionGraphSettingsAction) {
     if (pending.current) return
     pending.current = true
-    setBusy(true); setError(''); setMessage(''); setConfirm(null)
+    setBusy(true); setTesting(action === 'test_provider'); setTestResult(null); setError(''); setMessage(''); setConfirm(null)
     const removing = action === 'uninstall_hooks' || action === 'uninstall_mcp'
-    const globalProvider = action === 'save_model' || action === 'save_provider'
+    const providerRequest = action === 'save_provider' || action === 'test_provider'
+    const globalProvider = action === 'save_model' || providerRequest
     try {
       // Preserve the exact stored endpoint so existing endpoint-bound keys still match.
-      const endpoint = action === 'save_provider'
+      const endpoint = providerRequest
         ? (snapshot?.endpoint && baseUrl.trim() === baseUrlFromEndpoint(snapshot.endpoint)
           ? snapshot.endpoint : endpointFromBaseUrl(baseUrl))
         : undefined
-      const result = await manage({ action, ...(project && !removing && !globalProvider ? { project } : {}), ...(globalProvider ? { model } : {}), ...(action === 'save_provider' ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
+      const result = await manage({ action, ...(project && !removing && !globalProvider ? { project } : {}), ...(globalProvider ? { model } : {}), ...(providerRequest ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
       if (!active.current) return
       if (!result.ok) throw new Error(result.message || '设置操作失败')
+      if (action === 'test_provider') { setTestResult({ok:true,message:result.message}); return }
       setSnapshot(result)
       if (!removing) { setModel(result.model); setBaseUrl(baseUrlFromEndpoint(result.endpoint || '')) }
       setApiKey('')
       setMessage(result.message)
     } catch (e) {
-      if (active.current) setError(e instanceof Error ? e.message : String(e))
+      if (active.current) {
+        const message = e instanceof Error ? e.message : String(e)
+        if (action === 'test_provider') setTestResult({ok:false,message})
+        else setError(message)
+      }
     } finally {
       pending.current = false
-      if (active.current) setBusy(false)
+      if (active.current) { setBusy(false); setTesting(false) }
     }
   }
   useEffect(() => { active.current = true; void run('status'); return () => { active.current = false } }, [])
@@ -75,10 +83,16 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
     </select>
     <button type="button" disabled={busy || !available || !snapshot} onClick={() => void run('save_model')}>保存模型</button>
     </> : <div className="sg-provider-fields">
-      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy} onChange={e=>setBaseUrl(e.target.value)} />
-      <label htmlFor="sg-api-key">API KEY</label><input id="sg-api-key" type="password" autoComplete="off" placeholder="留空保留现有凭据" value={apiKey} disabled={busy} onChange={e=>setApiKey(e.target.value)} />
-      <label htmlFor="sg-model-id">MODEL NAME</label><input id="sg-model-id" value={model} disabled={busy} onChange={e=>setModel(e.target.value)} />
-      <button type="button" disabled={busy || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('save_provider')}>保存模型配置</button>
+      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy} onChange={e=>{setBaseUrl(e.target.value);setTestResult(null)}} />
+      <label htmlFor="sg-api-key">API KEY</label><input id="sg-api-key" type="password" autoComplete="off" placeholder="留空保留现有凭据" value={apiKey} disabled={busy} onChange={e=>{setApiKey(e.target.value);setTestResult(null)}} />
+      <label htmlFor="sg-model-id">MODEL NAME</label><input id="sg-model-id" value={model} disabled={busy} onChange={e=>{setModel(e.target.value);setTestResult(null)}} />
+      <div className="sg-provider-actions">
+        <button type="button" disabled={busy || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('test_provider')}>{testing ? '测试中…' : '测试模型'}</button>
+        <button type="button" disabled={busy || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('save_provider')}>保存模型配置</button>
+      </div>
+      <small className="sg-provider-hint">测试当前填写的配置，不保存；API KEY 留空沿用现有凭据。耗时包含网络与模型响应。</small>
+      {testing && <p className="sg-provider-result" role="status">正在测试模型连通性与延迟…</p>}
+      {testResult && <p className={`sg-provider-result ${testResult.ok ? '' : 'sg-error'}`} role={testResult.ok ? 'status' : 'alert'}>{testResult.message}</p>}
     </div>}
     {!project && <p>请选择已初始化项目，再安装 Hook 或 MCP。</p>}
     <div className="sg-install-row">

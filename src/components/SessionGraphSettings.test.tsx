@@ -165,3 +165,36 @@ it('shares the selected model with judgment and needs no Jev credentials', async
  fireEvent.click(screen.getByRole('button',{name:'停用 v2'}))
  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'disable_graph',project:'p1'}))
 })
+
+it('tests draft configuration without saving or clearing edited credentials, and prevents duplicate requests',async()=>{
+ const provider={...state,endpoint:'https://saved.test/v1/responses',api_key_env:'EXISTING_KEY'}
+ let finish!:(value:SessionGraphSettingsSnapshot)=>void
+ const manage=vi.fn().mockResolvedValueOnce(provider).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve}))
+ render(<SessionGraphSettings project="p1" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'测试模型'})).not.toBeDisabled())
+ fireEvent.change(screen.getByLabelText('BASE URL'),{target:{value:'https://draft.test/v1'}})
+ fireEvent.change(screen.getByLabelText('MODEL NAME'),{target:{value:'draft-model'}})
+ fireEvent.change(screen.getByLabelText('API KEY'),{target:{value:'fixture-draft-key'}})
+ fireEvent.click(screen.getByRole('button',{name:'测试模型'}))
+ expect(manage).toHaveBeenLastCalledWith({action:'test_provider',endpoint:'https://draft.test/v1/responses',model:'draft-model',api_key_env:'EXISTING_KEY',api_key:'fixture-draft-key'})
+ expect(screen.getByRole('button',{name:'测试中…'})).toBeDisabled()
+ expect(screen.getByRole('button',{name:'保存模型配置'})).toBeDisabled()
+ await act(async()=>finish({...provider,message:'模型已连通 · 总耗时 123 ms',model_calls:1}))
+ expect(await screen.findByText('模型已连通 · 总耗时 123 ms')).toBeInTheDocument()
+ expect(screen.getByLabelText('MODEL NAME')).toHaveValue('draft-model')
+ expect(screen.getByLabelText('BASE URL')).toHaveValue('https://draft.test/v1')
+ expect(screen.getByLabelText('API KEY')).toHaveValue('fixture-draft-key')
+ fireEvent.change(screen.getByLabelText('MODEL NAME'),{target:{value:'other-model'}})
+ expect(screen.queryByText('模型已连通 · 总耗时 123 ms')).not.toBeInTheDocument()
+})
+
+it('tests with stored credentials when the key is blank, and shows failure with elapsed time',async()=>{
+ const provider={...state,endpoint:'https://EXAMPLE.test:443/v1/responses',api_key_env:'EXISTING_KEY'}
+ const manage=vi.fn().mockResolvedValueOnce(provider).mockResolvedValueOnce({...provider,ok:false,message:'测试失败：鉴权失败（HTTP 401） · 总耗时 87 ms',model_calls:1})
+ render(<SessionGraphSettings project="" models={[]} manage={manage}/>);
+ await waitFor(()=>expect(screen.getByRole('button',{name:'测试模型'})).not.toBeDisabled())
+ fireEvent.click(screen.getByRole('button',{name:'测试模型'}))
+ expect(await screen.findByRole('alert')).toHaveTextContent('鉴权失败（HTTP 401） · 总耗时 87 ms')
+ expect(manage).toHaveBeenLastCalledWith({action:'test_provider',endpoint:provider.endpoint,model:'old',api_key_env:'EXISTING_KEY'})
+ expect(screen.getByLabelText('BASE URL')).toHaveValue('https://example.test/v1')
+})

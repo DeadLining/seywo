@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SessionGraphPanel } from './SessionGraphPanel'
-import type { SessionGraphRead } from '../sessionGraph'
+import type { SessionGraphRead, SessionGraphManage } from '../sessionGraph'
 
 const projects = { projects: [{ id: 'p1', name: 'jev', root: '/project/jev', state: 'ready' }, { id: 'p2', name: 'Other', root: '/project/other', state: 'ready' }, { id: 'p3', name: 'Empty', root: '/project/empty', state: 'not_initialized' }], default_project: 'p1', model_calls: 0 }
 const graph = { revision: 'rev1', nodes: [{ id: 'm1', type: 'memory', label: '实验结果', content: 'F1 = 0.913', kind: 'finding', status: 'active', chat_id: 'chat1', evidence_status: 'quote_located' }, { id: 'm2', type: 'memory', label: '训练记录', content: 'SG-LONG-314', kind: 'artifact', status: 'completed', chat_id: 'chat1' }], edges: [{ source: 'm1', target: 'm2', kind: 'SUPPORTS', basis: 'semantic_claim' }], chats: [{chat_id:'chat1',count:2}], stats: { memories: 2, total_memories: 2, references: 0, semantic_relations: 1, reference_relations: 0 }, notice: '语义关系仍需核实', model_calls: 0 }
@@ -313,7 +313,7 @@ it('warns when a fully covered projection still uses old tier rules',async()=>{
   const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
   read.mockImplementation((op:string,...args:unknown[])=>op==='work_map'?Promise.resolve({...graph,tiering:{available:true,revision:'tiering-v1',current:false,canonical:3,episode:8,record_only:1,covered:12,total:12,complete:true,revisions:{'tiering-v1':12}}}):original(op,...args))
   render(<SessionGraphPanel read={read}/>);await screen.findByText('实验结果')
-  expect(screen.getByText(/当前层次规则版本不是 v3/)).toBeInTheDocument()
+  expect(screen.getByText(/历史分类规则待更新/)).toBeInTheDocument()
 })
 it('requests chat filtering from the backend and paginates matching history',async()=>{
   const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
@@ -350,13 +350,51 @@ it('keeps the graph flush in a full-height left column and moves controls to the
   expect(canvas).not.toContainElement(screen.getByLabelText('搜索事项'))
 })
 
-it('opens real settings only on demand without triggering registration',async()=>{
+it('opens settings in a modal on demand and restores focus without triggering registration',async()=>{
  const manage=vi.fn().mockResolvedValue({ok:true,model_calls:0,model:'model',hook_registered:true,hook_events:4,hook_enabled:true,mcp_registered:true,message:''})
  render(<SessionGraphPanel read={client()} manage={manage} models={[{value:'model',label:'模型'}]}/>);await screen.findByText('实验结果')
  expect(manage).not.toHaveBeenCalled()
- fireEvent.click(screen.getByRole('button',{name:'设置'}));await screen.findByRole('region',{name:'项目记忆设置'})
+ const trigger=screen.getByRole('button',{name:'设置'})
+ fireEvent.click(trigger)
+ const dialog=screen.getByRole('dialog',{name:'设置'})
+ expect(dialog).toHaveAttribute('open')
+ expect(dialog).toContainElement(await screen.findByRole('region',{name:'项目记忆设置'}))
+ expect(document.querySelector('.sg-info')).not.toContainElement(dialog)
+ expect(screen.getByRole('button',{name:'关闭设置'})).toHaveFocus()
  await waitFor(()=>expect(manage).toHaveBeenCalledWith({action:'status',project:'p1'}))
  expect(manage).toHaveBeenCalledTimes(1)
+ fireEvent.click(within(dialog).getByRole('button',{name:'关闭设置'}))
+ expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+ expect(trigger).toHaveFocus()
+ expect(trigger).toHaveAttribute('aria-expanded','false')
+ fireEvent.click(trigger)
+ const reopened=screen.getByRole('dialog',{name:'设置'})
+ fireEvent(reopened,new Event('cancel',{cancelable:true}))
+ expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+ expect(trigger).toHaveFocus()
+})
+
+it('runs scoped maintenance inside the modal and keeps clicks in its content open',async()=>{
+ const read=client()
+ const before={database_bytes:1048576,wal_bytes:0,reclaimable_bytes:0,logical_bytes:1048576}
+ const manage=vi.fn(async({action})=>({ok:true,model_calls:0,maintenance:action==='storage_preview'?{before}:{before,after:before,removed:2}})) as unknown as ReturnType<typeof vi.fn>&SessionGraphManage
+ render(<SessionGraphPanel read={read} manage={manage}/>);await screen.findByText('实验结果')
+ const trigger=screen.getByRole('button',{name:'存储维护'})
+ fireEvent.click(trigger)
+ const dialog=screen.getByRole('dialog',{name:'存储维护'})
+ expect(document.querySelector('.sg-info')).not.toContainElement(dialog)
+ await within(dialog).findByText('1.0 MB')
+ expect(manage).toHaveBeenCalledExactlyOnceWith({action:'storage_preview',project:'p1'})
+ fireEvent.click(within(dialog).getByText('无损压缩'))
+ expect(dialog).toBeInTheDocument()
+ const readsBefore=read.mock.calls.filter(([op])=>op==='projects').length
+ fireEvent.click(within(dialog).getByRole('button',{name:'清理已恢复告警'}))
+ expect(await within(dialog).findByRole('status')).toHaveTextContent('已清理 2 条')
+ expect(manage).toHaveBeenLastCalledWith({action:'clean_notices',project:'p1'})
+ await waitFor(()=>expect(read.mock.calls.filter(([op])=>op==='projects').length).toBeGreaterThan(readsBefore))
+ fireEvent.click(dialog)
+ expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+ expect(trigger).toHaveFocus()
 })
 
 
@@ -550,4 +588,16 @@ it('keeps an ongoing run neutral after an earlier successful batch',async()=>{
   await screen.findByText('实验结果');
   expect(document.querySelector('.sg-run-row .sg-dot-neutral')).toBeTruthy()
   expect(document.querySelector('.sg-run-row .sg-dot-success')).toBeNull()
+})
+
+it('shows partial historical classification as normal background progress',async()=>{
+  const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
+  read.mockImplementation((op:string,...args:unknown[])=>op==='work_map'?Promise.resolve({...graph,tiering:{available:true,revision:'tiering-v3',current:false,canonical:44,episode:19,record_only:0,covered:63,total:205,complete:false}}):original(op,...args))
+  const manage=vi.fn()
+  render(<SessionGraphPanel read={read} manage={manage}/>);await screen.findByText('实验结果')
+  const progress=screen.getByText(/历史分类进度/)
+  expect(progress).toHaveTextContent('63 / 205')
+  expect(progress).toHaveTextContent('后台空闲时分批补齐')
+  expect(progress).not.toHaveClass('sg-error')
+  expect(manage).not.toHaveBeenCalled()
 })

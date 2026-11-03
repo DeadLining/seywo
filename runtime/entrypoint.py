@@ -67,6 +67,11 @@ def main(args):
         sys.argv = ["sessiongraph.deletion_observer", *args[1:]]
         runpy.run_module("sessiongraph.deletion_observer", run_name="__main__")
         return 0
+    if args and args[0] == "backfill-tiers":
+        from sessiongraph.tier_backfill import enqueue_registered, run
+        enqueue_registered(STATE)
+        print(json.dumps(run(STATE)))
+        return 0
     if args and args[0] == "continue-pending":
         from sessiongraph.continuation import start
         start()

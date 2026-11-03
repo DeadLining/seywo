@@ -108,7 +108,9 @@
       "../runtime/scripts/sg_hook_extract.sh": "sessiongraph/scripts/sg_hook_extract.sh",
       "../runtime/sessiongraph/tiering.py": "sessiongraph/sessiongraph/tiering.py",
       "../runtime/sessiongraph/conclusion.py": "sessiongraph/sessiongraph/conclusion.py",
-      "../runtime/sessiongraph/evidence_paths.py": "sessiongraph/sessiongraph/evidence_paths.py"
+      "../runtime/sessiongraph/evidence_paths.py": "sessiongraph/sessiongraph/evidence_paths.py",
+      "../runtime/sessiongraph/provider_probe.py": "sessiongraph/sessiongraph/provider_probe.py",
+      "../runtime/sessiongraph/tier_backfill.py": "sessiongraph/sessiongraph/tier_backfill.py"
     }
   }
 }

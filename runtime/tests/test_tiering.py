@@ -527,3 +527,9 @@ def test_explicit_remember_projects_its_tier_in_the_same_write(tmp_path):
              if mid in {n['id'] for n in work_map(store, view=view)['nodes']}]
     assert len(views) == 1
     assert work_map(store)['tiering']['complete'] is True
+
+
+def test_empty_projection_needs_no_backfill(env):
+    store,_=env
+    result=tiering.summary(store)
+    assert result['total']==0 and result['complete'] and result['current']

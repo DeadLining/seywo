@@ -6,7 +6,7 @@ use std::{
     process::Stdio,
     time::Duration,
 };
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -167,6 +167,7 @@ pub(crate) enum SettingsAction {
     Status,
     SaveModel,
     SaveProvider,
+    TestProvider,
     EnableGraph,
     DisableGraph,
     SaveJev,
@@ -201,9 +202,7 @@ fn validate_settings(request: &SettingsRequest) -> Result<(), String> {
         .is_some_and(|p| p.len() != 20 || !p.bytes().all(|c| c.is_ascii_hexdigit()))
         || (matches!(
             request.action,
-            SettingsAction::SaveModel
-                | SettingsAction::SaveProvider
-                | SettingsAction::InstallHooks
+            SettingsAction::InstallHooks
                 | SettingsAction::InstallMcp
                 | SettingsAction::EnableGraph
                 | SettingsAction::DisableGraph
@@ -216,7 +215,7 @@ fn validate_settings(request: &SettingsRequest) -> Result<(), String> {
     {
         return Err("请选择已初始化的项目".into());
     }
-    if matches!(request.action, SettingsAction::SaveModel | SettingsAction::SaveProvider) {
+    if matches!(request.action, SettingsAction::SaveModel | SettingsAction::SaveProvider | SettingsAction::TestProvider) {
         if !request.model.as_ref().is_some_and(|m| {
             !m.trim().is_empty() && m.chars().count() <= 256 && !m.chars().any(char::is_control)
         }) {
@@ -225,18 +224,18 @@ fn validate_settings(request: &SettingsRequest) -> Result<(), String> {
     } else if request.model.is_some() {
         return Err("此操作不接受模型字段".into());
     }
-    if matches!(request.action, SettingsAction::SaveProvider) {
+    if matches!(request.action, SettingsAction::SaveProvider | SettingsAction::TestProvider) {
         if !request.endpoint.as_ref().is_some_and(|e| !e.is_empty() && e.len() <= 2048 && !e.chars().any(char::is_control)) {
             return Err("请输入有效的 Responses 端点".into());
         }
     } else if request.endpoint.is_some() || request.api_key_env.is_some() {
         return Err("此操作不接受端点字段".into());
     }
-    if matches!(request.action, SettingsAction::SaveJev) || (matches!(request.action, SettingsAction::SaveProvider) && request.api_key.is_some()) {
+    if matches!(request.action, SettingsAction::SaveJev) || (matches!(request.action, SettingsAction::SaveProvider | SettingsAction::TestProvider) && request.api_key.is_some()) {
         if !request.api_key.as_ref().is_some_and(|key| {
             !key.trim().is_empty() && key.len() <= 2048 && !key.chars().any(char::is_control)
         }) {
-            return Err("请输入有效的 Jev API Key".into());
+            return Err("请输入有效的 API KEY".into());
         }
     } else if request.api_key.is_some() {
         return Err("此操作不接受凭据字段".into());
@@ -272,11 +271,13 @@ pub(crate) async fn manage_session_graph(
     };
     let compacting = matches!(request.action, SettingsAction::StorageCompact);
     let timeout = if compacting { 300 } else { 30 };
-    let mut result = read_process(
+    let testing_provider = matches!(request.action, SettingsAction::TestProvider);
+    let mut result = read_process_with_probe(
         local_command_mode(&source, &runtime_home()?, "native-settings")?,
         serde_json::to_value(request).map_err(|_| "无效设置请求")?,
         Duration::from_secs(timeout),
         64 * 1024,
+        testing_provider,
     )
     .await.map_err(|error| settings_process_error(compacting, error))?;
     if saving_jev {
@@ -325,11 +326,35 @@ fn valid_response(data: &Value) -> bool {
         && data.get("graph_compaction").is_none()
 }
 
+fn valid_probe_response(data: &Value) -> bool {
+    valid_response(data) || (data.is_object() && data.get("error").is_none()
+        && data.get("graph_compaction").is_none()
+        && data.get("model_calls").and_then(Value::as_u64) == Some(1)
+        && data.get("ok").and_then(Value::as_bool).is_some()
+        && data.get("provider_test").is_some_and(|probe| {
+            probe.get("ok") == data.get("ok")
+                && probe.get("elapsed_ms").and_then(Value::as_u64).is_some()
+                && probe.get("model").and_then(Value::as_str).is_some()
+        }))
+}
+
 async fn read_process(
+    command: Command,
+    payload: Value,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<Value, String> {
+    read_process_with_probe(command, payload, timeout, max_bytes, false).await
+}
+
+// Only the explicit settings test action may make a single model call.
+// Native reads retain the unconditional model_calls == 0 contract.
+async fn read_process_with_probe(
     mut command: Command,
     payload: Value,
     timeout: Duration,
     max_bytes: usize,
+    allow_probe: bool,
 ) -> Result<Value, String> {
     command
         .stdin(Stdio::piped())
@@ -377,7 +402,7 @@ async fn read_process(
         }
         let data: Value =
             serde_json::from_slice(&body).map_err(|_| "SessionGraph 返回的 JSON 无效")?;
-        if !valid_response(&data) {
+        if !(if allow_probe { valid_probe_response(&data) } else { valid_response(&data) }) {
             return Err("SessionGraph 响应不符合本地接口契约".into());
         }
         Ok(data)
@@ -530,6 +555,8 @@ mod tests {
             json!({"action":"uninstall_hooks"}),
             json!({"action":"uninstall_mcp"}),
             json!({"action":"save_model","project":PROJECT,"model":"new/model"}),
+            json!({"action":"save_provider","model":"model","endpoint":"https://provider.test/v1/responses"}),
+            json!({"action":"test_provider","model":"model","endpoint":"https://provider.test/v1/responses","api_key":"fixture-key"}),
             json!({"action":"install_hooks","project":PROJECT}),
             json!({"action":"install_mcp","project":PROJECT}),
             json!({"action":"enable_graph","project":PROJECT}),
@@ -542,6 +569,18 @@ mod tests {
         ] {
             assert!(validate_settings(&serde_json::from_value(payload).unwrap()).is_ok());
         }
+    }
+
+    #[test]
+    fn only_explicit_probe_accepts_one_model_call() {
+        let result = json!({"ok":true,"model_calls":1,
+            "provider_test":{"ok":true,"elapsed_ms":123,"model":"fixture"}});
+        assert!(valid_probe_response(&result));
+        assert!(!valid_response(&result));
+        let mut too_many = result.clone();
+        too_many["model_calls"] = json!(2);
+        assert!(!valid_probe_response(&too_many));
+        assert!(!valid_probe_response(&json!({"ok":true,"model_calls":1})));
     }
 
     #[test]
@@ -694,9 +733,6 @@ mod tests {
 /// Restore the already-authorized durable queue once at app startup. No polling.
 pub(crate) async fn resume_session_graph(app: tauri::AppHandle) {
     let Ok(home) = runtime_home() else { return };
-    if !home.join("continuations/queue.json").is_file() {
-        return;
-    }
     let source = if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../runtime")
     } else {
@@ -705,12 +741,22 @@ pub(crate) async fn resume_session_graph(app: tauri::AppHandle) {
         };
         resources.join("sessiongraph")
     };
-    if let Ok(mut command) = local_command_mode(&source, &home, "continue-pending") {
-        let _ = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
+    if home.join("continuations/queue.json").is_file() {
+        if let Ok(mut command) = local_command_mode(&source, &home, "continue-pending") {
+            let _ = command.stdin(Stdio::null()).stdout(Stdio::null())
+                .stderr(Stdio::null()).status().await;
+        }
+    }
+    if let Ok(mut command) = local_command_mode(&source, &home, "backfill-tiers") {
+        if let Ok(output) = command.stdin(Stdio::null()).stderr(Stdio::null()).output().await {
+            if output.status.success() {
+                if let Ok(result) = serde_json::from_slice::<Value>(&output.stdout) {
+                    if result.get("model_calls").and_then(Value::as_u64) == Some(0)
+                        && result.get("processed").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                        let _ = app.emit("sessiongraph-tiers-updated", ());
+                    }
+                }
+            }
+        }
     }
 }

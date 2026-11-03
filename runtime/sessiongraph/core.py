@@ -189,16 +189,22 @@ def normalize(payload: dict):
 
 
 class Store:
-    def __init__(self, config: dict, readonly: bool = False):
+    def __init__(self, config: dict, readonly: bool = False, *, projection_only: bool = False):
+        if readonly and projection_only:
+            raise ValueError("projection writer cannot be readonly")
+        initialize = not readonly and not projection_only
         self.config = config
         self.readonly = readonly
+        self.projection_only = projection_only
         path = Path(config["database"]).expanduser().resolve()
-        if readonly:
+        if readonly or projection_only:
             if not path.is_file():
                 raise ValueError(f"database does not exist: {path}")
             # MCP/UI callers must not create schema, switch journal mode, or backfill metadata.
-            # SQLite's URI read-only mode also prevents accidental WAL/metadata writes.
-            self.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1.5)
+            # Projection writers open an existing DB and skip all general migrations.
+            # Read-only mode still prevents accidental WAL/metadata writes.
+            mode = "ro" if readonly else "rw"
+            self.db = sqlite3.connect(f"{path.as_uri()}?mode={mode}", uri=True, timeout=1.5)
         else:
             path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             # Create private database before SQLite can create accompanying files.
@@ -211,7 +217,7 @@ class Store:
         self.db.execute("PRAGMA foreign_keys=ON")
         if readonly:
             self.db.execute("PRAGMA query_only=ON")
-        if not readonly:
+        if initialize:
             self.db.execute("PRAGMA journal_mode=WAL")
             # Add columns before SCHEMA runs: SCHEMA declares an index on
             # work_memory.project_id, which fails on a pre-existing database
@@ -225,7 +231,7 @@ class Store:
                     continue  # Source-backed storage; old runtimes must fail closed.
                 if prior and prior[0] != value:
                     raise ValueError(f"database {key} does not match configuration")
-            if not readonly:
+            if initialize:
                 with self.db:
                     self.db.executemany(
                         "INSERT OR IGNORE INTO metadata VALUES (?,?)",
@@ -237,7 +243,7 @@ class Store:
                         "UPDATE work_memory SET project_id=? WHERE project_id IS NULL",
                         (config["project_id"],),
                     )
-            if not readonly:
+            if initialize:
                 from .storage import setup as storage_setup
                 storage_setup(self)
                 from .read_projection import setup as projection_setup
@@ -282,7 +288,7 @@ class Store:
 
     def close(self):
         try:
-            if not self.readonly and not self.db.in_transaction:
+            if not self.readonly and not self.projection_only and not self.db.in_transaction:
                 from .read_projection import flush
                 flush(self)
         finally:

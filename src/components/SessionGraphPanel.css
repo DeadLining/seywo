@@ -177,3 +177,17 @@
 .sg-install-row>span{font-size:10px;line-height:1.5;color:#78856b;margin-bottom:8px}
 .sg-settings-actions{gap:6px}.sg-settings-card .sg-uninstall-confirm{padding:10px;border:1px solid #e0d4be;border-radius:6px;background:#fbf8f1}
 .sg-settings-card .sg-uninstall-confirm p{margin:0 0 8px;color:#857457}
+
+/* Top-layer dialogs leave the graph layout intact, with only the content scrolling. */
+.sg-panel .sg-dialog{box-sizing:border-box;width:min(680px,calc(100vw - 40px));max-width:none;max-height:calc(100dvh - 40px);padding:0;border:1px solid #dce5d2;border-radius:14px;background:#fafcf8;color:#405234;box-shadow:0 20px 80px #19281033;overflow:hidden}
+.sg-panel .sg-dialog[open]{display:flex;flex-direction:column}
+.sg-dialog::backdrop{background:#15201466;backdrop-filter:blur(3px)}
+.sg-dialog-heading{display:flex;flex-shrink:0;align-items:center;justify-content:space-between;gap:16px;padding:18px 22px;border-bottom:1px solid #e0e7d9}
+.sg-dialog-heading h2{margin:0;font-size:17px;font-weight:600}
+.sg-panel .sg-dialog-heading button{display:grid;place-items:center;min-height:30px;width:30px;height:30px;padding:0;border:1px solid #dce5d2;border-radius:7px;background:#fff;color:#68785b}
+.sg-panel .sg-dialog-heading button:hover{background:#edf3e5}
+.sg-panel .sg-dialog-heading button:focus-visible{outline:2px solid #91a77a;outline-offset:2px}
+.sg-dialog-content{min-height:0;overflow:auto;overscroll-behavior:contain;padding:20px 22px}
+.sg-panel .sg-dialog-content>:is(.sg-settings-card,.sg-maintenance){margin:0;padding:0;border:0;border-radius:0;background:transparent}
+.sg-dialog .sg-settings-heading h3{display:none}
+@media(max-width:600px){.sg-panel .sg-dialog{width:calc(100vw - 24px);max-height:calc(100dvh - 24px)}.sg-dialog-heading{padding:14px 16px}.sg-dialog-content{padding:16px}}

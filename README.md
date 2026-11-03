@@ -26,4 +26,4 @@ The installer preserves the previous app bundle and registration backups. Restor
 
 图谱默认展示分为**知识层 / 过程记录 / 全部**。知识层只展示具有明确长期身份的事项；过程记录保存执行、活动及尚未形成稳定身份的历史事项。三者都是同一批 `work_memory` 与原文证据的只读投影，切换层次不会删除、改写或隐藏原文；搜索、`session_recall`、`session_search`、`session_expand` 仍覆盖完整历史。`sg_node_tiers` 只是影子映射，不替代修订账本，也不合并不同值或冲突断言。
 
-项目可显式运行 `tier-graph` 审计或分批回填；默认只读，`--apply` 仅写影子层次表。新发布对象在原有写入事务中同步更新层次，不增加模型调用或正文副本。
+历史缺失或旧规则分层现由 App 启动及现有 Hook 自动唤醒，在后台空闲时每批最多 100 条补齐，完成即退出；中断可续跑，不调用模型、不重抽 chat，也不删除节点或原文。已完成项目在后续 Hook 下不会写队列或启动分类进程。新发布对象仍在原有写入事务中同步分层；显式 `tier-graph` 审计入口保留。运行约束与回退见 `docs/tier-backfill.md`。

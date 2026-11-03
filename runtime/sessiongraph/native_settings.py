@@ -1,7 +1,8 @@
 """Explicit app-wide provider settings and independent global registration.
 
 Settings snapshots do not open a database. All native settings and storage
-maintenance actions remain model-free; graph compaction actions are retired.
+maintenance actions remain model-free. Only explicit test_provider calls a model.
+Graph compaction actions are retired.
 """
 
 from __future__ import annotations
@@ -113,6 +114,7 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         "clear_tasks",
         "save_model",
         "save_provider",
+        "test_provider",
         "enable_graph",
         "disable_graph",
         "install_hooks",
@@ -121,15 +123,29 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         "uninstall_mcp",
     }:
         raise ValueError("invalid_action")
-    if action not in {"save_model", "save_provider"} and request.get("model") is not None:
+    if action not in {"save_model", "save_provider", "test_provider"} and request.get("model") is not None:
         raise ValueError("unexpected_model")
-    if action != "save_provider" and any(request.get(k) is not None for k in ("endpoint", "api_key_env", "api_key")):
+    if action not in {"save_provider", "test_provider"} and any(request.get(k) is not None for k in ("endpoint", "api_key_env", "api_key")):
         raise ValueError("unexpected_provider")
     removing = action in {"uninstall_hooks", "uninstall_mcp"}
     config = None if removing else _project(state, request.get("project"))
     if action == "status":
         return _snapshot(state, codex_home, config)
-    if config is None and not removing and action not in {"save_model", "save_provider"}:
+    if action == "test_provider":
+        from .provider_probe import probe_provider
+        model = request.get("model")
+        if (not isinstance(model, str) or not model.strip() or len(model) > 256
+                or any(unicodedata.category(c) == "Cc" for c in model)):
+            raise ValueError("invalid_model")
+        key_env = request.get("api_key_env", "GRAPH_LLM_API_KEY")
+        if not isinstance(key_env, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key_env):
+            raise ValueError("invalid_key_env")
+        snapshot = _snapshot(state, codex_home, config)
+        probe = probe_provider(dict(protocol="responses", endpoint=request.get("endpoint"),
+                                    model=model.strip(), api_key_env=key_env),
+                               state=state, codex_home=codex_home, api_key=request.get("api_key"))
+        return dict(snapshot, **probe)
+    if config is None and not removing and action not in {"save_model", "save_provider", "test_provider"}:
         raise ValueError("select_initialized_project")
     if action in {"storage_preview", "storage_compact", "clean_notices", "clear_tasks"}:
         from .maintenance import run

@@ -219,6 +219,13 @@ def main() -> int:
     if (config.parent / "disabled").exists() or load_config(config).get("hook", {}).get("enabled") is False:
         return 0
 
+    if event in {'SessionStart', 'PostCompact', 'Stop', 'SessionEnd'}:
+        from sessiongraph.tier_backfill import start as start_tier_backfill
+        try:
+            start_tier_backfill(config)
+        except (OSError, ValueError):
+            pass  # Tier migration admission cannot suppress restoration/extraction.
+
     if event != 'SessionEnd':
         from sessiongraph.deletion_observer import start
         try:

@@ -1272,7 +1272,7 @@ def summary(store):
     covered = sum(revisions.values())
     total = store.db.execute('SELECT count(*) FROM work_memory WHERE project_id=?', (project,)).fetchone()[0]
     complete = covered == total
-    current = complete and revisions == {VERSION: total}
+    current = complete and (total == 0 or revisions == {VERSION: total})
     if current:
         revision = VERSION
     elif len(revisions) == 1:

@@ -14,7 +14,7 @@ from .provider_credentials import load_key, runtime_state, validate_endpoint
 
 
 @contextmanager
-def gateway_credentials(config: dict, codex_config: Path):
+def gateway_credentials(config: dict, codex_config: Path, *, state: Path | None = None):
     provider = config["provider"]
     endpoint = provider.get("endpoint", "")
     url = urlsplit(endpoint)
@@ -25,7 +25,7 @@ def gateway_credentials(config: dict, codex_config: Path):
         return
     if provider.get("protocol") == "responses":
         validate_endpoint(endpoint)
-        saved = load_key(runtime_state(), endpoint)
+        saved = load_key(state if state is not None else runtime_state(), endpoint)
         if saved:
             os.environ[name] = saved
             try:
