@@ -43,12 +43,13 @@ def source_checks(db,rows):
     ids=list({r['entry_id'] for r in rows}); originals={}
     for start in range(0,len(ids),400):
         chunk=ids[start:start+400]
-        originals.update(db.execute('SELECT id,text FROM entries WHERE id IN ('+','.join('?' for _ in chunk)+')',chunk))
+        text = 'sg_source_text(id,text)' if exists(db, 'sg_external_entries') else 'text'
+        originals.update(db.execute('SELECT id,'+text+' FROM entries WHERE id IN ('+','.join('?' for _ in chunk)+')',chunk))
     checked={}; result={}
     for row in rows:
         key=(row['entry_id'],row['quote'])
         if key not in checked:
-            checked[key]=bool(row['quote'] and row['quote'] in originals.get(row['entry_id'],''))
+            checked[key]=bool(row['quote'] and row['quote'] in (originals.get(row['entry_id']) or ''))
         result[row['id']]=checked[key]
     return result
 

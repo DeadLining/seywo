@@ -211,6 +211,53 @@ def test_transport_failure_no_json_or_jev_fallback(cfg, monkeypatch):
     assert client.calls == 1
 
 
+@pytest.mark.parametrize('status,message,expected', [
+    (502, 'GtCoding HTTP 200 returned no assistant text, reasoning, or tool call (input_tokens=2411, output_tokens=1)', 'single_token_budget_incompatible'),
+    (502, 'GtCoding HTTP 200 returned no assistant text, reasoning, or tool call (input_tokens=2411, output_tokens=32)', 'provider_http_502'),
+    (502, 'upstream temporarily unavailable', 'provider_http_502'),
+    (503, 'GtCoding HTTP 200 returned no assistant text, reasoning, or tool call (input_tokens=2411, output_tokens=1)', 'provider_http_503'),
+])
+def test_exact_gateway_budget_exhaustion_is_not_a_transient_transport(cfg, monkeypatch, status, message, expected):
+    def fail(*args):
+        exc = HTTPError('http://localhost', status, 'gateway error', {}, None)
+        exc.provider_error_body = {'error': {'message': message}}
+        raise exc
+    monkeypatch.setattr('sessiongraph.single_token_judge.read_response', fail)
+    client = SingleTokenJudge(cfg)
+    with pytest.raises(Failure) as err:
+        client.classify(client.prepare({}, QUESTION))
+    assert err.value.code == expected
+    assert err.value.retryable is (expected != 'single_token_budget_incompatible')
+    assert client.calls == 1
+
+
+def test_real_loopback_empty_one_token_error_fails_closed(cfg):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            self.rfile.read(int(self.headers['Content-Length']))
+            payload = json.dumps({'error': {'message': 'Fixture HTTP 200 returned no assistant text, reasoning, or tool call (input_tokens=100, output_tokens=1)'}}).encode()
+            self.send_response(502)
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    cfg['provider']['endpoint'] = f'http://127.0.0.1:{server.server_port}/v1/responses'
+    try:
+        client = SingleTokenJudge(cfg)
+        with pytest.raises(Failure) as err:
+            client.classify(client.prepare({}, QUESTION))
+        assert err.value.code == 'single_token_budget_incompatible'
+        assert not err.value.retryable and client.calls == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_real_loopback_transport_and_audit(cfg):
     seen = []
     class Handler(BaseHTTPRequestHandler):

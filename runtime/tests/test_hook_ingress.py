@@ -115,7 +115,8 @@ def test_ordinary_turn_imports_real_evidence_then_repeat_dispatches_nothing(conf
     assert len(calls) == 2
     store = Store(config, readonly=True)
     try:
-        assert store.db.execute('SELECT text FROM entries').fetchone()[0] == 'Threshold <= 0.10m, not yet accepted.'
+        from sessiongraph.source_text import hydrate
+        assert hydrate(store, store.db.execute('SELECT * FROM entries').fetchone())['text'] == 'Threshold <= 0.10m, not yet accepted.'
         assert store.db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
     finally:
         store.close()
@@ -193,6 +194,65 @@ def test_import_failure_keeps_pending_input_and_duplicate_does_not_reset_backoff
     notify(configured, now=3)
     assert queued(configured) == item
     assert not c.process_one(c.root(config), now=3, execute=broken)
+
+
+def test_changed_source_is_persisted_without_bypassing_retry_deadline(configured):
+    path, config, source = configured
+    notify(configured, now=1)
+    folder = c.root(config)
+    queue = c.read(folder / 'queue.json', {})
+    identity = c.key(path, 'chat')
+    queue[identity].update(state='retry_wait', due=160, error_code='provider_http_502',
+                           failures=2, target=42)
+    c.write(folder / 'queue.json', queue)
+    before = copy.deepcopy(queued(configured))
+    tail(source)
+    notify(configured, now=100)
+    item = queued(configured)
+    assert item['state'] == 'retry_wait' and item['due'] == 160
+    assert item['error_code'] == 'provider_http_502' and item['failures'] == 2
+    assert item['target'] == 42 and item['ingress'] != before['ingress']
+    assert len(ingress.pending(item)) == 1
+    assert not c.process_one(folder, now=159, execute=lambda *_: pytest.fail('early retry'))
+
+
+def test_inflight_new_input_cannot_override_durable_retry_result(configured):
+    path, config, source = configured
+    notify(configured, now=1)
+    prior = queued(configured)
+    tail(source)
+    notify(configured, now=2)
+    queue = c.read(c.root(config) / 'queue.json', {})
+    identity = c.key(path, 'chat')
+    queue[identity].update(state='retry_wait', due=160, error_code='provider_http_502')
+    ingress.reconcile(queue, identity, queued(configured),
+        {'state': 'succeeded', 'run_id': 'done', 'updated_at': 100}, prior, input_imported=True)
+    assert queue[identity]['state'] == 'retry_wait' and queue[identity]['due'] == 160
+    assert len(ingress.pending(queue[identity])) == 1
+
+
+def test_incompatible_provider_stays_blocked_until_identity_changes(configured):
+    path, config, source = configured
+    notify(configured, now=1)
+    c.record(path, {'run_id': 'incompatible', 'chat_id': 'chat', 'event': 'AutoContinue',
+        'state': 'failed', 'updated_at': 2, 'target_rowid': 42,
+        'error_code': 'single_token_budget_incompatible', 'pending_retry_count': 1,
+        'graph_v2': {'durable_stages': True, 'source_remaining': True, 'runnable_remaining': True}},
+        launch=False, now=2)
+    original = queued(configured)
+    assert original['state'] == 'blocked' and original['provider_identity'] == c.provider_identity(config)
+    tail(source)
+    notify(configured, now=3)
+    item = queued(configured)
+    assert item['state'] == 'blocked' and item['target'] == 42
+    assert item['failures'] == original['failures'] and len(ingress.pending(item)) == 1
+    assert not c.process_one(c.root(config), now=1000, execute=lambda *_: pytest.fail('incompatible retry'))
+    raw = json.loads(path.read_text())
+    raw['provider']['model'] = 'new-explicitly-selected-model'
+    path.write_text(json.dumps(raw))
+    tail(source)
+    notify(configured, now=4)
+    assert queued(configured)['state'] == 'ready' and queued(configured)['target'] == 42
 
 
 def test_exception_preserves_notification_that_arrived_after_claim(configured, monkeypatch):

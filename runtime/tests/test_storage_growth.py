@@ -2,10 +2,10 @@
 import json
 import sqlite3
 import pytest
-from sessiongraph import storage, source_locator
+from sessiongraph import storage, source_locator, source_text
 from sessiongraph.auto_update import revision
 from sessiongraph.work_map import work_map
-from test_input_framework import fixture, msg
+from test_input_framework import fixture, legacy_fixture, msg
 from test_work_map import setup_map
 
 
@@ -20,11 +20,12 @@ def test_new_import_keeps_locators_without_raw_event_copy(tmp_path):
     s,p=fixture(tmp_path,[msg('原文证据🙂'),msg('内部推理',channel='analysis')])
     assert s.db.execute('SELECT count(*) FROM raw_events').fetchone()[0]==0
     for row in s.db.execute('SELECT id,text FROM entries'):
+        row = source_text.hydrate(s, row)
         assert source_locator.read_original(s,row['id'])==dict(status='verified',entry_id=row['id'],text=row['text'],line=s.db.execute('SELECT line FROM entries WHERE id=?',(row['id'],)).fetchone()[0])
 
 
 def test_verified_migration_backfills_all_locators_and_is_idempotent(tmp_path):
-    s,p=fixture(tmp_path,[msg('中文🙂 精确证据')]);legacy(s,p)
+    s,p=legacy_fixture(tmp_path,[msg('中文🙂 精确证据')]);legacy(s,p)
     before=[tuple(r) for r in s.db.execute('SELECT * FROM entries')]
     frontier=[tuple(r) for r in s.db.execute('SELECT * FROM sessions')]
     result=storage.migrate_sources(s)
@@ -37,7 +38,7 @@ def test_verified_migration_backfills_all_locators_and_is_idempotent(tmp_path):
 
 @pytest.mark.parametrize('change',['missing','changed'])
 def test_migration_retains_unverifiable_raw_data(tmp_path,change):
-    s,p=fixture(tmp_path,[msg('original')]);legacy(s,p)
+    s,p=legacy_fixture(tmp_path,[msg('original')]);legacy(s,p)
     before=[tuple(r) for r in s.db.execute('SELECT * FROM raw_events')]
     if change=='missing':p.unlink()
     else:p.write_text(p.read_text().replace('original','modified'))

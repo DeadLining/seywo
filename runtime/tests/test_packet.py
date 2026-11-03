@@ -1,3 +1,4 @@
+from sessiongraph.source_text import hydrate
 import json
 import socket
 
@@ -52,7 +53,7 @@ def test_long_unicode_escaped_source(tmp_path):
     store.ingest(
         write_session(tmp_path / "unicode.jsonl", tmp_path, "unicode", [("assistant", text)])
     )
-    row = dict(store.db.execute("SELECT * FROM entries").fetchone())
+    row = hydrate(store, store.db.execute("SELECT * FROM entries").fetchone())
     for budget in [512, 1024, 2048, 4000]:
         packet = store.packet("marker", max_bytes=budget)
         assert len(encoded(packet)) <= budget

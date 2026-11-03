@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import json
 import os
 import time
@@ -143,14 +145,14 @@ def run_one(store: Store, extractor) -> dict:
         )
     try:
         current = [
-            dict(r)
+            hydrate(store, r)
             for r in db.execute(
                 "SELECT * FROM entries WHERE session_id=? AND line BETWEEN ? AND ? ORDER BY line",
                 (job["session_id"], job["start_line"], job["end_line"]),
             )
         ]
         prior = [
-            dict(r)
+            hydrate(store, r)
             for r in db.execute(
                 "SELECT * FROM entries WHERE session_id=? AND line<? ORDER BY line DESC LIMIT ?",
                 (job["session_id"], job["start_line"], cfg["extraction"]["context_entries"]),
@@ -208,9 +210,8 @@ def run_one(store: Store, extractor) -> dict:
                     ),
                 )
                 index_text = " ".join([record["content"], record["scope"], *record["aliases"]])
-                db.execute(
-                    "INSERT INTO docs VALUES (?,?,?)", (rid, "record", " ".join(tokens(index_text)))
-                )
+                from .source_text import write_doc
+                write_doc(store, rid, 'record', ' '.join(tokens(index_text)))
                 save_evidence(rid, record["evidence"])
             for i, edge in enumerate(output["relations"]):
                 eid = "g_" + digest(job["id"] + ":" + str(i))[:32]
@@ -266,15 +267,19 @@ def _prepare_evidence_request(batch, policy):
 
 def _resolve_evidence_response(output, anchors, entry_ids=None, *, atomic_refs=False):
     if anchors is not None:
-        from .graph_contract import resolve_evidence_spans
+        from .graph_contract import decode_evidence_candidates
         try:
-            return resolve_evidence_spans(output, anchors, entry_ids=entry_ids, atomic_refs=atomic_refs)
+            return decode_evidence_candidates(output, anchors, entry_ids=entry_ids, atomic_refs=atomic_refs)
         except ValueError as exc:
             if str(exc).startswith("graph_schema:"):
                 raise ProviderError(str(exc), "graph_validation") from None
-            raise ProviderError("graph_evidence:unknown_source_anchor", "provider_evidence_reference") from None
+            reason = str(exc)
+            if reason not in {"graph_evidence:unknown_source_anchor", "graph_evidence:invalid_atomic_source_ref",
+                              "graph_evidence:invalid_reference_shape", "graph_evidence:invalid_output_shape"}:
+                reason = "graph_evidence:invalid_reference_shape"
+            raise ProviderError(reason, "provider_evidence_reference") from None
         except (AttributeError, TypeError):
-            raise ProviderError("graph_evidence:unknown_source_anchor", "provider_evidence_reference") from None
+            raise ProviderError("graph_evidence:invalid_reference_shape", "provider_evidence_reference") from None
     return output
 
 

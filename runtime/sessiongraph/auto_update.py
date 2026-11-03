@@ -26,7 +26,7 @@ from .import_diagnostics import summarize_import
 
 ACTIVE = {"queued", "importing", "extracting", "retry_wait"}
 DEADLINE = 1800
-DEFERRED_CODES = {"graph_call_budget_pending", "graph_continuation_pending", "daily_call_budget_pending", "stage_lease_busy", "stage_snapshot_changed"}
+DEFERRED_CODES = {"graph_call_budget_pending", "graph_continuation_pending", "daily_call_budget_pending", "stage_lease_busy", "stage_snapshot_changed", "resource_circuit_open"}
 
 
 def revision(db, project_id):
@@ -136,6 +136,11 @@ def update_status(config, chat=""):
                 if not isinstance(run, dict) or not isinstance(run.get("updated_at"), (float, int)):
                     raise ValueError("invalid run")
                 if chat and run.get("chat_id") != chat:
+                    continue
+                # Read the marker through the same project snapshot as the
+                # receipt. A late old worker may rewrite a hot file, but its
+                # deleted chat must not reappear in status or counts.
+                if run_receipts.chat_deleted(receipts_db, run.get("chat_id")):
                     continue
                 items.append(run)
             except (OSError, ValueError, TypeError):
@@ -294,6 +299,17 @@ def run_update(config_path, chat, event="manual", transcript="", execute=None, t
             lock = stack.enter_context(lock_path.open("a"))
             # Kernel wait, no polling/deadline for another chat in this project.
             fcntl.flock(lock, fcntl.LOCK_EX)
+            from .chat_cleanup import excluded
+            from .core import Store
+            if Path(config['database']).is_file():
+                with_store = Store(config, readonly=True)
+                try:
+                    cleaned = excluded(with_store, chat)
+                finally:
+                    with_store.close()
+                if cleaned:
+                    save(state='cancelled', reported_model_calls=0, error_code='source_cleanup')
+                    return state
             if event == "AutoContinue":
                 from .continuation import automatic_enabled
                 if not automatic_enabled(config_path, load_config(Path(config_path))):
@@ -467,7 +483,7 @@ def run_update(config_path, chat, event="manual", transcript="", execute=None, t
                     input_stats=extracted.get("input_stats", {}),
                     relation_rejection_reasons=extracted.get("rejected_relations", []),
                     **totals,
-                    failed_batches=len(effective_failures),
+                    failed_batches=sum(f.get('error_code') not in DEFERRED_CODES for f in effective_failures),
                     dropped_oversize=extracted.get("dropped_oversize", 0),
                     failure_codes=effective_codes,
                     pending_retry_count=extracted.get("pending_retry_count", 0),
@@ -516,6 +532,9 @@ def run_update(config_path, chat, event="manual", transcript="", execute=None, t
                     progressed = bool(extracted["saved"] or extracted.get("saved_relations") or
                         any(current_graph.get(k, 0) for k in ("input_source_chars", "work_units", "adaptive_splits")) or
                         (extracted.get("input_stats") or {}).get("selected_chars", 0))
+                    if current_graph.get('progress_tracked'):
+                        progressed = any(current_graph.get(k, 0) for k in
+                            ('durable_progress', 'adaptive_splits', 'schema_repairs'))
                     no_progress_rounds = 0 if progressed else no_progress_rounds + 1
                     if no_progress_rounds >= 3:
                         effective_failures.append({"error_code": "continuation_no_progress", "retryable": False})
@@ -536,9 +555,9 @@ def run_update(config_path, chat, event="manual", transcript="", execute=None, t
                 recovery_rounds += 1
                 pending_only = True
                 save(state="extracting", next_retry_at=None, recovery_rounds=recovery_rounds)
-            fields["attempt_outcome"] = "failed" if effective_failures else "succeeded"
             problem = bool(effective_failures)
             actual_errors = [code for code in effective_codes if code not in DEFERRED_CODES]
+            fields["attempt_outcome"] = "failed" if actual_errors else "deferred" if problem else "succeeded"
             warning_count = extracted.get("dropped_oversize", 0)
             if warning_count:
                 fields.update(warning_code="oversize_entries_skipped", warning_count=warning_count)

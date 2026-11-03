@@ -49,6 +49,29 @@ def pending(config, chat, *, ttl=6 * 3600):
             return None
 
 
+def discard(config, chats):
+    """Remove chat-owned restore flags after a committed source cleanup."""
+    chats = set(chats)
+    removed = errors = 0
+    with locked(config):
+        for chat in sorted(chats):
+            if not isinstance(chat, str) or not chat:
+                continue
+            path = flag_path(config, chat)
+            try:
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                errors += 1
+    return removed, errors
+
+
+def count(config, chats):
+    chats = set(chats)
+    return sum(flag_path(config, chat).is_file() for chat in chats if isinstance(chat, str) and chat)
+
+
 def acknowledge(config, chat, token):
     with locked(config):
         flag = flag_path(config, chat)

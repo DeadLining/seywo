@@ -1,4 +1,4 @@
-"""Deletion is not inferred from lifecycle hooks or untrusted notifications.
+"""Untrusted events and unindexed file absence never grant deletion authority.
 
 These are safety boundaries, not acceptance tests for an implemented purge.
 """
@@ -14,9 +14,6 @@ from test_global_hooks import hook_module
 
 
 @pytest.mark.parametrize('payload', [
-    {'hook_event_name': 'SessionEnd', 'reason': 'other'},
-    {'hook_event_name': 'SessionEnd', 'reason': 'deleted'},
-    {'hook_event_name': 'SessionEnd', 'reason': 'archived'},
     {'hook_event_name': 'ThreadDeleted'},
     {'hook_event_name': 'thread/deleted'},
     {'method': 'thread/deleted', 'params': {'threadId': 'chat'}},
@@ -54,11 +51,13 @@ def test_ingress_rejects_deletion_before_opening_queue(tmp_path, monkeypatch, ev
     assert after == before
 
 
-def test_registration_does_not_treat_session_end_as_delete():
+def test_registration_preserves_other_session_end_handlers():
     unrelated = {'hooks': {'SessionEnd': [{'hooks': [
         {'type': 'command', 'command': '/existing/session-end-handler'},
     ]}]}}
     merged = merge_hooks(unrelated, '/sessiongraph/hook.py')
-    assert merged['hooks']['SessionEnd'] == unrelated['hooks']['SessionEnd']
+    assert merged['hooks']['SessionEnd'][:1] == unrelated['hooks']['SessionEnd']
+    assert merged['hooks']['SessionEnd'][1] == {'hooks': [
+        {'type': 'command', 'command': '/sessiongraph/hook.py'}]}
     assert 'ThreadDeleted' not in merged['hooks']
     assert 'thread/deleted' not in merged['hooks']

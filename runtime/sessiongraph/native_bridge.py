@@ -65,7 +65,7 @@ def read(registry: Path, request: dict):
 
 
 def _read(registry: Path, request: dict, trace):
-    if not isinstance(request, dict) or set(request) - {"operation", "project", "id", "offset", "query", "chat", "materials"}:
+    if not isinstance(request, dict) or set(request) - {"operation", "project", "id", "offset", "query", "chat", "materials", "view"}:
         raise ValueError("invalid request")
     op = request.get("operation")
     if op not in {"projects", "work_map", "status", "memory", "evidence", "summary_candidates"}:
@@ -80,9 +80,12 @@ def _read(registry: Path, request: dict, trace):
     ):
         raise ValueError("invalid id")
     if offset is not None and (
-        op not in {"evidence", "work_map"} or type(offset) is not int or not 0 <= offset <= 50_000_000
+        op not in {"evidence", "work_map", "memory"} or type(offset) is not int or not 0 <= offset <= 50_000_000
     ):
         raise ValueError("invalid offset")
+    view = request.get("view", "all")
+    if op != "work_map" or view not in {"all", "knowledge", "episode"}:
+        if "view" in request: raise ValueError("invalid view")
     for key, cap in (("query", 1000), ("chat", 256)):
         value = request.get(key)
         if value is not None and (op != "work_map" or not isinstance(value,str) or len(value)>cap):
@@ -118,7 +121,8 @@ def _read(registry: Path, request: dict, trace):
             with trace.phase("summary.candidates"):
                 return candidates(store, request["materials"])
         if op == "work_map":
-            result = work_map(store, query=request.get("query") or "", chat=request.get("chat") or "", offset=offset or 0)
+            result = work_map(store, query=request.get("query") or "", chat=request.get("chat") or "",
+                              offset=offset or 0, view=request.get("view", "all"))
             # The canvas is a preview; full original evidence is fetched by memory/evidence.
             for node in result['nodes']:
                 if isinstance(node.get('content'), str):
@@ -132,7 +136,7 @@ def _read(registry: Path, request: dict, trace):
         if op == "status":
             return update_status(cfg)
         if op == "memory":
-            return memory_detail(store, object_id)
+            return memory_detail(store, object_id, offset=offset or 0)
         return store.expand(object_id, radius=0, max_chars=10000, offset=offset or 0)
     finally:
         store.close()

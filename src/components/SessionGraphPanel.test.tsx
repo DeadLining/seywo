@@ -17,6 +17,15 @@ function client() {
 beforeEach(() => localStorage.clear())
 afterEach(() => vi.restoreAllMocks())
 describe('SessionGraphPanel', () => {
+  it('has no standalone graph compaction controls or background settings calls', async () => {
+    const read=client(), manage=vi.fn()
+    render(<SessionGraphPanel read={read} manage={manage}/>)
+    await screen.findByText('实验结果')
+    expect(screen.queryByRole('button',{name:'图谱压缩'})).not.toBeInTheDocument()
+    expect(screen.queryByRole('button',{name:/判别历史重复/})).not.toBeInTheDocument()
+    expect(screen.getByRole('button',{name:'存储维护'})).toBeInTheDocument()
+    expect(manage).not.toHaveBeenCalled()
+  })
   it('shows revision disputes separately from execution status without extra reads', async () => {
     const read = client(); const original = read.getMockImplementation()! as (...args: unknown[])=>Promise<unknown>
     read.mockImplementation((op:string,...args:unknown[])=>op==='work_map'?Promise.resolve({...graph,nodes:graph.nodes.map(n=>({...n,validity:{state:'disputed',revision:null}}))}):original(op,...args))
@@ -47,6 +56,40 @@ describe('SessionGraphPanel', () => {
     expect(screen.queryByText(/冷却中/)).not.toBeInTheDocument()
   })
 
+  it('shows legacy circuit-only runs and current cooldowns without failure styling', async () => {
+    const read=client(); const original=read.getMockImplementation()! as (...args: unknown[])=>Promise<unknown>
+    read.mockImplementation((op: string,...args:unknown[])=>op==='status'?Promise.resolve({runs:[{
+      run_id:'circuit-only',chat_id:'chat1',state:'failed',error_code:'resource_circuit_open',model_calls:0,
+    }],active_count:0,continuations:[{chat:'chat1',state:'retry_wait',due:1792034258,error_code:'resource_circuit_open'}]}):original(op,...args))
+    render(<SessionGraphPanel read={read} />)
+    const status=await screen.findByLabelText('等待连接恢复')
+    expect(status).toHaveClass('sg-dot-neutral')
+    expect(screen.getByText(/^连接冷却中 ·/)).toBeInTheDocument()
+    expect(screen.queryByText(/请求失败，等待重试/)).not.toBeInTheDocument()
+    expect(status.closest('li')?.querySelector('.sg-error')).toBeNull()
+  })
+
+  it('explains incompatible one-token routes as blocked instead of waiting', async () => {
+    const read=client(); const original=read.getMockImplementation()! as (...args: unknown[])=>Promise<unknown>
+    read.mockImplementation((op: string,...args:unknown[])=>op==='status'?Promise.resolve({runs:[],active_count:0,
+      continuations:[{chat:'chat1',state:'blocked',due:0,error_code:'single_token_budget_incompatible'}]}):original(op,...args))
+    render(<SessionGraphPanel read={read} />)
+    expect(await screen.findByText(/当前模型不支持单标签分类/)).toBeInTheDocument()
+    expect(screen.queryByText(/请求失败，等待重试|自动续跑中/)).not.toBeInTheDocument()
+  })
+
+  it('renders blocked continuation errors in Chinese without raw codes', async () => {
+    const read=client(); const original=read.getMockImplementation()! as (...args: unknown[])=>Promise<unknown>
+    read.mockImplementation((op: string,...args:unknown[])=>op==='status'?Promise.resolve({runs:[],active_count:0,continuations:[
+      {chat:'chat-38630c',state:'blocked',due:0,error_code:'worker_failed'},
+      {chat:'chat-d68bbc',state:'blocked',due:0,error_code:'graph_validation'},
+    ]}):original(op,...args))
+    render(<SessionGraphPanel read={read} />)
+    expect(await screen.findByText(/后台抽取进程意外退出/)).toBeInTheDocument()
+    expect(screen.getByText(/图谱抽取结果未通过校验/)).toBeInTheDocument()
+    expect(screen.queryByText(/worker_failed|graph_validation/)).not.toBeInTheDocument()
+  })
+
   it('explains legacy daily-limit records without telling the user to wait until tomorrow', async () => {
     const read=client(); const original=read.getMockImplementation()! as (...args: unknown[])=>Promise<unknown>
     read.mockImplementation((op: string,...args:unknown[])=>op==='status'?Promise.resolve({runs:[{
@@ -54,7 +97,7 @@ describe('SessionGraphPanel', () => {
     }],active_count:0,continuations:[{chat:'current-chat',state:'daily_limit',due:9999999999}]}):original(op,...args))
     render(<SessionGraphPanel read={read} />)
     await screen.findByText('旧版限制已移除，等待自动续跑')
-    expect(screen.getByText('旧版每日调用限制已移除，剩余任务由后台继续处理。')).toBeInTheDocument()
+    expect(screen.getByText(/旧版每日调用限制/)).toBeInTheDocument()
     expect(screen.queryByText(/今日额度已用完|等待次日/)).not.toBeInTheDocument()
   })
 
@@ -93,7 +136,7 @@ describe('SessionGraphPanel', () => {
     expect(screen.queryByText(/MCP.*Hook.*未探测/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button',{name:'接入设置'})).not.toBeInTheDocument()
     expect(screen.queryByLabelText('启用面板连接')).not.toBeInTheDocument()
-    expect(read).toHaveBeenCalledWith('work_map', {project:'p1'})
+    expect(read).toHaveBeenCalledWith('work_map', {project:'p1',view:'knowledge'})
     expect(read.mock.calls.every(([op]) => ['projects','work_map','status'].includes(op))).toBe(true)
   })
   it('shows evidence only after selecting an item, without a provider call', async () => {
@@ -108,7 +151,7 @@ describe('SessionGraphPanel', () => {
     const read = client(); render(<SessionGraphPanel read={read} />)
     fireEvent.click(await screen.findByText('实验结果')); await screen.findByText('/tmp/report.json')
     fireEvent.change(screen.getByLabelText('项目'), {target:{value:'p2'}})
-    await waitFor(() => expect(read).toHaveBeenCalledWith('work_map',{project:'p2'}))
+    await waitFor(() => expect(read).toHaveBeenCalledWith('work_map',{project:'p2',view:'knowledge'}))
     expect(screen.queryByText('/tmp/report.json')).not.toBeInTheDocument()
   })
   it('does not read an uninitialized project or create an index', async () => {
@@ -133,7 +176,7 @@ describe('SessionGraphPanel', () => {
     expect(read).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button',{name:'搜索全部历史'}))
     await waitFor(()=>expect(screen.queryByText('训练记录')).not.toBeInTheDocument())
-    expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'0.913',chat:'',offset:0})
+    expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'0.913',chat:'',offset:0,view:'knowledge'})
     fireEvent.change(screen.getByLabelText('搜索事项'),{target:{value:''}})
     fireEvent.click(screen.getByRole('button',{name:'搜索全部历史'}))
     await screen.findByText('SUPPORTS')
@@ -159,7 +202,7 @@ describe('SessionGraphPanel', () => {
     const read=client(); render(<SessionGraphPanel read={read} />)
     await screen.findByText('实验结果')
     expect(screen.getByLabelText('项目')).toHaveValue('p2')
-    expect(read).toHaveBeenCalledWith('work_map',{project:'p2'})
+    expect(read).toHaveBeenCalledWith('work_map',{project:'p2',view:'knowledge'})
     expect(JSON.parse(localStorage.getItem('gateway.sessiongraph.v1')!)).toEqual({version:1,project:'p2'})
     const calls=read.mock.calls.length
     await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20))})
@@ -188,7 +231,7 @@ it('shows task failures, truncation, source mismatches, references and supersess
   expect(screen.getByText(/原文缺失或引用不匹配/)).toBeInTheDocument()
   expect(screen.getByText(/仅载入最近/)).toBeInTheDocument()
   fireEvent.click(screen.getByText('后台任务与诊断 · 最近 2 次'))
-  expect(screen.getByText('timeout')).toBeInTheDocument()
+  expect(screen.getByText(/请求超时/)).toBeInTheDocument()
   fireEvent.click(screen.getAllByRole('button',{name:'/tmp/report.json'})[0])
   expect(screen.getByText(/不表示文件当前存在/)).toBeInTheDocument()
 })
@@ -255,15 +298,32 @@ it('locates a relation target inside the left list without scrolling the page', 
   expect(target).toHaveFocus()
   await screen.findByText('/tmp/report.json')
 })
+it('switches between the compact knowledge layer and process records without deleting evidence',async()=>{
+  const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
+  read.mockImplementation((op:string,...args:unknown[])=>op==='work_map'?Promise.resolve({...graph,tiering:{available:true,revision:'tiering-v3',canonical:3,episode:8,record_only:1}}):original(op,...args))
+  render(<SessionGraphPanel read={read}/>);await screen.findByText('实验结果')
+  expect(screen.getByText(/知识层 3 · 过程记录 8 · 仅回执 1/)).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button',{name:'过程记录'}))
+  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',view:'episode'}))
+  fireEvent.click(screen.getByRole('button',{name:'全部'}))
+  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',view:'all'}))
+  expect(screen.queryByText(/已删除/)).not.toBeInTheDocument()
+})
+it('warns when a fully covered projection still uses old tier rules',async()=>{
+  const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
+  read.mockImplementation((op:string,...args:unknown[])=>op==='work_map'?Promise.resolve({...graph,tiering:{available:true,revision:'tiering-v1',current:false,canonical:3,episode:8,record_only:1,covered:12,total:12,complete:true,revisions:{'tiering-v1':12}}}):original(op,...args))
+  render(<SessionGraphPanel read={read}/>);await screen.findByText('实验结果')
+  expect(screen.getByText(/当前层次规则版本不是 v3/)).toBeInTheDocument()
+})
 it('requests chat filtering from the backend and paginates matching history',async()=>{
   const read=client(),original=read.getMockImplementation()! as (...a:unknown[])=>Promise<unknown>
   read.mockImplementation(async(op:string,args?:{offset?:number;chat?:string})=>op==='work_map'?{...graph,page:{offset:args?.offset||0,limit:1,matched:2,next_offset:args?.offset?null:1,query:'',chat:args?.chat||''}}:original(op,args))
   render(<SessionGraphPanel read={read}/>);await screen.findByText('实验结果')
   fireEvent.change(screen.getByLabelText('筛选 chat'),{target:{value:'chat1'}})
-  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'',chat:'chat1',offset:0}))
+  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'',chat:'chat1',offset:0,view:'knowledge'}))
   await waitFor(()=>expect(screen.getByRole('button',{name:'下一页'})).not.toBeDisabled())
   fireEvent.click(screen.getByRole('button',{name:'下一页'}))
-  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'',chat:'chat1',offset:1}))
+  await waitFor(()=>expect(read).toHaveBeenCalledWith('work_map',{project:'p1',query:'',chat:'chat1',offset:1,view:'knowledge'}))
   await waitFor(()=>expect(screen.getByRole('button',{name:'下一页'})).toBeDisabled())
 })
 it('opens graph mode for a reference relation absent from the memory list', async()=>{
@@ -310,10 +370,10 @@ it('distinguishes blocked extraction, uncertain candidates, and historical failu
   }) as unknown as SessionGraphRead
   render(<SessionGraphPanel read={read}/>);await screen.findByText('实验结果')
   expect(screen.getByText(/未完成抽取批次：1/)).toBeInTheDocument()
-  expect(screen.getByText(/抽取受阻：graph_validation/)).toHaveTextContent('missing=relations')
+  expect(screen.getByText(/抽取受阻：图谱抽取结果未通过校验/)).toHaveTextContent('缺少 relations')
   expect(screen.getByText(/关系端点尚未确认/).closest('li')).toHaveTextContent('8')
   expect(screen.getByText(/标识或所属范围没有原文依据/)).toBeInTheDocument()
-  expect(screen.getByText(/graph_schema:invalid_node_ids/)).toBeInTheDocument()
+  expect(screen.getByText(/节点标识无效或重复/)).toBeInTheDocument()
   blocked=false;fireEvent.click(screen.getByRole('button',{name:'刷新'}))
   await screen.findByText(/未完成抽取批次：0/)
   expect(screen.queryByText(/抽取受阻：/)).not.toBeInTheDocument()
@@ -334,7 +394,7 @@ it('shows cumulative calls and deferred source coverage instead of false success
   expect(screen.getByText('本次输入已处理')).toBeInTheDocument()
   expect(screen.getByText(/旧版本的分轮记录/)).not.toHaveClass('sg-error')
   expect(screen.getAllByText(/历史记录未保存调用上限/)).toHaveLength(2)
-  expect(screen.getByText(/历史重试原因：jev_tls_handshake/)).toBeInTheDocument()
+  expect(screen.getByText(/历史重试原因：Jev 安全连接握手失败/)).toBeInTheDocument()
   expect(read.mock.calls.every(([op])=>['projects','work_map','status'].includes(op))).toBe(true)
 })
 
@@ -365,12 +425,12 @@ it('distinguishes budget deferral, real errors and incomplete historical statist
   expect(screen.getByText('本次已保存 2 个节点 / 0 条关系')).toBeInTheDocument()
   expect(screen.getAllByText(/旧版本的分轮记录/)[0]).not.toHaveClass('sg-error')
   expect(screen.getAllByText(/旧版本的分轮记录/)[1]).toHaveClass('sg-error')
-  expect(screen.getByText(/graph_validation · invalid_node_ids/)).toHaveClass('sg-error')
-  expect(screen.getByText(/旧版任务已停止/)).not.toHaveClass('sg-error')
+  expect(screen.getByText(/图谱抽取结果未通过校验 · 节点标识无效或重复/)).toHaveClass('sg-error')
+  expect(screen.getByText(/等待新版运行时继续/)).not.toHaveClass('sg-error')
   expect(screen.getByText(/调用统计不完整/)).toBeInTheDocument()
   expect(screen.getByText(/已记录调用 42 次/)).toBeInTheDocument()
   expect(screen.getByText(/组装后输入 24,000/)).toHaveTextContent('不能用原文减去排除量直接计算')
-  expect(screen.queryByText(/历史重试原因：graph_call_budget_pending/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/历史重试原因：旧版本的分轮记录/)).not.toBeInTheDocument()
   expect(read.mock.calls.every(([op])=>['projects','work_map','status'].includes(op))).toBe(true)
 })
 
@@ -387,8 +447,8 @@ it.each(['blocked_jobs','deferred_jobs'])('renders object-graph budget pauses wi
   render(<SessionGraphPanel read={read}/>);await screen.findByText(/对象图谱 v2 · 342/)
   expect(screen.getByText(/等待续处理：/)).not.toHaveClass('sg-error')
   expect(screen.getByText(/等待续处理：/)).toHaveTextContent('剩余内容由后台继续处理')
-  expect(screen.queryByText(/抽取受阻：graph_call_budget_pending/)).not.toBeInTheDocument()
-  expect(screen.getByText(/抽取受阻：graph_validation/)).toHaveClass('sg-error')
+  expect(screen.queryByText(/抽取受阻：旧版本的分轮记录/)).not.toBeInTheDocument()
+  expect(screen.getByText(/抽取受阻：图谱抽取结果未通过校验/)).toHaveClass('sg-error')
   expect(screen.getByText(/未完成抽取批次：2/)).toBeInTheDocument()
   expect(screen.getByText(/指代对象不明确/).closest('li')).toHaveTextContent('9')
   expect(read.mock.calls.every(([op])=>['projects','work_map','status'].includes(op))).toBe(true)
@@ -464,7 +524,7 @@ it('keeps recovered errors in history and shows pending work separately',async()
     {run_id:'new',chat_id:'chat1',state:'pending',attempt_outcome:'succeeded',failure_codes:[],graph_v2:{source_remaining:true,pending_jobs:5,ready_jobs:2,retry_wait_jobs:2,blocked_jobs:1}}
   ],active_count:0}):base(op,...args))
   render(<SessionGraphPanel read={read}/>);
-  expect(await screen.findByText('历史错误（相关批次已恢复）：jev_http_451')).not.toHaveClass('sg-error')
+  expect(await screen.findByText(/历史错误（相关批次已恢复）：Jev 服务拒绝了请求/)).not.toHaveClass('sg-error')
   expect(screen.getByText('待处理 2 · 等待重试 2 · 受阻 1')).toBeInTheDocument()
   expect(screen.getByLabelText('本轮执行成功，仍有待处理内容')).toHaveClass('sg-dot-success')
   expect(document.querySelectorAll('.sg-run-content .sg-error')).toHaveLength(0)
@@ -476,7 +536,7 @@ it('keeps a current failure red even when other batches succeeded',async()=>{
     {run_id:'failed',chat_id:'chat1',state:'failed',attempt_outcome:'failed',error_code:'jev_http_451',saved_count:11,saved_relation_count:2}
   ],active_count:0}):base(op,...args))
   render(<SessionGraphPanel read={read}/>);
-  expect((await screen.findByText('jev_http_451')).closest('p')).toHaveClass('sg-error')
+  expect((await screen.findByText(/Jev 服务拒绝了请求/)).closest('p')).toHaveClass('sg-error')
   expect(document.querySelector('.sg-run-row .sg-dot-error')).toBeTruthy()
 })
 

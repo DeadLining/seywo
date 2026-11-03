@@ -49,7 +49,7 @@ fn request(
     {
         return Err("缺少有效的来源标识".into());
     }
-    if offset.is_some_and(|n| !matches!(operation, Operation::Evidence | Operation::WorkMap) || n > 50_000_000) {
+    if offset.is_some_and(|n| !matches!(operation, Operation::Evidence | Operation::WorkMap | Operation::Memory) || n > 50_000_000) {
         return Err("原文偏移无效".into());
     }
     Ok(json!({"operation":operation,"project":project,"id":id,"offset":offset}))
@@ -270,14 +270,15 @@ pub(crate) async fn manage_session_graph(
             .map_err(|_| "无法定位应用资源")?
             .join("sessiongraph")
     };
-    let timeout = if matches!(request.action, SettingsAction::StorageCompact) { 300 } else { 30 };
+    let compacting = matches!(request.action, SettingsAction::StorageCompact);
+    let timeout = if compacting { 300 } else { 30 };
     let mut result = read_process(
         local_command_mode(&source, &runtime_home()?, "native-settings")?,
         serde_json::to_value(request).map_err(|_| "无效设置请求")?,
         Duration::from_secs(timeout),
         64 * 1024,
     )
-    .await?;
+    .await.map_err(|error| settings_process_error(compacting, error))?;
     if saving_jev {
         result["message"] =
             serde_json::json!("Jev 密钥已保存，后台将直接使用；仅保存在本机 SessionGraph 私有配置中。");
@@ -308,6 +309,20 @@ fn read_phase_diagnostic(bytes: &[u8]) -> Option<&'static str> {
             _ => None,
         }
     })
+}
+
+fn settings_process_error(compacting: bool, error: String) -> String {
+    if compacting && error.contains("超时") {
+        "SessionGraph 存储维护超时；未完成的事务已回滚，已提交的载荷压缩仍保留。请刷新存储状态后重试。".into()
+    } else {
+        error
+    }
+}
+
+fn valid_response(data: &Value) -> bool {
+    data.is_object() && data.get("error").is_none()
+        && data.get("model_calls").and_then(Value::as_u64) == Some(0)
+        && data.get("graph_compaction").is_none()
 }
 
 async fn read_process(
@@ -362,10 +377,7 @@ async fn read_process(
         }
         let data: Value =
             serde_json::from_slice(&body).map_err(|_| "SessionGraph 返回的 JSON 无效")?;
-        if !data.is_object()
-            || data.get("error").is_some()
-            || data.get("model_calls").and_then(Value::as_u64) != Some(0)
-        {
+        if !valid_response(&data) {
             return Err("SessionGraph 响应不符合本地接口契约".into());
         }
         Ok(data)
@@ -392,9 +404,16 @@ pub(crate) async fn read_session_graph(
     offset: Option<u64>,
     query: Option<String>,
     chat: Option<String>,
+    view: Option<String>,
     materials: Option<Value>,
 ) -> Result<Value, String> {
     let mut payload = request(&operation, project.as_deref(), id.as_deref(), offset)?;
+    if let Some(value) = view {
+        if !matches!(operation, Operation::WorkMap) || !matches!(value.as_str(), "all" | "knowledge" | "episode") {
+            return Err("图谱层次无效".into());
+        }
+        payload["view"] = json!(value);
+    }
     for (key, value, cap) in [("query", query, 1000), ("chat", chat, 256)] {
         if let Some(value) = value {
             if !matches!(operation, Operation::WorkMap) || value.chars().count() > cap {
@@ -461,7 +480,7 @@ mod tests {
             None
         )
         .is_err());
-        assert!(request(&Operation::Memory, Some(PROJECT), Some("e_1"), Some(1)).is_err());
+        assert!(request(&Operation::Memory, Some(PROJECT), Some("wm_1"), Some(1)).is_ok());
         assert!(request(
             &Operation::Evidence,
             Some(PROJECT),
@@ -479,6 +498,12 @@ mod tests {
         for payload in [
             json!({"action":"extract"}),
             json!({"action":"status","path":"/tmp"}),
+            json!({"action":"status","token":"a".repeat(64)}),
+            json!({"action":"status","run_id":"b".repeat(32)}),
+            json!({"action":"graph_preview","project":PROJECT}),
+            json!({"action":"graph_assess","project":PROJECT}),
+            json!({"action":"graph_compact","project":PROJECT,"token":"a".repeat(64)}),
+            json!({"action":"graph_undo","project":PROJECT,"run_id":"b".repeat(32)}),
         ] {
             assert!(serde_json::from_value::<SettingsRequest>(payload).is_err());
         }
@@ -592,6 +617,34 @@ mod tests {
             .await
             .is_err());
         }
+    }
+    #[test]
+    fn every_native_response_is_model_free_and_rejects_retired_reports() {
+        assert!(valid_response(&json!({"ok":true,"model_calls":0})));
+        assert!(valid_response(&json!({"ok":false,"model_calls":0,"message":"busy"})));
+        for calls in [json!(1),json!(-1),json!(true),json!("0"),Value::Null] {
+            assert!(!valid_response(&json!({"ok":true,"model_calls":calls})));
+        }
+        assert!(!valid_response(&json!({"model_calls":0,"graph_compaction":{"model_calls":0}})));
+        assert!(!valid_response(&json!({"model_calls":0,"error":"failed"})));
+    }
+
+    #[tokio::test]
+    async fn native_subprocess_cannot_opt_into_model_calls() {
+        let body = json!({"ok":true,"model_calls":1}).to_string();
+        let shell = format!("cat >/dev/null; printf '%s' '{}'",body);
+        assert!(read_process(fixture(&shell), json!({"action":"graph_assess"}),
+            Duration::from_secs(2),4096).await.is_err());
+    }
+
+    #[test]
+    fn maintenance_timeout_is_not_mislabeled_as_a_read_failure() {
+        let message = "SessionGraph 本地读取超时；已停止读取进程".to_string();
+        assert_eq!(settings_process_error(false, message.clone()), message);
+        let compact = settings_process_error(true, message);
+        assert!(compact.contains("存储维护超时"));
+        assert!(compact.contains("已提交的载荷压缩仍保留"));
+        assert_eq!(settings_process_error(true, "其他故障".into()), "其他故障");
     }
     #[tokio::test]
     async fn timeout_and_oversize_stop_process_without_retry() {

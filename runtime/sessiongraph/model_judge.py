@@ -175,7 +175,7 @@ def reopen_legacy_judgments(store, chat_id, *, job_ids=None, segment_id=None):
     with store.db:
         rows = store.db.execute('''SELECT j.id,j.segment,c.state,c.due,c.failures,c.error_json
             FROM sg2_jobs j JOIN sg2_control c ON c.job=j.id
-            WHERE j.project=? AND j.chat=? AND j.state NOT IN ('complete','superseded')
+            WHERE j.project=? AND j.chat=? AND j.state NOT IN ('complete','superseded','dismissed')
             AND c.state IN ('blocked','retry_wait')''', (store.config['project_id'], chat_id)).fetchall()
         for row in rows:
             if job_ids is not None and row['id'] not in job_ids:

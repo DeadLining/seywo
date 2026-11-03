@@ -7,6 +7,8 @@ local, deterministic, and always returns provenance.
 
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import json
 import re
 from time import perf_counter
@@ -25,7 +27,8 @@ def memory_status(store):
     if not exists:
         return {"available": False, "total": 0, "active": 0, "superseded": 0,
                 "note": "Legacy index: explicit writable initialization is needed; retrieval did not migrate it."}
-    counts = dict(store.db.execute("SELECT status,count(*) FROM work_memory GROUP BY status"))
+    from .graph_compaction import visible
+    counts = dict(store.db.execute(f"SELECT status,count(*) FROM work_memory WHERE {visible(store,'work_memory.id')} GROUP BY status"))
     return {"available": True, "total": sum(counts.values()),
             "active": sum(counts.get(s, 0) for s in RESUME_STATUSES),
             "superseded": counts.get("superseded", 0)}
@@ -52,6 +55,9 @@ def _strings(value, field: str, limit: int = 32) -> list[str]:
 
 def _record(row, store):
     item = dict(row)
+    from .graph_compaction import members
+    group=members(store,item["id"])
+    if len(group)>1: item["member_ids"]=group
     item["paths"] = json.loads(item.pop("paths_json"))
     item["aliases"] = json.loads(item.pop("aliases_json"))
     source_id = item.pop("source_entry_id")
@@ -62,7 +68,15 @@ def _record(row, store):
             "SELECT e.*, c.chat_id FROM entries e JOIN session_chats c ON c.segment_id=e.session_id WHERE e.id=?",
             (source_id,),
         ).fetchone()
+        source_status = None
+        try:
+            entry = hydrate(store, entry)
+        except ValueError as exc:
+            if not str(exc).startswith('source_'):
+                raise
+            source_status = str(exc)
         if entry:
+            at = entry['text'].find(quote) if source_status is None else None
             source = {
                 "entry_id": source_id,
                 "chat_id": entry["chat_id"],
@@ -71,11 +85,15 @@ def _record(row, store):
                 "timestamp": entry["timestamp"],
                 "role": entry["role"],
                 "quote": quote,
-                "start": entry["text"].find(quote),
-                "end": entry["text"].find(quote) + len(quote),
+                "start": at,
+                "end": at + len(quote) if at is not None else None,
             }
+            if source_status:
+                source['status'] = source_status
     item["source"] = source
     item["verification"] = "quote_match_only" if source else "unverified_legacy"
+    if source and source.get('status'):
+        item['verification'] = 'source_unavailable'
     from .revision_ledger import projected
     validity = projected(store, item['id'])
     if validity is not None:
@@ -125,6 +143,7 @@ def remember(
     source = None
     if source_entry_id:
         source = store.db.execute("SELECT * FROM entries WHERE id=?", (source_entry_id,)).fetchone()
+        source = hydrate(store, source)
         if not source:
             raise ValueError("unknown source_entry_id")
         if not source_quote or source_quote not in source["text"]:
@@ -149,6 +168,9 @@ def remember(
     mid = memory_id if memory_id is not None else "wm_" + digest(encoded)[:32]
     if not isinstance(mid, str) or not mid.strip() or len(mid) > 256:
         raise ValueError("memory_id must be nonempty and at most 256 characters")
+    from .graph_compaction import canonical
+    mid=canonical(store,mid)
+    if supersedes_id: supersedes_id=canonical(store,supersedes_id)
     if supersedes_id == mid:
         raise ValueError("a memory cannot supersede itself")
     now = _now()
@@ -185,7 +207,15 @@ def remember(
         if supersedes_id:
             store.db.execute("UPDATE work_memory SET status='superseded',updated_at=? WHERE id=?", (now, supersedes_id))
         body = " ".join(tokens(" ".join([title, content, scope, *aliases, *paths])))
-        store.db.execute("INSERT INTO docs VALUES (?,?,?)", (mid, "memory", body))
+        from .source_text import write_doc
+        write_doc(store, mid, 'memory', body)
+
+        # The direct remember path is a work_memory writer, so it must also
+        # project the tier inside this transaction. Otherwise every explicit
+        # memory would lack a mapping row and both knowledge/episode views
+        # would hide it until a manual whole-project backfill.
+        from . import tiering
+        tiering.project(store, [mid])
 
         from .read_projection import flush
         flush(store)
@@ -257,7 +287,8 @@ def _recall_result(store, query, chat_id, terms, selected, relations, count, sta
 def _chat_filter(store, chat):
     from .graph_v2 import exists
     if exists(store):
-        return "(? IS NULL OR chat_id=? OR id IN (SELECT node FROM sg2_evidence WHERE chat=?))", (chat,chat,chat)
+        from .graph_compaction import expression
+        return f"(? IS NULL OR chat_id=? OR {expression(store,'id')} IN (SELECT {expression(store,'sg2_evidence.node')} FROM sg2_evidence WHERE chat=?))", (chat,chat,chat)
     return "(? IS NULL OR chat_id=?)", (chat,chat)
 
 
@@ -286,6 +317,7 @@ def recall(store, query: str, limit: int = 3, include_superseded: bool = False,
                                 unavailable=True)
         result.update(available=False, total=0, active=0, superseded=0)
         return render(result, view=view, max_bytes=max_bytes, offset=offset)
+    from .graph_compaction import canonical
     statuses = set(STATUSES) if include_superseded else VISIBLE
     chat_filter,chat_args = _chat_filter(store,chat_id)
     patterns = {term: re.compile(
@@ -315,6 +347,11 @@ def recall(store, query: str, limit: int = 3, include_superseded: bool = False,
                 fields = [row["title"], row["content"], row["paths_json"], row["aliases_json"]]
                 exact = query.strip().casefold() in "\n".join(fields).casefold()
                 scored.append((match["score"] + 2 * exact, row["updated_at"], row["id"], row, match))
+        unique = {}
+        for hit in scored:
+            cid=canonical(store,hit[2])
+            if cid not in unique or hit[:3]>unique[cid][:3]: unique[cid]=hit
+        scored=list(unique.values())
         scored.sort(key=lambda x: x[:3], reverse=True)
         # Load provenance only for selected results, not every candidate (N+1 reads).
         selected = [dict(_record(row, store), match=match)
@@ -335,7 +372,9 @@ def resume(store, limit: int = 20, include_completed: bool = True, include_super
         statuses = set(STATUSES)
     else:
         statuses = set(RESUME_STATUSES) | ({"completed"} if include_completed else set())
+    from .graph_compaction import visible
     chat_filter,chat_args = _chat_filter(store,chat_id)
+    chat_filter += " AND "+visible(store,"work_memory.id")
     rows = store.db.execute(
         ("SELECT * FROM work_memory WHERE status IN ({0}) AND " + chat_filter +
         " AND (project_id IS NULL OR project_id=?)"

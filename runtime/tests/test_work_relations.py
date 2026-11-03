@@ -69,7 +69,7 @@ def test_new_batch_can_reference_bounded_existing_project_memory(tmp_path):
                          source_entry_id=eid, source_quote='回归测试需要先完成')['id']
     source = write_session(root / 'another.jsonl', root, 'chat-2', [('user', TEXT)])
     store.ingest(source)
-    new_eid = store.db.execute('select id from entries where text=?', (TEXT,)).fetchone()[0]
+    new_eid = store.db.execute("select id from entries where session_id='chat-2'").fetchone()[0]
     out = payload(new_eid)
     out['memories'] = out['memories'][:1]
     out['relations'][0]['target'] = old

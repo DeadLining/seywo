@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import json
 
 from .core import digest, tokens
@@ -14,6 +16,7 @@ def publish_reviewed(store, batch, output, provenance, replace_job_ids=()):
     source, manifest = {}, []
     for e in batch:
         row = store.db.execute("SELECT * FROM entries WHERE id=?", (e["id"],)).fetchone()
+        row = hydrate(store, row)
         if not row or not e["text"].strip() or e["text"] not in row["text"]:
             raise ValueError("reviewed text must be an exact original excerpt")
         if e["role"] != row["role"] or e["kind"] != row["kind"] or row["kind"] != "message":
@@ -102,14 +105,8 @@ def publish_reviewed(store, batch, output, provenance, replace_job_ids=()):
                     json.dumps(r["aliases"], ensure_ascii=False),
                 ),
             )
-            store.db.execute(
-                "INSERT INTO docs VALUES (?,?,?)",
-                (
-                    rid,
-                    "record",
-                    " ".join(tokens(" ".join([r["content"], r["scope"], *r["aliases"]]))),
-                ),
-            )
+            from .source_text import write_doc
+            write_doc(store, rid, 'record', ' '.join(tokens(' '.join([r['content'], r['scope'], *r['aliases']]))))
             evidence(rid, r["evidence"])
         for i, edge in enumerate(output["relations"]):
             eid = "g_" + digest(jid + ":" + str(i))[:32]

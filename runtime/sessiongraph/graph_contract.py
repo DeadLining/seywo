@@ -87,7 +87,7 @@ NODE = obj(
         "identity": array(
             obj(
                 {
-                    "namespace": enum(("doi", "url", "run_id", "artifact_version")),
+                    "namespace": enum(("doi", "url", "run_id", "artifact_version", "claim_conclusion")),
                     "value": string(240),
                     "scope": string(240),
                 }
@@ -99,6 +99,7 @@ NODE = obj(
 )
 # Optional in persisted v1 records; required in new provider wire contracts.
 NODE["properties"]["context_kind"] = enum(("work", "example", "uncertain"))
+NODE["properties"]["retention"] = enum(("knowledge", "record_only"))
 ATOMIC = obj({
     "subject": string(240), "predicate": string(160), "value": string(400),
     "unit": string(80), "conditions": array(string(240), 8),
@@ -232,8 +233,10 @@ def redact_display_fields(output):
     return result, count
 
 
-def policy(candidates, *, effective=False):
+def policy(candidates, *, effective=False, condense=False):
     schema=copy.deepcopy(SCHEMA)
+    if not condense:
+        schema['properties']['nodes']['items']['properties'].pop('retention')
     if effective:
         schema["properties"]["nodes"]["items"]["required"] += ["assertion", "provenance"]
     else:
@@ -266,7 +269,7 @@ def policy(candidates, *, effective=False):
             "inside its inputs are example. Never promote fixture facts into project facts. "
             "Prefer no node for routine code dumps; preserve meaningful test failures, metrics and report paths. "
             "Keep relevant tool results and their role: tool success, assistant claims and user acceptance differ. "
-            "context_only messages provide continuity, not new completion or approval. Do not infer approval. Plans remain proposed. Source references are not proof of reading a paper. "
+            "context_only messages provide continuity, not new completion or approval. Never emit a node or relation supported only by context_only messages: reference an offered existing endpoint when needed by a relation supported by current input. Current facts may cite context_only messages for scope or qualifications alongside current evidence. Do not infer approval. Plans remain proposed. Source references are not proof of reading a paper. "
             "Identity fields only for explicit unique DOI, URL, scoped run id, or path+version; "
             "identity value and scope must both occur in evidence. Otherwise identity=[]. "
             "When an actual work execution has findings or outputs, include that execution and the supported "
@@ -285,6 +288,20 @@ def policy(candidates, *, effective=False):
             "Use the transcript language. Omit credentials, inventories, routine chatter and repeated progress."
         ),
     }
+    if condense:
+        result['instructions'] = result['instructions'].replace(
+            'When an actual work execution has findings or outputs, include that execution and the supported '
+            'HAS_RESULT/PRODUCES relations rather than only isolated Claim/Artifact nodes. ',
+            'Create an Execution only if its independently durable identity, outcome or output linkage is needed. ')
+        result['instructions'] += (
+            " RETENTION RULES OVERRIDE generic graph examples: Activity means an explicit durable user objective, not assistant next-step narration. An Execution with no explicit stable identity and no independently durable Artifact output is a raw execution record, NOT a knowledge node: omit it or set retention=record_only. Its unique findings and conditions belong in atomic Claims once. An assistant plan to scan/commit/push/clone/check is not a new Activity or Decision. Classify retention: knowledge for durable independent objects, primary findings, decisions and unique constraints; "
+            "record_only for routine steps, repeated progress, repeated test-count/status reports, polls, copied summaries "
+            "and administrative implementation detail with no new durable fact. Prefer omitting record_only candidates. "
+            "Do not expand one task into Activity+Execution+Claim for each mechanical step. Reuse an offered object, "
+            "attach evidence to it, and emit only the genuinely new fact. Never discard unique numeric findings, "
+            "negation, scope/conditions, errors, decisions or artifact locations as routine. A wording change or "
+            "another retelling is not a new fact; do not count memorized summaries as primary new evidence. "
+        )
     if effective:
         result["instructions"] += (
             " For Claim/Decision use exactly one atomic assertion, or [] if scope cannot be resolved. "
@@ -329,13 +346,38 @@ def atomic_scope_resolved(node):
     }
 
 
+class _EvidenceAnchors(dict):
+    """Request-local locations, never model-authored or included in wire evidence."""
+
+    def __init__(self):
+        super().__init__()
+        self.regions = []
+        self.locations = {}
+
+
+def _boundary_extent(anchors, key, text):
+    location = getattr(anchors, 'locations', {}).get(key)
+    if location is None:
+        return None
+    region_id, start, end = location
+    region = anchors.regions[region_id]
+    # Only a literal intersecting this cited span can extend its boundary.
+    # Region identity fences filtered gaps, redactions and other messages.
+    lower = max(0, start - len(text) + 1)
+    upper = min(len(region), end + len(text) - 1)
+    match = region.find(text, lower, upper)
+    if match < 0 or region.find(text, match + 1, upper) >= 0:
+        return None
+    return min(start, match), max(end, match + len(text))
+
+
 def prepare_evidence_spans(batch, contract):
     """Wire evidence is an ID, never model-authored source text.
 
     Every input character stays available. Sensitive redaction runs remain visible
     as unquotable spans; surrounding non-sensitive text still gets exact anchors.
     """
-    anchors = {}
+    anchors = _EvidenceAnchors()
     prepared = []
     for entry in batch:
         spans = []
@@ -345,6 +387,8 @@ def prepare_evidence_spans(batch, contract):
             if region.startswith("█"):
                 spans.append({"anchor_id": None, "text": region})
                 continue
+            region_id = len(anchors.regions)
+            anchors.regions.append(region)
             start = 0
             while start < len(region):
                 end = min(len(region), start + 480)
@@ -356,6 +400,7 @@ def prepare_evidence_spans(batch, contract):
                 anchor = f"a{len(anchors) + 1}"
                 quote = region[start:end]
                 anchors[anchor] = {"entry_id": entry["id"], "quote": quote}
+                anchors.locations[anchor] = (region_id, start, end)
                 spans.append({"anchor_id": anchor, "text": quote})
                 start = end
         prepared.append({**{key: entry[key] for key in ("id", "role", "kind", "timestamp", "context_only", "call_id", "channel") if key in entry},
@@ -371,6 +416,14 @@ def prepare_evidence_spans(batch, contract):
         return spec
 
     schema = wire_schema(contract["json_schema"])
+    # `claim_conclusion` is application-derived from cited evidence. It is not a
+    # provider vocabulary item: removing it here prevents a model from inventing
+    # a merge key, while the persisted schema still accepts the derived value.
+    try:
+        namespaces = schema["properties"]["nodes"]["items"]["properties"]["identity"]["items"]["properties"]["namespace"]
+        namespaces["enum"] = [n for n in namespaces["enum"] if n != "claim_conclusion"]
+    except (KeyError, TypeError):
+        pass
     atomic_refs = 'assertion' in schema['properties']['nodes']['items']['required']
     if atomic_refs:
         reference = obj({'anchor_id': string(32), 'text': string(400)})
@@ -383,6 +436,8 @@ def prepare_evidence_spans(batch, contract):
             'anyOf': [atom, {'type': 'null'}],
         }
     schema["properties"]["nodes"]["items"]["required"].append("context_kind")
+    if 'retention' in schema['properties']['nodes']['items']['properties']:
+        schema["properties"]["nodes"]["items"]["required"].append("retention")
     # Input bookkeeping belongs to the request builder, not to model recall.
     # Persisted SCHEMA is unchanged; the adapter restores IDs from this request.
     schema["properties"]["coverage"] = obj({
@@ -415,7 +470,8 @@ def prepare_evidence_spans(batch, contract):
             'Each independent fact needs a separate node (n1, n2, ...), with its own concise content. '
             'Inside assertion, subject, predicate and value '
             'are each {anchor_id, text}, where text is a nonempty EXACT contiguous substring of that '
-            'anchor, and the anchor MUST also be in this node evidence. Copy source words; do not '
+            'anchor, and the anchor MUST also be in this node evidence. Check each field against its '
+            'own span, not a neighboring span. Copy source words; do not '
             'generate normalized labels, synonyms or inferred numbers. unit is [] for no unit, '
             'otherwise [{anchor_id, text}]; conditions is an array of the same references. '
             'Use short original verbs/phrases as predicates, not invented category names. '
@@ -466,13 +522,30 @@ def resolve_evidence_spans(output, anchors, *, entry_ids=None, atomic_refs=False
                 references.append(dict(anchors[reference["anchor_id"]]))
             if group == 'nodes' and atomic_refs:
                 cited = {r['anchor_id'] for r in item['evidence']}
+                extensions = {}
 
                 def literal(ref, maximum):
                     if (not isinstance(ref, dict) or set(ref) != {'anchor_id', 'text'}
-                            or not isinstance(ref['anchor_id'], str) or ref['anchor_id'] not in cited
+                            or not isinstance(ref['anchor_id'], str) or ref['anchor_id'] not in anchors
                             or not isinstance(ref['text'], str) or not 1 <= len(ref['text']) <= maximum
-                            or '█' in ref['text'] or ref['text'] not in anchors[ref['anchor_id']]['quote']):
+                            or '█' in ref['text']):
                         raise ValueError('graph_evidence:invalid_atomic_source_ref')
+                    source = anchors[ref['anchor_id']]
+                    if ref['anchor_id'] not in cited or ref['text'] not in source['quote']:
+                        # First preserve the existing same-entry cited-span repair.
+                        matches = [key for key in cited
+                                   if anchors[key]['entry_id'] == source['entry_id']
+                                   and ref['text'] in anchors[key]['quote']]
+                        if len(matches) != 1:
+                            extent = (_boundary_extent(anchors, ref['anchor_id'], ref['text'])
+                                      if not matches and ref['anchor_id'] in cited else None)
+                            if extent is None:
+                                raise ValueError('graph_evidence:invalid_atomic_source_ref')
+                            prior = extensions.get(ref['anchor_id'], extent)
+                            extent = min(prior[0], extent[0]), max(prior[1], extent[1])
+                            if extent[1] - extent[0] > EVIDENCE['properties']['quote']['maxLength']:
+                                raise ValueError('graph_evidence:invalid_atomic_source_ref')
+                            extensions[ref['anchor_id']] = extent
                     return ref['text']
 
                 if 'assertion' not in item:
@@ -495,8 +568,52 @@ def resolve_evidence_spans(output, anchors, *, entry_ids=None, atomic_refs=False
                         'conditions': [literal(ref, 240) for ref in atom['conditions']],
                     })
                 item['assertion'] = decoded
+                for reference, restored in zip(item['evidence'], references):
+                    key = reference['anchor_id']
+                    if key in extensions:
+                        region_id = anchors.locations[key][0]
+                        start, end = extensions[key]
+                        restored['quote'] = anchors.regions[region_id][start:end]
             item["evidence"] = references
     return result
+
+
+def decode_evidence_candidates(output, anchors, *, entry_ids=None, atomic_refs=False):
+    """Isolate an ungrounded atomic proposal; never turn it into a graph fact.
+
+    Evidence decoding itself stays strict. Only atomic literal failure can take
+    this path; unknown anchors, shape errors and source integrity still fail.
+    The original response remains in its audit. The normal identity gate retains
+    the uncertain candidate with its full content and verified source quotes.
+    """
+    try:
+        return resolve_evidence_spans(output, anchors, entry_ids=entry_ids, atomic_refs=atomic_refs)
+    except ValueError as exc:
+        if not atomic_refs or str(exc) != 'graph_evidence:invalid_atomic_source_ref':
+            raise
+    result = copy.deepcopy(output)
+    for index, node in enumerate(result.get('nodes', [])):
+        single = {**result, 'nodes':[node], 'relations':[], 'unresolved':[]}
+        try:
+            resolve_evidence_spans(single, anchors, entry_ids=entry_ids, atomic_refs=True)
+        except ValueError as exc:
+            if str(exc) != 'graph_evidence:invalid_atomic_source_ref':
+                raise
+            atom = node.get('assertion')
+            if (not isinstance(atom, dict) or set(atom) != set(ATOMIC['properties'])
+                    or not isinstance(atom['unit'], list) or len(atom['unit']) > 1
+                    or not isinstance(atom['conditions'], list) or len(atom['conditions']) > 8):
+                raise
+            refs = [(atom['subject'],240),(atom['predicate'],160),(atom['value'],400)]
+            refs += [(r,80) for r in atom['unit']] + [(r,240) for r in atom['conditions']]
+            if any(not isinstance(ref, dict) or set(ref) != {'anchor_id','text'}
+                   or not isinstance(ref['anchor_id'],str) or ref['anchor_id'] not in anchors
+                   or not isinstance(ref['text'],str) or not 1 <= len(ref['text']) <= maximum
+                   or '█' in ref['text'] for ref, maximum in refs):
+                raise
+            result['nodes'][index] = {**node, 'assertion':None,
+                'context_kind':'uncertain', 'provenance':'uncertain'}
+    return resolve_evidence_spans(result, anchors, entry_ids=entry_ids, atomic_refs=True)
 
 
 def prompt_policy(contract):
@@ -656,8 +773,15 @@ def anchor_identity_evidence(output, batch):
 
 
 def identity_is_anchored(node):
-    return all(_cites(node["evidence"], k["value"]) and _cites(node["evidence"], k["scope"])
-               for k in node["identity"])
+    def anchored(k):
+        value = k["value"]
+        if k.get("namespace") == "claim_conclusion":
+            # The application-owned shape prefix classifies the cited sentence;
+            # the literal evidence anchor is the sentence after it.
+            from .conclusion import grounded_value
+            value = grounded_value(k)
+        return _cites(node["evidence"], value) and _cites(node["evidence"], k["scope"])
+    return all(anchored(k) for k in node["identity"])
 
 
 def normalize_references(output, candidates):

@@ -9,6 +9,8 @@ stored as ``proposed``, never as user decisions.
 
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import fcntl
 import json
 import os
@@ -504,6 +506,9 @@ def _run_chat(store: Store, extractor, chat_id: str, *, max_chars: int | None,
               since_time: str | None, segment_id: str | None,
               lookback_chars: int | None, repair_oversize: bool, dry_run: bool,
               pending_only: bool = False, through_rowid: int | None = None, step_budget: int | None = None, call_budget: int | None = None) -> dict:
+    from .chat_cleanup import excluded
+    if excluded(store, chat_id):
+        raise ValueError('chat source was cleaned; restore an original transcript path first')
     from .graph_v2 import enabled, run_chat as run_graph
     if enabled(store):
         from .stage_leases import enabled as staged
@@ -580,9 +585,9 @@ def _run_chat(store: Store, extractor, chat_id: str, *, max_chars: int | None,
         if repair_oversize:
             # Legacy checkpoints do not list dropped IDs. These are candidates,
             # not proof of a historical drop (some may predate the old tail window).
-            rows = [dict(r) for r in store.db.execute(
+            rows = [hydrate(store, r) for r in store.db.execute(
                 """SELECT * FROM entries
-                WHERE session_id=? AND line<=? AND timestamp>=? AND length(text)>?
+                WHERE session_id=? AND line<=? AND timestamp>=? AND coalesce((SELECT chars FROM sg_entry_sizes WHERE entry_id=entries.id),length(text))>?
                 ORDER BY line""", (segment_id, since, since_time or "", CHUNK_CAP),
             ).fetchall()]
             rows = [r for r in rows if not (
@@ -594,7 +599,7 @@ def _run_chat(store: Store, extractor, chat_id: str, *, max_chars: int | None,
             if dry_run:
                 continue
         else:
-            rows = [dict(r) for r in store.db.execute(
+            rows = [hydrate(store, r) for r in store.db.execute(
                 """SELECT * FROM entries
                 WHERE session_id=? AND line>? AND timestamp>=? ORDER BY line""",
                 (segment_id, since, (recovery["since_time"] if recovery else since_time) or ""),

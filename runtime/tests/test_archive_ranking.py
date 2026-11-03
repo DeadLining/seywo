@@ -75,7 +75,8 @@ def test_archive_corruption_never_becomes_valid_evidence(tmp_path,damage):
 
 def test_judgment_context_deduplicates_windows_and_keeps_endpoint_sources(tmp_path):
     s,_=fixture(tmp_path,[msg('Original execution produced report and measured accuracy 95%.'),msg('Separate endpoint evidence')])
-    rows=s.db.execute('SELECT * FROM entries ORDER BY line').fetchall()
+    from sessiongraph.source_text import hydrate
+    rows=[hydrate(s, row) for row in s.db.execute('SELECT * FROM entries ORDER BY line')]
     objects=[{'evidence':[{'entry_id':rows[0]['id'],'quote':q}]} for q in ['execution','report','accuracy']]
     objects.append({'content':'invented secret relation','evidence':[{'entry_id':rows[1]['id'],'quote':'endpoint'}]})
     context=g._evidence_context(s,objects)

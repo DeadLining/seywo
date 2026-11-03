@@ -1,6 +1,7 @@
-"""Explicit native settings, scoped model edits and independent global registration.
+"""Explicit app-wide provider settings and independent global registration.
 
-Settings do not open a database. Explicit maintenance actions are local and model-free.
+Settings snapshots do not open a database. All native settings and storage
+maintenance actions remain model-free; graph compaction actions are retired.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from .core import digest
 from .gateway_install import apply_changes, install, agents_guidance_installed, uninstall
 from .global_hooks import EVENTS, locked
 from .provider_credentials import validate_endpoint, save_key
+from .provider_settings import PROVIDER_FIELDS, effective_provider, read_template
 
 
 def _json(path):
@@ -57,6 +59,7 @@ def _project(state, project):
 
 
 def _snapshot(state, codex_home, config):
+    provider = effective_provider(_json(config).get("provider", {}) if config else {}, state)
     launcher = state / "bin/sessiongraph"
     hooks = _json(codex_home / "hooks.json").get("hooks", {})
     command = shlex.quote(str(launcher)) + " hook-event"
@@ -82,9 +85,9 @@ def _snapshot(state, codex_home, config):
         graph_v2_enabled=_json(config).get("graph_v2", {}).get("enabled", False) if config else False,
         model_calls=0,
         changed_count=0,
-        model=_json(config).get("provider", {}).get("model", "") if config else "",
-        endpoint=_json(config).get("provider", {}).get("endpoint", "") if config else "",
-        api_key_env=_json(config).get("provider", {}).get("api_key_env", "GRAPH_LLM_API_KEY") if config else "GRAPH_LLM_API_KEY",
+        model=provider.get("model", ""),
+        endpoint=provider.get("endpoint", ""),
+        api_key_env=provider.get("api_key_env", "GRAPH_LLM_API_KEY"),
         hook_event_count=len(EVENTS),
         runtime_installed=launcher.is_file() and Path(runtime.get("python", "")).is_file(),
         hook_registered=all(matches),
@@ -126,7 +129,7 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
     config = None if removing else _project(state, request.get("project"))
     if action == "status":
         return _snapshot(state, codex_home, config)
-    if config is None and not removing:
+    if config is None and not removing and action not in {"save_model", "save_provider"}:
         raise ValueError("select_initialized_project")
     if action in {"storage_preview", "storage_compact", "clean_notices", "clear_tasks"}:
         from .maintenance import run
@@ -149,10 +152,16 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         ):
             raise ValueError("invalid_model")
         with locked(state / "install.lock"):
-            # Re-resolve inside the lock. Never write any other project's config.
-            config = _project(state, request["project"])
-            before = config.read_bytes()
-            raw = json.loads(before)
+            target = state / "template.json"
+            raw = read_template(state)
+            before = target.read_bytes() if target.exists() else None
+            if not raw:
+                seed = _json(config) if config else {}
+                raw = {"provider": {k: v for k, v in seed.get("provider", {}).items() if k in PROVIDER_FIELDS},
+                       "extraction": seed.get("extraction", {"max_batch_chars":24000,
+                           "context_entries":2, "max_input_chars":32000, "lease_seconds":600})}
+                raw["provider"].setdefault("timeout_seconds", 90)
+                raw["provider"].setdefault("max_output_tokens", 4000)
             if action == "save_provider":
                 endpoint = validate_endpoint(request.get("endpoint"))
                 key_env = request.get("api_key_env", "GRAPH_LLM_API_KEY")
@@ -161,7 +170,7 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
                 if request.get("api_key"):
                     save_key(state, endpoint, request["api_key"])
                 raw.setdefault("provider", {}).update(protocol="responses", endpoint=endpoint, api_key_env=key_env, model=model.strip(), auth="bearer")
-                change = apply_changes(state, {config: json.dumps(raw, ensure_ascii=False, indent=2) + "\n"}, {config: before})
+                change = apply_changes(state, {target: json.dumps(raw, ensure_ascii=False, indent=2) + "\n"}, {target: before})
             elif raw.get("provider", {}).get("protocol") != "responses":
                 raise ValueError("requires_responses_project")
             elif raw["provider"].get("model") == model.strip():
@@ -170,8 +179,8 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
                 raw["provider"]["model"] = model.strip()
                 change = apply_changes(
                     state,
-                    {config: json.dumps(raw, ensure_ascii=False, indent=2) + "\n"},
-                    {config: before},
+                    {target: json.dumps(raw, ensure_ascii=False, indent=2) + "\n"},
+                    {target: before},
                 )
     else:
         if sys.version_info < (3, 11) or importlib.util.find_spec("mcp") is None:
@@ -207,8 +216,8 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
     result["message"] = {
         "enable_graph": "对象图谱 v2 已启用；只处理新增内容，历史数据保留。",
         "disable_graph": "已恢复旧抽取路径，v2 数据保留。",
-        "save_model": "模型已保存，后续抽取、身份去重和关系判断共用此模型。",
-        "save_provider": "模型与端点已保存，后续任务生效。",
+        "save_model": "全局模型已保存，所有项目的后续抽取和判断共用此模型。",
+        "save_provider": "全局模型配置已保存，所有项目的后续任务生效。",
         "install_hooks": "Hook 已注册；请在 Codex 中确认信任。",
         "install_mcp": "MCP 和使用指引已安装。",
         "uninstall_hooks": "Hook 已卸载，自动处理已停用；数据保留，进行中的任务不强制终止。",

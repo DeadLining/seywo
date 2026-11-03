@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { SessionGraphTaskCleanup } from './SessionGraphTaskCleanup'
 import type { SessionGraphManage, SessionGraphSettingsSnapshot } from '../sessionGraph'
 
-const response={ok:true,maintenance:{dismissed_tasks:1,archived_runs:3,model_calls:0}} as SessionGraphSettingsSnapshot
+const response={ok:true,maintenance:{dismissed_tasks:1,dismissed_batches:12,archived_runs:3,model_calls:0}} as SessionGraphSettingsSnapshot
 
 describe('SessionGraphTaskCleanup',()=>{
   it('cleans only the selected project on explicit click and refreshes',async()=>{
@@ -12,7 +12,7 @@ describe('SessionGraphTaskCleanup',()=>{
     expect(manage).not.toHaveBeenCalled()
     expect(screen.getByText(/保留记忆与原文/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button',{name:'清理失效任务'}))
-    await screen.findByText(/已清理 1 个受阻任务，归档 3 条失败或中断记录/)
+    await screen.findByText(/已清理 1 个受阻续跑任务、12 个受阻图谱批次，归档 3 条失败或中断记录/)
     expect(manage).toHaveBeenCalledExactlyOnceWith({action:'clear_tasks',project:'jev'})
     expect(changed).toHaveBeenCalledOnce()
   })

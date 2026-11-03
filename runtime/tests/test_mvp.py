@@ -7,12 +7,12 @@ from sessiongraph.core import Store, init_project, load_config
 from sessiongraph.extraction import run_one
 
 
-def write_session(path, cwd, sid, texts):
+def write_session(path, cwd, sid, texts, *, timestamp="2026-09-30T00:00:00Z"):
     rows = [{"type": "session_meta", "payload": {"id": sid, "cwd": str(cwd)}}]
     for role, text in texts:
         rows.append(
             {
-                "timestamp": "2026-09-30T00:00:00Z",
+                "timestamp": timestamp,
                 "type": "response_item",
                 "payload": {
                     "type": "message",

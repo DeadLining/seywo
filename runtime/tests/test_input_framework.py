@@ -1,10 +1,11 @@
 import json
 from sessiongraph.core import Store, init_project, load_config
 from sessiongraph.graph_v2 import run_chat, setup
+from sessiongraph.source_text import hydrate
 from test_graph_v2 import Judge
 
 
-def fixture(tmp_path, payloads):
+def fixture(tmp_path, payloads, *, legacy=False):
     config = load_config(init_project(tmp_path))
     path = tmp_path / "chat.jsonl"
     events = [{"type": "session_meta", "payload": {"id": "input-chat", "cwd": str(tmp_path)}}]
@@ -13,10 +14,20 @@ def fixture(tmp_path, payloads):
         for i, p in enumerate(payloads)
     ]
     path.write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in events))
-    store = Store(config)
+    if legacy:
+        from unittest.mock import patch
+        with patch('sessiongraph.source_text.activate_defaults'):
+            store = Store(config)
+    else:
+        store = Store(config)
     store.ingest(path)
     setup(store)
     return store, path
+
+
+def legacy_fixture(tmp_path, payloads):
+    """Seed a pre-upgrade database for migration and compatibility contracts only."""
+    return fixture(tmp_path, payloads, legacy=True)
 
 
 def msg(text, role="assistant", channel="final"):
@@ -160,7 +171,7 @@ def test_projection_anchors_are_exact_original_substrings(tmp_path):
     )
     ex = Empty()
     run_chat(s, ex, "input-chat", jev=Judge())
-    originals = {r["id"]: r["text"] for r in s.db.execute("select * from entries")}
+    originals = {r["id"]: hydrate(s, r)["text"] for r in s.db.execute("select * from entries")}
     for batch in ex.calls:
         _, _, anchors = prepare_evidence_spans(batch, policy([]))
         assert all(a["quote"] in originals[a["entry_id"]] for a in anchors.values())
@@ -203,7 +214,7 @@ def test_model_budget_interruption_reuses_projected_source(tmp_path):
     from test_memories import FakeExtractor
 
     s, _ = fixture(tmp_path, [msg("训练 A 得到模型 B")])
-    rows = [dict(x) for x in s.db.execute("select * from entries")]
+    rows = [hydrate(s, x) for x in s.db.execute("select * from entries")]
     first = run_chat(s, FakeExtractor([output(rows)]), "input-chat", jev=Judge(), call_budget=1)
     assert first["model_calls"] == 1 and first["failed"]
     assert s.db.execute("select count(*) from sg_input_coverage").fetchone()[0] == 0
@@ -260,7 +271,7 @@ def test_reversed_relation_requires_judge_support(tmp_path):
     from test_memories import FakeExtractor
 
     s, _ = fixture(tmp_path, [msg("训练 A 得到模型 B")])
-    rows = [dict(r) for r in s.db.execute("select * from entries")]
+    rows = [hydrate(s, r) for r in s.db.execute("select * from entries")]
     value = output(rows)
     edge = value["relations"][0]
     edge["source"], edge["target"] = edge["target"], edge["source"]
@@ -275,7 +286,7 @@ def test_reversed_relation_without_support_stays_unresolved(tmp_path):
     from test_memories import FakeExtractor
 
     s, _ = fixture(tmp_path, [msg("训练 A 和模型 B，仅列出名字")])
-    value = output([dict(r) for r in s.db.execute("select * from entries")])
+    value = output([hydrate(s, r) for r in s.db.execute("select * from entries")])
     edge = value["relations"][0]
     edge["source"], edge["target"] = edge["target"], edge["source"]
     r = run_chat(
@@ -312,7 +323,7 @@ def test_code_reads_do_not_discard_mixed_test_results(tmp_path):
         ]
     s, _ = fixture(tmp_path, payloads)
     rows = [
-        dict(r)
+        hydrate(s, r)
         for r in s.db.execute("select * from entries where kind='tool_result' order by line")
     ]
     spans, reason = projection(s, rows[0])
@@ -326,7 +337,7 @@ def test_failed_legacy_input_replans_without_erasing_failure(tmp_path):
     from sessiongraph.core import digest
 
     s, _ = fixture(tmp_path, [msg("internal-only", channel="analysis")])
-    row = s.db.execute("select * from entries").fetchone()
+    row = hydrate(s, s.db.execute("select * from entries").fetchone())
     desc = {
         "entries": [
             {

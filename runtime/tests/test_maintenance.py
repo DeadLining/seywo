@@ -82,3 +82,134 @@ def test_maintenance_respects_active_batch_lock(completed):
         with pytest.raises(ValueError,match='maintenance_busy'):maintenance.run(path,'storage_compact')
         with pytest.raises(ValueError,match='maintenance_busy'):maintenance.run(path,'clean_notices')
         assert maintenance.run(path,'storage_preview')['model_calls']==0
+
+
+def test_compaction_checks_only_payload_tables_and_skips_tiny_freelist(completed, monkeypatch):
+    path, s, _ = completed
+    statements = []
+    original = maintenance.Store
+    def traced(*args, **kwargs):
+        store = original(*args, **kwargs)
+        store.db.set_trace_callback(statements.append)
+        return store
+    monkeypatch.setattr(maintenance, 'Store', traced)
+    result = maintenance.run(path, 'storage_compact')
+    assert result['integrity'] == 'ok'
+    assert set(result['integrity_scope']) == set(maintenance.PAYLOAD_TABLES)
+    assert result['vacuum_performed'] is False
+    assert result['vacuum_skipped_reason'] == 'small_freelist'
+    assert 'VACUUM' not in statements
+    assert 'PRAGMA quick_check' not in statements  # No 4GB source/FTS scan.
+    assert 'PRAGMA wal_checkpoint(PASSIVE)' in statements
+    assert 'PRAGMA wal_checkpoint(TRUNCATE)' in statements
+
+
+def test_4gb_database_with_44kb_free_does_not_rewrite_all_pages(completed, monkeypatch):
+    import time
+    _, s, _ = completed
+    statements = []
+    s.db.set_trace_callback(statements.append)
+    monkeypatch.setattr(maintenance, 'footprint', lambda _: dict(logical_bytes=4*1024**3, reclaimable_bytes=44*1024))
+    result = maintenance.reclaim_space(s, time.monotonic()+30)
+    assert result['vacuum_skipped_reason'] == 'small_freelist'
+    assert not result['vacuum_performed'] and 'VACUUM' not in statements
+
+
+def test_reclamation_expired_budget_returns_warning_without_losing_data(completed):
+    import time
+    _, s, _ = completed
+    before = maintenance.counts(s)
+    old_timeout = s.db.execute('PRAGMA busy_timeout').fetchone()[0]
+    result = maintenance.reclaim_space(s, time.monotonic()-1)
+    assert result['vacuum_skipped_reason'] == 'reclamation_deferred' and result['warning']
+    assert not result['vacuum_performed']
+    assert maintenance.counts(s) == before
+    assert s.db.execute('PRAGMA busy_timeout').fetchone()[0] == old_timeout
+
+
+def test_vacuum_interrupt_rolls_back_only_reclamation_and_restores_connection(completed, monkeypatch):
+    _, s, _ = completed
+    s.db.execute('CREATE TABLE maintenance_padding(data BLOB)')
+    s.db.execute('INSERT INTO maintenance_padding VALUES(zeroblob(1048576))')
+    s.db.commit()
+    before = maintenance.counts(s)
+    clock = [0.0]
+    monkeypatch.setattr(maintenance.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(maintenance, 'footprint', lambda _: dict(logical_bytes=100*1024**2, reclaimable_bytes=50*1024**2))
+    s.db.set_trace_callback(lambda sql: clock.__setitem__(0, 2.0) if sql == 'VACUUM' else None)
+    result = maintenance.reclaim_space(s, 1.0)
+    assert not result['vacuum_performed'] and result['vacuum_skipped_reason'] == 'reclamation_deferred'
+    assert result['warning']
+    assert maintenance.counts(s) == before
+    assert s.db.execute('SELECT length(data) FROM maintenance_padding').fetchone()[0] == 1048576
+    assert s.db.execute('PRAGMA busy_timeout').fetchone()[0] == 10000
+    assert s.db.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+
+
+def test_active_reader_defers_reclamation_without_waiting_or_removing_facts(completed):
+    import sqlite3, time
+    _, s, _ = completed
+    s.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+    reader = sqlite3.connect(s.config['database'])
+    try:
+        reader.execute('BEGIN')
+        reader.execute('SELECT count(*) FROM entries').fetchone()
+        s.db.execute("INSERT OR REPLACE INTO metadata VALUES('maintenance_test','1')")
+        s.db.commit()
+        before = maintenance.counts(s)
+        result = maintenance.reclaim_space(s, time.monotonic()+30)
+        assert result['vacuum_skipped_reason'] == 'active_reader' and result['warning']
+        assert maintenance.counts(s) == before
+    finally:
+        reader.close()
+
+
+def test_large_reclaimable_space_still_runs_atomic_vacuum(completed, monkeypatch):
+    import time
+    _, s, _ = completed
+    before = maintenance.counts(s)
+    statements = []
+    s.db.set_trace_callback(statements.append)
+    monkeypatch.setattr(maintenance, 'footprint', lambda _: dict(logical_bytes=100*1024**2, reclaimable_bytes=50*1024**2))
+    result = maintenance.reclaim_space(s, time.monotonic()+30)
+    assert result['vacuum_performed'] and 'VACUUM' in statements
+    assert maintenance.counts(s) == before
+
+
+def test_disk_failure_is_not_silenced_as_reclamation_warning(completed, monkeypatch):
+    import sqlite3, time
+    _, s, _ = completed
+    original = s.db
+    failure = sqlite3.OperationalError('database or disk is full')
+    failure.sqlite_errorcode = sqlite3.SQLITE_FULL
+    class FailingVacuum:
+        def execute(self, sql, *args):
+            if sql == 'VACUUM':
+                raise failure
+            return original.execute(sql, *args)
+        def set_progress_handler(self, *args):
+            return original.set_progress_handler(*args)
+    monkeypatch.setattr(maintenance, 'footprint', lambda _: dict(logical_bytes=100*1024**2, reclaimable_bytes=50*1024**2))
+    try:
+        s.db = FailingVacuum()
+        with pytest.raises(sqlite3.OperationalError, match='disk is full'):
+            maintenance.reclaim_space(s, time.monotonic()+30)
+    finally:
+        s.db = original
+    assert s.db.execute('PRAGMA busy_timeout').fetchone()[0] == 10000
+
+
+def test_validation_failure_rolls_back_payload_changes(completed, monkeypatch):
+    path, s, _ = completed
+    # This value would be archived in the maintenance transaction.
+    value = json.dumps({'retained': 'do-not-lose-this' * 4000})
+    s.db.execute('UPDATE sg2_jobs SET candidates_json=?', (value,))
+    s.db.commit()
+    before = maintenance.counts(s)
+    def invalid(_):
+        raise ValueError('maintenance_integrity_failed')
+    monkeypatch.setattr(maintenance, 'check_payload_tables', invalid)
+    with pytest.raises(ValueError, match='maintenance_integrity_failed'):
+        maintenance.run(path, 'storage_compact')
+    assert s.db.execute('SELECT candidates_json FROM sg2_jobs').fetchone()[0] == value
+    assert maintenance.counts(s) == before

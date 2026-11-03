@@ -1,0 +1,522 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "condensation-mainline-20261027",
+  "title": "Write-time condensation and source deletion; standalone graph compaction retired",
+  "status": "verified",
+  "updated_at": "2026-10-28T05:56:41.658Z",
+  "capability": {
+    "actor": "SessionGraph user",
+    "trigger": "User requests removal of standalone compression while retaining write-time reuse, revisions and chat deletion cascade",
+    "outcome": "No automatic or manual graph compression; source-backed write-time identity reuse, revisions and deletion remain available",
+    "participation": {
+      "user": [
+        "Select global model"
+      ],
+      "agent": [
+        "Repair, test and install"
+      ],
+      "runtime": [
+        "Retain ordinary extraction, bounded identity recall and source revisions",
+        "Reject retired compaction commands and ignore old enable flags"
+      ]
+    },
+    "invariants": [
+      "Fruit-fly real evidence only",
+      "No model on native reads/settings or retirement migration",
+      "Keep normal extraction, write-time deduplication, revisions, indexes and source-deletion cascade",
+      "Preserve historical redirects, receipts, nodes and evidence",
+      "Do not change model, credentials or Hook trust hashes"
+    ],
+    "non_goals": [
+      "New conflict/context architecture",
+      "Historical semantic compression or target node counts",
+      "Full database rewrite, hash or copy",
+      "Other projects source evidence or graph data"
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC1",
+        "statement": "Enabled project classifies retention in the existing extraction request, performs per-object source/term recall, and cannot infer novelty from a truncated candidate list",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC2",
+        "statement": "Standalone automatic module, UI, native actions and historical scanners are removed; stale flags cannot revive them; old IDs and shared-source deletion still work",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC3",
+        "statement": "Signed installed runtime rejects retired commands, retains MCP/native fruit-fly reads and selected global model, and removes only the retired project trigger without changing graph data",
+        "required_evidence_types": [
+          "test",
+          "runtime",
+          "build"
+        ]
+      }
+    ],
+    "unknowns": []
+  },
+  "baseline": {
+    "repository_path": "/Users/shengzhoukong/Documents/AI_Agent/sessiongraph",
+    "git": {
+      "base_revision": "1cdcfac3994ee3ce5db69684904c6eff432159b8",
+      "worktree_state": "dirty",
+      "reviewable": true,
+      "notes": "Preserve preexisting dirty changes; no commit requested"
+    },
+    "architecture_entrypoint": "runtime/sessiongraph/graph_v2.py",
+    "frozen_boundaries": [
+      "Original chats and graph facts",
+      "Global model and credentials",
+      "Other projects' source evidence and graph data"
+    ],
+    "current_truth_evidence": [
+      {
+        "id": "E0",
+        "type": "database",
+        "source": "/tmp/sg-condense-live-apply.json",
+        "status": "passed",
+        "observed_at": "2026-10-27T08:33:51.618639+00:00",
+        "summary": "Before this scoped apply:30152 raw nodes and30151 canonical nodes;8 safe groups include22 original nodes from2 original entries. No complete database copy/hash or historical re-extraction."
+      }
+    ]
+  },
+  "architecture_decisions": [
+    {
+      "id": "D1",
+      "statement": "Per-object indexed recall precedes identity publication; title similarity is not the sole gate",
+      "classification": "current_decision",
+      "rationale": "Most historical nodes lack stable keys and the shared batch top12 misses reworded objects",
+      "status": "active"
+    },
+    {
+      "id": "D2",
+      "statement": "Routine-only retention is decided in the existing structured extraction; no extra per-node classifier request",
+      "classification": "current_decision",
+      "rationale": "Avoid added energy and allow raw-source/receipt inspection",
+      "status": "active"
+    },
+    {
+      "id": "D3",
+      "statement": "Legacy equivalence is an explicit bounded single-token task, not source-overlap inference",
+      "classification": "current_decision",
+      "rationale": "Shared sources often contain independent metrics and qualifications",
+      "status": "superseded",
+      "superseded_by": "D6"
+    },
+    {
+      "id": "D4",
+      "statement": "Global portable write defaults are merged at config load; explicit project opt-outs and budgets win; new Hook projects retain all portable policies",
+      "classification": "current_decision",
+      "rationale": "User explicitly requested all enabled. Do not fan out project file edits, copy route pins or add database/history sweeps; suppress inherited dependent policies when prerequisites are explicitly off.",
+      "status": "active"
+    },
+    {
+      "id": "D5",
+      "statement": "Successful writes may trigger one safe graph maintenance round per256 inserted nodes, at least1 hour apart, with at most4 single-token calls",
+      "classification": "current_decision",
+      "rationale": "User requested threshold-based automatic compression. A persistent insertion counter survives deletes; claim the watermark before transport, release all coordinator locks first, defer busy projects, and isolate maintenance failure from extraction success. Reads never trigger work; no polling, fixed-size target, raw evidence deletion or automatic VACUUM.",
+      "status": "superseded",
+      "superseded_by": "D6"
+    },
+    {
+      "id": "D6",
+      "statement": "Retire independent graph compaction; retain write-time knowledge selection, identity reuse, revisions and source deletion",
+      "classification": "current_decision",
+      "rationale": "User manages lifecycle by deleting chats and explicitly rejects additional compression energy/complexity. Historical identity mappings remain compatible; no new merges, scans, classifier jobs or undo commands.",
+      "status": "active"
+    }
+  ],
+  "slices": [
+    {
+      "id": "S1",
+      "title": "Retain write-time condensation; retire standalone maintenance",
+      "status": "verified",
+      "user_outcome": "No automatic or manual graph compression; source-backed write-time identity reuse, revisions and deletion remain available",
+      "dominant_risk": "Breaking normal extraction, old ID expansion or shared-source deletion while removing compression",
+      "depends_on": [],
+      "scope": {
+        "included": [
+          "Remove all standalone compaction entry points and historical model scanners",
+          "Ignore stale local/template flags; drop only the legacy growth trigger",
+          "Preserve indexed identity recall, retention, revisions, old redirects and chat deletion"
+        ],
+        "excluded": [
+          "New conflict/context architecture",
+          "Historical semantic compression or target node counts",
+          "Full database rewrite, hash or copy",
+          "Other projects source evidence or graph data"
+        ]
+      },
+      "decisions": {
+        "command_owner": "graph_v2 owns publication; native_settings rejects retired graph actions",
+        "data_owner": "Existing nodes/evidence/revisions; historical redirects/receipts remain readable",
+        "state_transition": "Current input -> retention -> bounded identity -> evidence/revision; confirmed deletion -> source-aware cleanup",
+        "idempotency_boundary": "Existing source fingerprints, indexed identity and publication checkpoints",
+        "recovery_behavior": "Existing extraction recovery remains unchanged; no standalone maintenance retry exists",
+        "user_approval_point": "User requested removal; do not fabricate Hook trust or chat deletion approval"
+      },
+      "implementation": {
+        "modules": [
+          "runtime/sessiongraph/condensation.py",
+          "runtime/sessiongraph/pipeline_settings.py",
+          "runtime/sessiongraph/graph_v2.py",
+          "runtime/sessiongraph/graph_contract.py",
+          "runtime/sessiongraph/graph_compaction.py",
+          "runtime/sessiongraph/native_settings.py",
+          "src-tauri/src/session_graph.rs"
+        ],
+        "contracts": [
+          "condensation-v1 write-time retention/identity unchanged",
+          "Native actions all zero-model; retired graph actions/receipt fields rejected",
+          "Legacy canonical identity projection read-compatible; no merge writer or historical classifier"
+        ],
+        "migrations": [
+          "Drop legacy growth trigger at graph initialization; preserve all old data and receipts",
+          "Shared auto_compaction disabled; portable/new configs omit retired policy"
+        ],
+        "documents": [
+          "runtime/README.md",
+          "docs/condensation-mainline.json"
+        ]
+      },
+      "acceptance_gates": [
+        {
+          "id": "G1",
+          "name": "Historical: Focused and consolidated regression",
+          "required": false,
+          "status": "passed",
+          "evidence_refs": [
+            "E1"
+          ]
+        },
+        {
+          "id": "G2",
+          "name": "Historical: Real fruit-fly bounded classifier and apply/undo verification",
+          "required": false,
+          "status": "passed",
+          "evidence_refs": [
+            "E2",
+            "E3"
+          ]
+        },
+        {
+          "id": "G3",
+          "name": "Historical: Signed installed native/UI contract verification",
+          "required": false,
+          "status": "passed",
+          "evidence_refs": [
+            "E4",
+            "E5",
+            "E6",
+            "E7",
+            "E8",
+            "E9"
+          ]
+        },
+        {
+          "id": "G4",
+          "name": "Historical: Human-approved post-install Hook event",
+          "required": false,
+          "status": "not_run",
+          "evidence_refs": []
+        },
+        {
+          "id": "RETIRE-G1",
+          "name": "Current source runtime, frontend and Rust regressions",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E12"
+          ]
+        },
+        {
+          "id": "RETIRE-G2",
+          "name": "Legacy identity, revisions and shared-source deletion compatibility",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E12",
+            "E13"
+          ]
+        },
+        {
+          "id": "RETIRE-G3",
+          "name": "Signed installed smoke and fruit-fly trigger retirement",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E13",
+            "E14"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "id": "E1",
+          "type": "test",
+          "source": "/tmp/sg-condense-final-source.log; /tmp/sg-condense-installed-focused.log; /tmp/sg-condense-ui.log; /tmp/sg-condense-rust.log",
+          "status": "passed",
+          "observed_at": "2026-10-27T08:33:51.618639+00:00",
+          "summary": "Source full-suite result recorded in final-source log (1398 tests); installed-runtime-only focused26 tests pass from isolated cwd with module path asserted. UI94/web build pass; Rust9 pass/1 ignored. A broad cross-install run gave1390 pass/8 subprocess harness failures because those test fixtures assume cwd=source/runtime; it is not counted as installed acceptance. Actual installed MCP/native smoke passes separately."
+        },
+        {
+          "id": "E2",
+          "type": "runtime",
+          "source": "/tmp/sg-condense-live-assess.json; /tmp/sg-condense-live-assess2.json; /tmp/sg-condense-live-assess3.json; /tmp/sg-condense-wire-canary3.json",
+          "status": "passed",
+          "observed_at": "2026-10-27T08:33:51.618639+00:00",
+          "summary": "Selected deepseek-v4.1-flash-1017-nothink. Validation total33 single-token historical requests (1 timeout then stopped,16 initial-policy checks not applied,16 revised-policy checks); all requests cap1. The initial model falsely labeled an added plan equivalent; content-residual/protected-condition admission and policy-version checks prevent its publication. Final real extraction wire:2 fruit-fly entries ->4 candidates, omitting routine commit narration;3 explicit extraction canaries total, no full-history loop. This is not a statistically controlled whole-project compression result."
+        },
+        {
+          "id": "E3",
+          "type": "integrity",
+          "source": "/tmp/sg-condense-live-apply.json",
+          "status": "passed",
+          "observed_at": "2026-10-27T08:33:51.618639+00:00",
+          "summary": "Fresh safety gates permit14 canonical reductions:30151->30137; raw30152 unchanged. Scoped hashes across22 sg2_nodes,22 work_memory,22 sg2_evidence,2 original entries and0 revisions unchanged through apply/undo/reapply. Excluded extra-plan, conditional-only and changed-condition nodes remain separate. Final run5da1adaa79fe450573136488eb776648; no model calls during apply/undo."
+        },
+        {
+          "id": "E4",
+          "type": "runtime",
+          "source": "/tmp/sg-condense-install.log; /tmp/sg-condense-installed-smoke.json; /tmp/sg-condense-installed-closure.json",
+          "status": "passed",
+          "observed_at": "2026-10-27T08:33:51.618639+00:00",
+          "summary": "Signed installed app runtime1c06a174fd395f0fa7f3; five changed runtime modules byte-identical to source. MCP7 tools,6 registered Hook events; zero-model recall/expand/native preview pass, selected model unchanged. Only fruit-fly condensation flag enabled. Installer explicitly reports trusted=false; user must review changed Hook command, trust hashes not edited."
+        },
+        {
+          "id": "E5",
+          "type": "browser",
+          "source": "Native SessionGraph app accessibility inspection after installation (this chat)",
+          "status": "passed",
+          "observed_at": "2026-10-27T08:33:51.618639+00:00",
+          "summary": "Live fruit-fly UI shows canonical30137/raw30152/safe0, explicit historical classifier button, and disabled empty Apply; initial preview does not make model calls. No UI classifier click or automatic apply."
+        },
+        {
+          "id": "E6",
+          "type": "test",
+          "source": "/tmp/sg-assess-contract-rust.log; /tmp/sg-assess-contract-real-receipt.json",
+          "status": "passed",
+          "observed_at": "2026-10-27T09:21:11.493775+00:00",
+          "summary": "Closed native-boundary regression missed by mocked UI tests: successful real assessment4 was rejected by unconditional model_calls=0. Rust11 pass/2 ignored; explicit ignored completed-response replay1 passes (reconstructed saved-job + fresh zero-model snapshot envelope, not original stdout; no model). Validated typed action only allows bounded matching counters; forged read payloads cannot opt in. UI94 tests and web/release builds pass."
+        },
+        {
+          "id": "E7",
+          "type": "runtime",
+          "source": "/tmp/sg-assess-contract-install.log; /tmp/sg-assess-contract-installed-smoke.json; native SessionGraph accessibility inspection in this chat",
+          "status": "passed",
+          "observed_at": "2026-10-27T09:21:11.493775+00:00",
+          "summary": "Installed signed app and restarted. Python immutable runtime unchanged1c06a174fd395f0fa7f3. Fruit-fly native UI open + explicit refresh shows canonical30156/raw30171/safe4, Apply enabled, no contract error. Saved assessment graph-assess-de5a95451987423d8366e01187b19e6c remains latest with4 calls; no new assessment or automatic apply. Installed smoke confirms7 MCP tools,6 Hook events, zero-model reads and unchanged deepseek-v4.1-flash-1017-nothink. Hook trust acceptance remains open; installer changed no Hook command."
+        },
+        {
+          "id": "E8",
+          "type": "test",
+          "source": "/tmp/sg-assess-admission-rust.log; /tmp/sg-assess-admission-real-response.json; /tmp/sg-assess-admission-ui.log",
+          "status": "passed",
+          "observed_at": "2026-10-27T09:33:41.286701+00:00",
+          "summary": "Follow-up found missing native error branch: assessment admission failure ok=false/model_calls=0/message was incorrectly rejected as a protocol error. Typed assessment now admits only zero-call failure envelopes with a nonblank message and no assessment report. Malformed/positive-call failures remain rejected. Rust12 pass/2 ignored; real installed native-settings busy response captured under a shared activity guard and replayed through Rust subprocess adapter1 pass, with no model call. UI95 pass, covers busy message/no retry plus consumed safe-count reset."
+        },
+        {
+          "id": "E9",
+          "type": "integrity",
+          "source": "/tmp/sg-compact-click-before.json; /tmp/sg-compact-click-after.json; native SessionGraph accessibility inspection in this chat",
+          "status": "passed",
+          "observed_at": "2026-10-27T09:33:41.286701+00:00",
+          "summary": "Actually clicked installed fruit-fly Apply: first attempt correctly refused an active project batch; kernel-only wait reached idle in24.75s, no kill/pause/config change. Fresh preview then actual native UI apply succeeded: canonical30179->30175, raw30194 unchanged, safe4->0 on fresh preview. Applied receipt df1504a3199402cbb3b2bedaf9850c12 adds4 aliases (7 receipt rows including3 preexisting redirects). Scoped before/after hashes for8 nodes,8 work records,8 evidence rows and0 revisions unchanged. Latest assessment ID/stats unchanged; global model unchanged. UI also clears the consumed candidate count immediately after successful apply rather than displaying stale4."
+        },
+        {
+          "id": "E10",
+          "type": "runtime",
+          "source": "runtime/tests/test_pipeline_settings.py; scripts/verify-installed.py; shared template backup20261028T033830Z-82fa6769; installed runtime4aacb7c6a42e6fc44436",
+          "status": "passed",
+          "observed_at": "2026-10-28T03:41:00+00:00",
+          "summary": "Global defaults enabled for existing enrolled and new projects: condensation, single-token judge, bounded recovery, effective revisions, cumulative resource/stage control and durable ingress. Explicit local opt-outs/budgets retained; dependent defaults gated. Final source full1423, focused108, UI95 and installed-module path asserted focused95 tests pass. Signed build/install and real fruit-fly native/MCP recall-expand smoke pass with7 tools/6 Hook events, zero model calls. Runtime SQLite query plans use source, project-term and chat indexes plus FTS5 virtual index. Fruit-fly config unchanged; provider remains deepseek-v4.1-flash-1017-nothink; deletion observer restarted onto current immutable runtime, no polling. No other project evidence read, no old-history re-extraction or schema/index sweep. Earlier canary numbers and Hook acceptance statements are historical, not new global workload measurements."
+        },
+        {
+          "id": "E11",
+          "type": "runtime",
+          "source": "runtime/tests/test_auto_compaction.py; src/components/SessionGraphCompaction.test.tsx; fruit-fly metadata auto_compaction_receipt_v1; shared template backup20261028T041033Z-47ac0f5d; installed runtime8ed188c96e1354c95e7e",
+          "status": "passed",
+          "observed_at": "2026-10-28T04:13:00+00:00",
+          "summary": "Source full1440, UI96 and installed-module-path asserted focused142 tests pass; signed app built and installed. Actual installed maintenance function invoked once on fruit-fly to verify first-threshold behavior, not presented as a naturally delivered Hook: complete in2.666s, through30238,0 model calls/0 merges/no safe new pairs. Installed native read returns enabled256/3600/4, pending0, complete receipt, canonical30219/raw30238, unchanged selected model; MCP7/native recall-expand smoke also passes with zero model calls. Shared defaults updated atomically, fruit-fly config unchanged. Synthetic transport exercises cap1, at most2 calls under test policy, actual stage/resource admission, auto apply with unchanged source/node/ledger snapshots. Concurrent claim, busy deferral, cooldown, zero gain, crash-before-model, deletion-resistant counter, explicit opt-out and maintenance-failure isolation are tested. Native visual inspection was unavailable because macOS is locked; no visual acceptance claimed. No full-history re-extraction or database physical rewrite."
+        },
+        {
+          "id": "E12",
+          "type": "test",
+          "source": "runtime/tests; frontend Vitest; src-tauri session_graph tests; installed runtime ca43b71f0023c1c5fa4f",
+          "status": "passed",
+          "observed_at": "2026-10-28T05:56:41.658Z",
+          "summary": "Current source full runtime1403 pass with1 preexisting dateutil warning; frontend90 pass; Rust11 pass/1 opt-in real smoke ignored. Installed focused160 pass with module paths asserted under the immutable runtime. Regression covers write-time reuse/retention, stale config ignored, no post-success maintenance, retired native commands/receipt fields rejected, legacy ID/search/revision/relationship projection and shared-source/correction deletion. Removed compression-only tests were replaced with retirement and compatibility guards; counts are not directly comparable to the prior suite."
+        },
+        {
+          "id": "E13",
+          "type": "runtime",
+          "source": "scripts/verify-installed.py; fruit-fly scoped SQLite transaction and installed native-read memory; shared backup20261028T054647Z-0e3321ed",
+          "status": "passed",
+          "observed_at": "2026-10-28T05:56:41.658Z",
+          "summary": "Installed smoke passes:7 MCP tools,6 registered Hook events, native status/work_map, global model and recall/expand; retired graph actions return zero-call rejection. Fruit-fly-only project lock/transaction drops the existing sg_auto_compaction_insert trigger. Before/after data counts unchanged:30293 raw nodes,95944 evidence,12282 relations,510 revision items,875 revision sources,0 revision reviews; all19 redirects and5 receipts preserved byte-for-byte, other triggers unchanged, targeted redirect FK check passes. Actual installed native old-ID expansion succeeds. Project config hash unchanged, effective write-time condensation enabled, selected global model remains deepseek-v4.1-flash-1017-nothink. Zero model calls; no corpus scan/copy/hash, VACUUM, source deletion, new natural Hook or visual acceptance claimed."
+        },
+        {
+          "id": "E14",
+          "type": "build",
+          "source": "/Applications/SessionGraph.app; runtime ca43b71f0023c1c5fa4f; registration backup20261028T055316Z-0d006ac5",
+          "status": "passed",
+          "observed_at": "2026-10-28T05:56:41.658Z",
+          "summary": "npm run app:build and app:install pass, including TypeScript/Vite/Rust release, macOS signing and strict signature verification. Installed package contains no auto_compaction module; UI and native typed actions have no standalone graph compression. Historical identity compatibility and ordinary condensation remain packaged. Previous app retained at /Applications/SessionGraph.app.backup-1793166796228. Installer does not edit trust hashes or kill immutable in-flight extraction/MCP/deletion observers."
+        }
+      ],
+      "residual_items": [
+        {
+          "id": "R1",
+          "category": "future_scope",
+          "description": "A natural newly delivered Hook and native visual inspection are not demonstrated by code tests or installed subprocess smoke.",
+          "owner": "User",
+          "status": "open",
+          "exit_condition": "Observe a user-driven new Hook or native UI when available.",
+          "mitigation": "Do not edit trust hashes, kill in-flight extraction or claim fresh visual/Hook acceptance."
+        },
+        {
+          "id": "R2",
+          "category": "future_scope",
+          "description": "Historical semantic compression and compression-ratio goals were cancelled by the user in SC3.",
+          "owner": "SessionGraph explicit maintenance",
+          "status": "resolved",
+          "exit_condition": "Standalone candidate scans, classifier and merge actions removed.",
+          "mitigation": "Preserve old evidence and mappings; write-time recall remains bounded and may retain duplicates."
+        },
+        {
+          "id": "R3",
+          "category": "technical_debt",
+          "description": "Substantial preexisting dirty worktree plus this implementation is preserved; no Git commit was requested.",
+          "owner": "Repository owner",
+          "status": "open",
+          "exit_condition": "Review and commit a chosen baseline when requested."
+        }
+      ]
+    }
+  ],
+  "traceability": [
+    {
+      "id": "T1",
+      "user_promise": "No automatic or manual graph compression; source-backed write-time identity reuse, revisions and deletion remain available",
+      "architecture_rule": "Maintain knowledge during construction and source deletion, not standalone compression",
+      "contract_or_schema": "condensation-v1; native action allowlists; historical canonical identity schema",
+      "implementation_owner": "graph_v2 / condensation / native_settings / chat_cleanup",
+      "positive_test": "test_condensation.py; test_graph_compaction.py; test_chat_cleanup.py",
+      "regression_guard": "Full runtime/UI and Rust gates plus installed fruit-fly zero-model smoke"
+    }
+  ],
+  "verification_gates": [
+    {
+      "id": "G1",
+      "name": "Current source runtime, frontend and Rust regressions",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E12"
+      ]
+    },
+    {
+      "id": "G2",
+      "name": "Legacy identity, revisions and shared-source deletion compatibility",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E12",
+        "E13"
+      ]
+    },
+    {
+      "id": "G3",
+      "name": "Signed installed smoke and fruit-fly trigger retirement",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E13",
+        "E14"
+      ]
+    },
+    {
+      "id": "G4",
+      "name": "Natural new Hook event and native visual check",
+      "required": false,
+      "status": "not_run",
+      "evidence_refs": []
+    }
+  ],
+  "residual_items": [
+    {
+      "id": "R1",
+      "category": "future_scope",
+      "description": "A natural newly delivered Hook and native visual inspection are not demonstrated by code tests or installed subprocess smoke.",
+      "owner": "User",
+      "status": "open",
+      "exit_condition": "Observe a user-driven new Hook or native UI when available.",
+      "mitigation": "Do not edit trust hashes, kill in-flight extraction or claim fresh visual/Hook acceptance."
+    },
+    {
+      "id": "R2",
+      "category": "future_scope",
+      "description": "Historical semantic compression and compression-ratio goals were cancelled by the user in SC3.",
+      "owner": "SessionGraph explicit maintenance",
+      "status": "resolved",
+      "exit_condition": "Standalone candidate scans, classifier and merge actions removed.",
+      "mitigation": "Preserve old evidence and mappings; write-time recall remains bounded and may retain duplicates."
+    },
+    {
+      "id": "R3",
+      "category": "technical_debt",
+      "description": "Substantial preexisting dirty worktree plus this implementation is preserved; no Git commit was requested.",
+      "owner": "Repository owner",
+      "status": "open",
+      "exit_condition": "Review and commit a chosen baseline when requested."
+    }
+  ],
+  "scope_changes": [
+    {
+      "id": "SC1",
+      "reason": "User explicitly requested global enablement after learning that new projects previously inherited only graph_v2.enabled",
+      "impact": "Portable write policies now inherit from the shared template for existing enrolled and future projects; explicit overrides preserved. Real project validation remains fruit-fly only; synthetic projects cover new/existing/disabled routing.",
+      "decision": "accepted",
+      "compensation": "Backed-up atomic template update; previous installed app retained; no per-project config fanout, provider change, history sweep or model call. Existing MCP workers remain on their immutable runtime until reconnect; new Hook invocations use the updated launcher.",
+      "recorded_at": "2026-10-28T03:41:00+00:00"
+    },
+    {
+      "id": "SC2",
+      "reason": "User requested graph compression as a default behavior at a quantity threshold instead of relying on manual buttons",
+      "impact": "Enable automatic bounded graph assessment/apply on successful writes. Default256 new nodes,3600-second cooldown,4 single-token calls at most; no per-turn model or periodic worker. Existing safe-merge/provenance guards remain unchanged.",
+      "decision": "accepted",
+      "compensation": "Backed-up template and installed app; project opts may disable auto_compaction or set max_model_calls=0. Claim growth before calls and never automatically retry the same growth. Busy/failure cannot fail extraction. Original nodes/sources/immutable revisions and merge receipts remain; physical storage maintenance stays manual.",
+      "recorded_at": "2026-10-28T04:13:00+00:00"
+    },
+    {
+      "id": "SC3",
+      "reason": "User explicitly requested implementation of standalone graph compression removal",
+      "impact": "Remove automatic runner/counter updates, historical pair classifiers, native actions and UI. Preserve current-input condensation and old identity readers.",
+      "decision": "accepted",
+      "compensation": "Backed-up global disable before install; no per-project config fanout, source deletion or database rewrite. Existing immutable workers are not killed.",
+      "recorded_at": "2026-10-28T05:50:19.415Z"
+    }
+  ],
+  "delivery": {
+    "reviewable_git_baseline": true,
+    "reproducible_from_baseline": false,
+    "migration_required": true,
+    "migration_rehearsed": true,
+    "rollback_documented": true,
+    "documents_synchronized": true,
+    "release_reference": "/Applications/SessionGraph.app; immutable runtime ca43b71f0023c1c5fa4f"
+  },
+  "completion": {
+    "implemented": true,
+    "verified": true,
+    "delivery_ready": false,
+    "decision": "User-requested retirement implemented, signed, installed and verified in current source, installed tests and fruit-fly native/MCP/SQLite boundaries (E12-E14). Existing normal input condensation, revision processing, deletion and historical identity references preserved. No new natural Hook, actual user chat deletion or native visual check was performed this turn; those are not replaced by test success. Existing MCP connections retain their immutable runtime until reconnect. Preexisting dirty worktree preserved and no commit requested, so not claiming reproducibility from a committed release baseline."
+  }
+}

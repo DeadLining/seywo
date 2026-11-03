@@ -6,11 +6,12 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from .storage import exists
+from .job_lifecycle import cascade_schema
 
 REVISION = 'recovery-v1'
 SCHEMA = '''CREATE TABLE IF NOT EXISTS sg2_recoveries(
  id TEXT PRIMARY KEY,job TEXT NOT NULL,reason TEXT NOT NULL,created REAL NOT NULL,
- before_json TEXT NOT NULL,proof_id TEXT,automatic_key TEXT UNIQUE,woken INTEGER NOT NULL DEFAULT 0);'''
+ before_json TEXT NOT NULL,proof_id TEXT,automatic_key TEXT UNIQUE,woken INTEGER NOT NULL DEFAULT 0);''' + cascade_schema('sg2_recoveries')
 
 
 def proof(store, request_id):
@@ -49,7 +50,7 @@ def plan(store, *, request_id=None, job_ids=None):
     results = []
     for row in store.db.execute('''SELECT j.id,j.chat,j.updated_at,c.* FROM sg2_jobs j
       JOIN sg2_control c ON c.job=j.id WHERE j.project=? AND c.state='blocked'
-      AND j.state NOT IN ('complete','superseded')
+      AND j.state NOT IN ('complete','superseded','dismissed')
       AND NOT EXISTS (SELECT 1 FROM sg2_attempts a WHERE a.job=j.id AND a.state='running')
       ORDER BY j.updated_at,j.id''', (store.config['project_id'],)):
         if selected and row['id'] not in selected:

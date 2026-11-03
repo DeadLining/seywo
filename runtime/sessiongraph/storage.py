@@ -85,7 +85,7 @@ def revision_triggers(db):
     # A revision is a change token, not a cryptographic proof of the whole graph.
     db.execute("INSERT OR IGNORE INTO metadata VALUES ('graph_revision_v2','0')")
     tables = ('work_memory', 'entries', 'work_memory_relations', 'sg2_nodes',
-              'sg2_relations', 'sg2_unresolved', 'sg2_evidence', 'sg2_relation_evidence')
+              'sg2_relations', 'sg2_unresolved', 'sg2_evidence', 'sg2_relation_evidence', 'sg_graph_redirects', 'sg_revision_items', 'sg_revision_sources', 'sg_revision_reviews', 'sg_revision_review_controls')
     for table in tables:
         if not exists(db, table): continue
         for action in ('INSERT','UPDATE','DELETE'):
@@ -128,10 +128,11 @@ def migrate_sources(store):
                     if line in entries:
                         event=json.loads(record); payload=event.get('payload',{})
                         normalized=normalize(payload); entry=entries[line]
-                        if not normalized or normalized[2]!=entry['text']:
+                        from .source_text import source_hash
+                        if not normalized or digest(normalized[2]) != source_hash(store, entry['id'], entry['text']):
                             raise ValueError('entry_text_changed')
                         # Older IDs and hashes are preserved, not regenerated.
-                        locations.append((entry['id'],payload.get('channel',''),payload.get('name',''),offset,len(raw),h,digest(entry['text'])))
+                        locations.append((entry['id'],payload.get('channel',''),payload.get('name',''),offset,len(raw),h,digest(normalized[2])))
                         found.add(line)
                     if line in originals:
                         event=json.loads(record)
@@ -246,19 +247,23 @@ def ranked_memories(store, query, terms, patterns, statuses, chat_filter, chat_a
             UNION ALL SELECT m.rowid,NULL body,1 dirty FROM memory_search_dirty d
               JOIN work_memory m ON m.id=d.id"""
         candidate_args = [expr]
+    from .graph_compaction import expression as canonical_expression
+    canonical_id = canonical_expression(store,'m.id')
     eligibility = '1' if query.strip() == '*' else 'lexical>0'
     sql = f"""WITH candidates AS MATERIALIZED ({candidates}),
       matched AS MATERIALIZED (
-        SELECT m.rowid rid,m.id,m.updated_at,
+        SELECT m.rowid rid,m.id,m.updated_at,{canonical_id} canonical_id,
           CASE WHEN c.dirty THEN sg_dirty_score(m.title,m.content,m.aliases_json,m.paths_json)
             WHEN ({strong_sql}) THEN round(({score}) / ?,6) ELSE 0 END lexical,
           CASE WHEN instr(sg_casefold(m.title||char(10)||m.content||char(10)||m.paths_json||char(10)||m.aliases_json),?)>0
             THEN 2 ELSE 0 END exact
         FROM candidates c CROSS JOIN work_memory m ON m.rowid=c.rowid
-        WHERE m.status IN ({','.join('?' for _ in statuses)})
+        WHERE (SELECT cm.status FROM work_memory cm WHERE cm.id={canonical_id}) IN ({','.join('?' for _ in statuses)})
           AND (m.project_id IS NULL OR m.project_id=?) AND {chat_filter}),
-      ranked AS (SELECT *,lexical+exact score FROM matched WHERE {eligibility})
-      SELECT rid,count(*) OVER() total FROM ranked
+      ranked_raw AS (SELECT *,lexical+exact score FROM matched WHERE {eligibility}),
+      partitioned AS (SELECT *,row_number() OVER(PARTITION BY canonical_id ORDER BY score DESC,updated_at DESC,id DESC) member_rank FROM ranked_raw),
+      ranked AS (SELECT * FROM partitioned WHERE member_rank=1)
+      SELECT rid,count(*) OVER() total,canonical_id FROM ranked
       ORDER BY score DESC,updated_at DESC,id DESC LIMIT ? OFFSET ?"""
     args = [*candidate_args,*strong_args,*score_args,total,query.strip().casefold(),
             *statuses,store.config['project_id'],*chat_args,limit,offset]
@@ -270,7 +275,15 @@ def ranked_memories(store, query, terms, patterns, statuses, chat_filter, chat_a
     ids = [r[0] for r in rows]
     fetched = {r['rowid']:r for r in db.execute(
         f"SELECT rowid,* FROM work_memory WHERE rowid IN ({','.join('?' for _ in ids)})",ids)}
-    return [fetched[i] for i in ids], rows[0][1]
+    result=[]
+    for hit in rows:
+        raw=fetched[hit[0]]
+        if raw['id']!=hit[2]:
+            item=dict(db.execute('SELECT * FROM work_memory WHERE id=?',(hit[2],)).fetchone())
+            item['matched_member_id']=raw['id']
+            result.append(item)
+        else: result.append(raw)
+    return result, rows[0][1]
 
 
 ARCHIVE_MARKER = '_sessiongraph_payload_v1'
@@ -375,3 +388,145 @@ def archive_completed_payloads(store, job_id=None):
                 if reference != value:
                     db.execute(f'UPDATE {table} SET {field}=? WHERE id=?',(reference,row['id']))
     return report
+
+PAYLOAD_REFERENCE_COLUMNS = (
+    ('sg2_jobs', ('input_json', 'output_json', 'candidates_json', 'stats_json')),
+    ('sg2_job_parts', ('input_json', 'output_json', 'stats_json')),
+    ('sg2_checkpoints', ('result_json',)),
+    ('sg2_unresolved', ('payload_json',)),
+    ('sg_run_receipts', ('payload',)),
+    ('sg_retained_sources', ('payload',)),
+    ('sg2_recoveries', ('before_json',)),
+    ('sg2_task_dismissals', ('before_json',)),
+    # Published graph facts may retain an exact envelope in a quote or an
+    # assertion snapshot. These are not archive owners, but they are readers
+    # and must keep shared blobs alive.
+    ('sg2_evidence', ('quote', 'assertion_json')),
+    ('sg2_relation_evidence', ('quote',)),
+    ('sg2_relations', ('judgment_json',)),
+    ('sg2_judgments', ('answer_json',)),
+    ('sg2_judge_migrations', ('before_json',)),
+    ('work_memory', ('content', 'source_quote')),
+    ('work_memory_relations', ('source_quote', 'source_mention', 'target_mention')),
+)
+
+
+def payload_hash(value):
+    """Return only an exact content-addressed envelope; never a substring match."""
+    if isinstance(value, str):
+        if not value.startswith('{"' + ARCHIVE_MARKER + '":'):
+            return None
+        try:
+            reference = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    else:
+        reference = value
+    if not isinstance(reference, dict) or set(reference) != {ARCHIVE_MARKER}:
+        return None
+    identity = reference[ARCHIVE_MARKER]
+    if not isinstance(identity, str) or len(identity) != 64 or any(c not in '0123456789abcdef' for c in identity):
+        return None
+    return identity
+
+
+def payload_hashes(value, _depth=0):
+    """Collect exact references, including JSON snapshots nested in history rows."""
+    if _depth > 8:
+        return set()
+    exact = payload_hash(value)
+    if exact is not None:
+        return {exact}
+    if isinstance(value, dict):
+        found = set()
+        for item in value.values():
+            found.update(payload_hashes(item, _depth + 1))
+        return found
+    if isinstance(value, (list, tuple)):
+        found = set()
+        for item in value:
+            found.update(payload_hashes(item, _depth + 1))
+        return found
+    if isinstance(value, str) and ARCHIVE_MARKER in value:
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return set()
+        return payload_hashes(parsed, _depth + 1)
+    return set()
+
+
+PAYLOAD_CANDIDATE_SCAN_LIMIT = 32
+
+
+def payload_references(db, *, candidates=None, exclude_receipt_chats=()):
+    """Read canonical payload columns only. Candidate filtering bounds explicit scans.
+
+    A candidate is queried as a 64-character hash substring, then parsed as an
+    exact reference envelope. This catches references nested inside escaped
+    JSON strings without decoding unrelated history. Large candidate sets fall
+    back to one marker scan so SQL expression size stays bounded.
+    """
+    found = set()
+    wanted = None if candidates is None else set(candidates)
+    if wanted is not None and not wanted:
+        return set()
+    # Hash characters are not escaped inside nested JSON strings, so a plain
+    # substring keeps both outer and nested references visible to the parser.
+    hashes = None if wanted is None or len(wanted) > PAYLOAD_CANDIDATE_SCAN_LIMIT else sorted(wanted)
+    excluded = tuple(sorted(set(exclude_receipt_chats)))
+    for table, columns in PAYLOAD_REFERENCE_COLUMNS:
+        if not exists(db, table):
+            continue
+        for column in columns:
+            if hashes is None:
+                condition = ['instr(' + column + ', ?)>0']
+                args = [ARCHIVE_MARKER]
+            else:
+                condition = ['(' + ' OR '.join('instr(' + column + ', ?)>0' for _ in hashes) + ')']
+                args = list(hashes)
+            if table == 'sg_run_receipts' and excluded:
+                condition.append('chat NOT IN (' + ','.join('?' for _ in excluded) + ')')
+                args.extend(excluded)
+            for row in db.execute(f'SELECT {column} FROM {table} WHERE ' + ' AND '.join(condition),
+                                  args):
+                found.update(payload_hashes(row[0]))
+    return found if wanted is None else found & wanted
+
+
+def referenced_payloads(db):
+    return payload_references(db)
+
+
+def payloads_still_referenced(db, candidates):
+    return payload_references(db, candidates=candidates)
+
+
+def archive_payloads(db):
+    """Return hash -> (packed, original) sizes for this database only."""
+    if not exists(db, 'sg_payload_archive'):
+        return {}
+    return {row[0]: (row[1], row[2]) for row in db.execute(
+        'SELECT hash,length(data),size FROM sg_payload_archive')}
+
+
+def unreferenced_payloads(db, *, exclude_receipt_chats=()):
+    referenced = payload_references(db, exclude_receipt_chats=exclude_receipt_chats)
+    result = {}
+    for identity, sizes in archive_payloads(db).items():
+        if identity not in referenced:
+            result[identity] = sizes
+    return result
+
+
+def delete_payloads(db, identities):
+    """Chunk deletes to stay well below SQLite's bound-parameter limit."""
+    identities = sorted(set(identities))
+    if not identities or not exists(db, 'sg_payload_archive'):
+        return 0
+    deleted = 0
+    for start in range(0, len(identities), 400):
+        chunk = identities[start:start + 400]
+        deleted += db.execute('DELETE FROM sg_payload_archive WHERE hash IN ('
+                              + ','.join('?' for _ in chunk) + ')', chunk).rowcount
+    return deleted

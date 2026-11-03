@@ -5,6 +5,7 @@ import http.client
 import json
 import math
 import os
+import re
 from urllib import error, request
 
 from .content_boundary import assert_text_only
@@ -165,6 +166,14 @@ class SingleTokenJudge:
             try:
                 raw = read_response(self, req, [NoRedirect])
             except (error.URLError, OSError, http.client.HTTPException) as exc:
+                envelope = getattr(exc, 'provider_error_body', None)
+                detail = envelope.get('error') if isinstance(envelope, dict) else None
+                message = detail.get('message') if isinstance(detail, dict) else None
+                if (isinstance(exc, error.HTTPError) and exc.code == 502
+                        and isinstance(message, str) and re.fullmatch(
+                            r'[^\n]{1,128} HTTP 200 returned no assistant text, reasoning, or tool call '
+                            r'\(input_tokens=\d+, output_tokens=1\)', message)):
+                    raise failure('budget_incompatible') from None
                 raise transport(exc, self.provider_name) from None
             result = self.parse(raw, prepared)
         except Failure as exc:

@@ -81,7 +81,7 @@ def enabled(store):
 
 def _entry(store, entry_id):
     row = store.db.execute('''SELECT e.id,e.session_id,e.line,e.timestamp,e.kind,e.role,e.call_id,
-        length(cast(e.text AS blob)) text_bytes,s.path FROM entries e
+        sg_source_bytes(e.id,e.text) text_bytes,s.path FROM entries e
         JOIN sessions s ON s.id=e.session_id WHERE e.id=?''', (entry_id,)).fetchone()
     if row is None:
         fail('unknown_entry')
@@ -95,14 +95,13 @@ def _original(store, row, meter):
     loc = store.db.execute('SELECT * FROM sg_source_locations WHERE entry_id=?',
                            (row['id'],)).fetchone() if storage.exists(store.db, 'sg_source_locations') else None
     raw = None
-    saved = store.db.execute('SELECT length(cast(event_json AS blob)) FROM raw_events '
-                             'WHERE session_id=? AND line=?', (row['session_id'], row['line'])).fetchone()
-    if saved:
-        if saved[0] > MAX_BYTES:
+    from .legacy_storage import raw_size, read_raw
+    saved = raw_size(store, row['session_id'], row['line'])
+    if saved is not None:
+        if saved > MAX_BYTES:
             fail('record_too_large')
-        meter.reserve(saved[0])
-        raw = store.db.execute('SELECT event_json FROM raw_events WHERE session_id=? AND line=?',
-                                (row['session_id'], row['line'])).fetchone()[0].encode('utf-8')
+        meter.reserve(saved)
+        raw = read_raw(store, row['session_id'], row['line']).encode('utf-8')
     else:
         if not loc or loc['byte_offset'] is None or loc['byte_length'] is None:
             fail('locator_missing')
@@ -127,6 +126,11 @@ def _original(store, row, meter):
         event = json.loads(raw)
         normalized = normalize(event['payload'])
         text = store.db.execute('SELECT text FROM entries WHERE id=?', (row['id'],)).fetchone()[0]
+        from .source_text import external
+        if text == '' and external(store, row['id']):
+            if not loc or not normalized or digest(normalized[2]) != loc['text_hash']:
+                fail('source_changed')
+            text = normalized[2]
         identity = 'e_' + digest(f"{row['session_id']}:{row['line']}:{digest(raw)}")[:32]
         if (event.get('type') != 'response_item' or identity != row['id']
                 or normalized != (row['kind'], row['role'], text, row['call_id'])
@@ -223,7 +227,8 @@ def read(store, entry_id, *, max_bytes=MAX_BYTES, _meter=None):
                 or (not redactions and row['record_hash'] != row['snapshot_hash'])
                 or 'e_' + digest(f"{entry['session_id']}:{entry['line']}:{row['record_hash']}")[:32] != entry_id):
             fail('metadata_mismatch')
-        current_hash = digest(store.db.execute('SELECT text FROM entries WHERE id=?', (entry_id,)).fetchone()[0])
+        from .source_text import source_hash
+        current_hash = source_hash(store, entry_id, store.db.execute('SELECT text FROM entries WHERE id=?', (entry_id,)).fetchone()[0])
         if current_hash != row['text_hash']:
             fail('indexed_text_changed')
     except Failure:

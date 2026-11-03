@@ -138,7 +138,8 @@ def install(
                 ],
             }
         )
-        template = json.loads(Path(prior["template_config"]).read_text())
+        from .provider_settings import read_template
+        template = read_template(state) or json.loads(Path(prior["template_config"]).read_text())
         fields = {
             "base_url_env",
             "api_key_env",
@@ -151,13 +152,17 @@ def install(
             "auth",
         }
         from .global_hooks import graph_template
-        graph = graph_template(json.loads(project_config.read_text())) or graph_template(template)
+        graph = graph_template(template) or graph_template(json.loads(project_config.read_text()))
+        pipeline_hook = {k: template.get('hook', {})[k] for k in ('durable_ingress',)
+                         if k in template.get('hook', {})}
         template = {
             "provider": {k: v for k, v in template["provider"].items() if k in fields},
             "extraction": template["extraction"],
         }
         if graph is not None:
             template["graph_v2"] = graph
+        if pipeline_hook:
+            template['hook'] = pipeline_hook
         registry = Path(prior["registry"])
         projects = json.loads(registry.read_text()) if registry.exists() else {"projects": []}
         root = str(project_config.resolve().parent.parent)

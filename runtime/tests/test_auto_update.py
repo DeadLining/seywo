@@ -402,3 +402,19 @@ def test_backlog_only_yields_without_failure_or_no_progress_loop(tmp_path):
     assert result['failure_codes']==[] and result['failed_batches']==0
     assert result['reported_model_calls']==4
     assert result['backlog_failures'][0]['error_code']=='jev_http_451'
+
+
+def test_circuit_wait_is_deferred_and_does_not_spin(tmp_path):
+    config=init_project(tmp_path);Store(load_config(config)).close()
+    calls=[]
+    def execute(argv,timeout):
+        calls.append(argv)
+        assert len(calls)<=2, 'circuit wait must yield without another dispatch'
+        if 'refresh-chat' in argv:return {'added_entries':1,'skipped':[]}
+        return dict(saved=[],saved_relations=[],failed=[{'error_code':'resource_circuit_open'}],
+            model_calls=0,graph_v2=dict(durable_stages=True,source_remaining=True,
+                runnable_remaining=True,next_retry_at=9999999999))
+    result=run_update(config,'chat','PostCompact',execute=execute)
+    assert len(calls)==2 and result['reported_model_calls']==0
+    assert result['state']=='pending' and result['attempt_outcome']=='deferred'
+    assert result['error_code']=='resource_circuit_open' and result['failed_batches']==0

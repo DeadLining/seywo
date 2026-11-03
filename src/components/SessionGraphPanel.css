@@ -145,6 +145,9 @@
 .sg-panel .sg-view-switch{display:flex;gap:2px;padding:2px;border:1px solid #e1e6da;border-radius:6px;background:#eef2e8}
 .sg-panel .sg-view-switch button{border:0;border-radius:4px;background:transparent;min-height:23px;height:23px;padding:0 10px;font-size:10px;font-weight:500;color:#7b8571}
 .sg-panel .sg-view-switch button[aria-pressed=true]{background:#fff;color:#34482a;box-shadow:0 1px 3px #34482a12}
+.sg-panel .sg-layer-switch{display:flex;gap:2px;padding:2px;border:1px solid #e1e6da;border-radius:6px;background:#eef2e8}
+.sg-panel .sg-layer-switch button{border:0;border-radius:4px;background:transparent;min-height:23px;height:23px;padding:0 8px;font-size:10px;font-weight:500;color:#7b8571}
+.sg-panel .sg-layer-switch button[aria-pressed=true]{background:#fff;color:#34482a;box-shadow:0 1px 3px #34482a12}
 .sg-panel .sg-pagination{display:flex;flex-wrap:nowrap;gap:4px;margin:8px 0 12px;min-width:0}
 .sg-panel .sg-pagination p{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:4px 8px;font-size:10px;margin:0;color:#8a9381}.sg-panel .sg-pagination p span{color:#a1a899;font-variant-numeric:tabular-nums}
 .sg-panel .sg-pagination button{display:grid;place-items:center;min-height:25px;height:25px;width:25px;padding:0;border:1px solid #e0e6d8;border-radius:6px;background:#fff;color:#6b7b5d}

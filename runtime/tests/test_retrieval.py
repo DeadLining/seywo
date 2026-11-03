@@ -1,5 +1,6 @@
 """Deterministic retrieval regressions: never invoke a provider."""
 
+from sessiongraph.source_text import hydrate
 import json
 import socket
 
@@ -27,7 +28,7 @@ def indexed(tmp_path):
             ],
         )
     )
-    entries = [dict(e) for e in s.db.execute("SELECT * FROM entries ORDER BY line")]
+    entries = [hydrate(s, e) for e in s.db.execute("SELECT * FROM entries ORDER BY line")]
 
     def extract(batch, policy):
         return {
@@ -153,7 +154,8 @@ def test_alias_flood_does_not_steal_raw_channel(indexed):
                 "INSERT INTO evidence VALUES (?,?,?,?,?)",
                 (rid, entries[1]["id"], entries[1]["text"], 0, len(entries[1]["text"])),
             )
-            s.db.execute("INSERT INTO docs VALUES (?,?,?)", (rid, "record", "检索 大模型"))
+            from sessiongraph.source_text import write_doc
+            write_doc(s, rid, "record", "检索 大模型")
     result = s.search("检索 大模型", limit=3)
     assert entries[0]["id"] in sources(result["hits"][0])
     assert result["retrieval"]["candidate_limit_reached"]

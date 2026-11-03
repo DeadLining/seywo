@@ -4,6 +4,7 @@ import json
 from sessiongraph.auto_update import run_update, update_status
 from sessiongraph.core import Store, init_project, load_config
 from sessiongraph.extraction import ProviderError
+from sessiongraph.failures import Failure, describe
 from sessiongraph.memories import CHUNK_CAP, run_chat, _iter_batches
 from test_mvp import write_session
 
@@ -45,6 +46,17 @@ def test_provider_timeout_is_classified_without_leaking_details(tmp_path):
     assert result['failure_codes'] == ['provider_timeout']
     assert '180 seconds' not in json.dumps(result)
     store.close()
+
+
+def test_internal_lifecycle_detail_is_kept_but_arbitrary_text_is_not():
+    assert describe(ValueError('cleanup_shared_node_without_evidence'))['detail'] == \
+        'cleanup_shared_node_without_evidence'
+    assert describe(ValueError('graph_source_changed'))['detail'] == 'graph_source_changed'
+    secret = Failure('graph_io', detail='Authorization: Bearer sk-private')
+    assert describe(secret)['detail'] == 'graph_io'
+    unsafe = describe(ValueError('source text says password=hunter2'))
+    assert unsafe['detail'] == 'graph_validation'
+    assert 'hunter2' not in json.dumps(unsafe)
 
 
 def test_oversize_warning_does_not_make_update_failed(tmp_path):

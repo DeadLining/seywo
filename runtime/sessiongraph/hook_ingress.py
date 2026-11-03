@@ -79,11 +79,17 @@ def notify(config_path, chat, event, transcript, *, launch=True, now=None):
                 'path': str(path), 'fingerprint': fingerprint, 'revision': uuid.uuid4().hex,
                 'pending': True, 'event': event, 'observed_at': stamp,
             }
-            # New input can revive a blocked chat, not reset per-job retry controls.
+            # Persist new input without advancing an outstanding failure deadline.
+            waiting = prior.get('state') == 'retry_wait' and prior.get('due', 0) > stamp
+            incompatible = (prior.get('state') == 'blocked'
+                and prior.get('error_code') == 'single_token_budget_incompatible'
+                and prior.get('provider_identity') == c.provider_identity(config))
+            held = waiting or incompatible
             queue[identity] = {**prior, 'config': str(config_path), 'chat': chat,
                 'target': prior.get('target'), 'run_id': prior.get('run_id', ''),
-                'state': 'ready' if prior.get('state') != 'running' else 'running',
-                'due': stamp, 'updated_at': stamp, 'ingress': ingress, 'error_code': None,
+                'state': prior['state'] if held or prior.get('state') == 'running' else 'ready',
+                'due': prior['due'] if held else stamp, 'updated_at': stamp, 'ingress': ingress,
+                'error_code': prior.get('error_code') if held else None,
                 'wake_pending': True}
             c.write(folder / 'queue.json', queue)
         # Retrying an accepted notification also retries a failed launcher, but
@@ -117,7 +123,8 @@ def reconcile(queue, identity, prior, run, claimed, *, input_imported):
                   'dismissed_at': 0, 'due': 0, 'updated_at': run.get('updated_at', 0),
                   'failures': 0, 'no_progress': 0, 'error_code': None}
     if (pending({'ingress': ingress}) and not prior.get('pending_import')
-            and run['state'] in {'succeeded', 'cancelled'}):
+            and run['state'] in {'succeeded', 'cancelled'}
+            and result.get('state') != 'retry_wait'):
         result.update(state='ready' if run['state'] == 'succeeded' else 'blocked',
                       due=0, error_code=None if run['state'] == 'succeeded' else 'ingress_cancelled')
     result['ingress'] = ingress

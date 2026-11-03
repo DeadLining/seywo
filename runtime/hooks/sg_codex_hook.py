@@ -177,6 +177,17 @@ def _spawn_extraction(config: Path, chat_id: str, transcript: str) -> None:
         pass
 
 
+def _spawn_cleanup(config: Path, chat_id: str, transcript: str) -> None:
+    from sessiongraph.chat_cleanup import enabled
+    if not enabled(load_config(config)) or not transcript:
+        return
+    subprocess.Popen(
+        [str(PYTHON), '-B', '-m', 'sessiongraph.chat_cleanup', '--config', str(config),
+         '--chat', chat_id, '--transcript', transcript], cwd=str(REPO),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+
+
 def main() -> int:
     try:
         raw = sys.stdin.read(262144)
@@ -190,11 +201,11 @@ def main() -> int:
     os.environ["SG_HOOK_EVENT"] = event
     session_id = payload.get("session_id") or ""
     cwd = payload.get("cwd") or os.getcwd()
-    if event not in {"PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit", "Stop"}:
+    if event not in {"PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}:
         return 0
     if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
         return 0
-    if event == 'Stop':
+    if event in {'Stop', 'SessionEnd'}:
         # Global registration must not initialize or enroll unrelated projects.
         if GLOBAL_SETTINGS.is_file() and json.loads(GLOBAL_SETTINGS.read_text()).get('enabled') is not True:
             return 0
@@ -206,6 +217,17 @@ def main() -> int:
     if config is None:
         return 0
     if (config.parent / "disabled").exists() or load_config(config).get("hook", {}).get("enabled") is False:
+        return 0
+
+    if event != 'SessionEnd':
+        from sessiongraph.deletion_observer import start
+        try:
+            start(config)
+        except (OSError, ValueError):
+            pass  # Observer admission cannot suppress normal restore/extraction.
+
+    if event == 'SessionEnd':
+        _spawn_cleanup(config, session_id, payload.get('transcript_path') or '')
         return 0
 
     if event in {"PreCompact", "PostCompact", "Stop"}:

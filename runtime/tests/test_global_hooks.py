@@ -42,6 +42,9 @@ def test_new_projects_isolated_and_registry_merged(tmp_path, settings):
         assert cfg['hook']['allowed_transcript_roots'] == settings['transcript_roots']
         with_store = Store(cfg, readonly=True)
         assert with_store.resume()['memories'] == []
+        from sessiongraph import source_text, run_receipts
+        assert source_text.enabled(with_store) and source_text.unified(with_store)
+        assert run_receipts.enabled(with_store.db)
         with_store.close()
     registry = json.loads(Path(settings['registry']).read_text())
     assert {p['root'] for p in registry['projects']} == {str(r) for r in roots}
@@ -58,6 +61,25 @@ def test_existing_project_preserved_and_nested_git_not_parent(tmp_path, settings
     (sub / '.git').mkdir(parents=True)
     assert ensure_project(str(sub), settings) == sub / '.sessiongraph/config.json'
     assert ensure_project(str(parent), settings) == existing
+    assert existing.read_bytes() == before
+
+
+def test_existing_and_new_projects_inherit_global_cleanup(tmp_path, settings, monkeypatch):
+    from sessiongraph.chat_cleanup import enabled
+    settings = {**settings, 'cleanup_missing_chats': True}
+    home = tmp_path / 'codex'
+    home.mkdir()
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    (home / 'sessiongraph.json').write_text(json.dumps(settings))
+    existing = init_project(tmp_path / 'existing')
+    before = existing.read_bytes()
+    new_root = tmp_path / 'new'
+    new_root.mkdir()
+    for root in (existing.parent.parent, new_root):
+        path = ensure_project(str(root), settings)
+        config = load_config(path)
+        assert 'cleanup_missing_chats' not in config['hook']
+        assert enabled(config) is True
     assert existing.read_bytes() == before
 
 
@@ -92,7 +114,7 @@ def test_registration_preserves_other_hooks_and_is_idempotent():
     assert merged == merge_hooks(merged, '/sg/hook.py')
     assert len(merged['hooks']['SessionStart']) == 2
     assert merged['hooks']['Stop'] == [{'hooks': [{'type': 'command', 'command': '/sg/hook.py'}]}]
-    assert set(merged['hooks']) == {'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
+    assert set(merged['hooks']) == {'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd'}
 
 
 def test_remove_local_hooks_preserves_unrelated_config():
@@ -200,6 +222,13 @@ def test_installer_backups_idempotence_and_keeps_trust(tmp_path, settings):
     assert 'hooks.PreCompact' not in local.read_text()
     assert install(home, local, '/sg/hook.py', settings)['changed'] == []
     assert json.loads((home / 'sessiongraph.json').read_text())['enabled_since'] == settings['enabled_since']
+    path = home / 'sessiongraph.json'
+    current = json.loads(path.read_text())
+    current['cleanup_missing_chats'] = True
+    path.write_text(json.dumps(current))
+    install(home, local, '/sg/hook.py', settings)
+    assert json.loads(path.read_text())['cleanup_missing_chats'] is True
+    assert install(home, local, '/sg/hook.py', settings)['changed'] == []
 
 
 def test_failed_initialization_does_not_publish_default_config(tmp_path, settings, monkeypatch):

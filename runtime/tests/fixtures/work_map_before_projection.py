@@ -72,7 +72,7 @@ def work_map(store, chat="", limit=1000, query="", offset=0):
     rows = [
         dict(r)
         for r in store.db.execute(
-            f"SELECT m.*,instr(e.text,m.source_quote)>0 AS source_valid FROM work_memory m "
+            f"SELECT m.*,instr(sg_source_text(e.id,e.text),m.source_quote)>0 AS source_valid FROM work_memory m "
             f"LEFT JOIN entries e ON e.id=m.source_entry_id WHERE {where} "
             "ORDER BY m.updated_at DESC,m.id DESC LIMIT ? OFFSET ?",
             [*args, limit, offset],

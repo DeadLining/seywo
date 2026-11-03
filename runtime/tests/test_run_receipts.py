@@ -37,7 +37,7 @@ def test_explicit_lossless_archive_preserves_status_and_old_id(case):
     path, raw = put(config)
     before = update_status(config)
     preview = maintenance.maintain_receipts(config)
-    assert preview['eligible'] == 1 and not preview['archive_enabled']
+    assert preview['eligible'] == 1 and preview['archive_enabled']
     assert path.read_bytes() == raw
     report = maintenance.maintain_receipts(config, apply=True)
     assert report['archived'] == 1 and report['model_calls'] == 0
@@ -119,13 +119,27 @@ def test_budget_cursor_and_malformed_receipt_are_visible(case):
     assert report['errors'][0]['file'] == 'bad.json' and bad.exists()
 
 
-def test_automatic_archive_only_after_explicit_project_opt_in(case):
+def test_cleared_receipts_archive_losslessly_without_resurrecting_status(case):
+    _, config = case
+    path, raw = put(config, state='failed')
+    cleared = path.parent.parent / 'cleared-runs'
+    cleared.mkdir()
+    path.rename(cleared / path.name)
+    report = maintenance.maintain_receipts(config, apply=True, cleared=True)
+    assert report['archived'] == 1 and not report['errors']
+    assert receipts.read(config, 'done').encode() == raw
+    assert not update_status(config)['runs']
+    with receipts.connection(config) as db:
+        assert db.execute('SELECT hidden FROM sg_run_receipts').fetchone()[0] == 1
+
+
+def test_automatic_archive_is_default_without_project_opt_in(case):
     path, config = case
     def execute(argv, timeout):
         return {'added_entries': 0, 'skipped': []} if 'refresh-chat' in argv else {
             'saved': [], 'failed': [], 'model_calls': 0}
     first = run_update(path, 'chat', execute=execute)
-    assert (_folder(config) / (first['run_id'] + '.json')).exists()
+    assert not (_folder(config) / (first['run_id'] + '.json')).exists()
     maintenance.maintain_receipts(config, apply=True)
     second = run_update(path, 'chat', execute=execute)
     assert not (_folder(config) / (second['run_id'] + '.json')).exists()

@@ -14,6 +14,7 @@ import time
 import uuid
 
 from .failures import Failure
+from .job_lifecycle import cascade_schema
 
 REVISION = 'job-resource-v1'
 LIMITS = {
@@ -36,7 +37,7 @@ CREATE TABLE IF NOT EXISTS sg_resource_circuits(
  project TEXT NOT NULL,backend TEXT NOT NULL,policy_json TEXT NOT NULL,failures INTEGER NOT NULL,
  open_until REAL NOT NULL,generation INTEGER NOT NULL,probe TEXT,probe_pid INTEGER,
  PRIMARY KEY(project,backend));
-'''
+''' + ''.join(cascade_schema(t) for t in ('sg_resource_scopes', 'sg_resource_requests'))
 
 
 class AdmissionDenied(Failure):
@@ -102,7 +103,7 @@ def reserve(client, req, policy, *, now=None):
     scope = CURRENT.get()
     if not all(isinstance(scope.get(k), str) and scope[k] for k in ('job_id', 'attempt_id', 'part', 'stage')):
         raise AdmissionDenied('resource_scope_missing')
-    if scope['stage'] not in {'extract', 'identity', 'relations'}:
+    if scope['stage'] not in {'extract', 'identity', 'relations', 'revisions'}:
         raise AdmissionDenied('resource_scope_invalid')
     try:
         body = json.loads(req.data)
@@ -130,7 +131,7 @@ def reserve(client, req, policy, *, now=None):
             # Require a committed live attempt, not just caller-provided IDs.
             owned = db.execute('''SELECT 1 FROM sg2_jobs j JOIN sg2_attempts a ON a.job=j.id
                 WHERE j.project=? AND j.id=? AND a.id=? AND a.part=? AND a.stage=?
-                AND a.state='running' AND j.state NOT IN ('complete','superseded')''',
+                AND a.state='running' AND j.state NOT IN ('complete','superseded','dismissed')''',
                 (project, job, scope['attempt_id'], scope['part'], scope['stage'])).fetchone()
             if not owned:
                 raise AdmissionDenied('resource_scope_invalid')
@@ -138,10 +139,17 @@ def reserve(client, req, policy, *, now=None):
             if spent and spent['policy_json'] != policy_json:
                 raise AdmissionDenied('resource_policy_changed')
             used = dict(spent) if spent else dict(requests=0, input_bytes=0, output_tokens=0, seconds=0)
-            remaining = policy['max_transport_seconds'] - used['seconds']
-            if (used['requests'] >= policy['max_requests']
-                    or used['input_bytes'] + len(req.data) > policy['max_input_bytes']
-                    or used['output_tokens'] + caps[0] > policy['max_output_tokens'] or remaining < 1):
+            limits = dict(policy)
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='sg_resource_grants' AND type='table'").fetchone():
+                for grant in db.execute('SELECT limits_json FROM sg_resource_grants WHERE project=? AND job=?', (project, job)):
+                    for field, value in json.loads(grant[0]).items():
+                        if field not in {'max_requests','max_input_bytes','max_output_tokens','max_transport_seconds'} or type(value) is not int or value < 0:
+                            raise AdmissionDenied('resource_policy_invalid')
+                        limits[field] += value
+            remaining = limits['max_transport_seconds'] - used['seconds']
+            if (used['requests'] >= limits['max_requests']
+                    or used['input_bytes'] + len(req.data) > limits['max_input_bytes']
+                    or used['output_tokens'] + caps[0] > limits['max_output_tokens'] or remaining < 1):
                 raise AdmissionDenied('resource_budget_exhausted')
             circuit = db.execute('SELECT * FROM sg_resource_circuits WHERE project=? AND backend=?', (project, backend)).fetchone()
             if circuit and circuit['policy_json'] != circuit_policy:
@@ -203,14 +211,15 @@ def settle(config, ticket, elapsed, *, now=None):
             if not circuit or circuit['generation'] != ticket['generation']:
                 return  # Late old responses cannot close a newly opened/recovered circuit.
             unhealthy = ticket.get('transport_failure') or code == 'resource_provider_budget_violation'
+            responded = ticket.get('received') or ticket.get('http_response')
             if unhealthy or ticket['probe']:
-                failed = unhealthy or not ticket.get('received')
+                failed = unhealthy or not responded
                 failures = max(circuit['failures'] + 1, policy['circuit_failure_threshold']) if ticket['probe'] and failed else circuit['failures'] + 1 if failed else 0
                 opened = failures >= policy['circuit_failure_threshold']
                 db.execute('UPDATE sg_resource_circuits SET failures=?,open_until=?,generation=generation+?,probe=NULL,probe_pid=NULL WHERE project=? AND backend=?',
                     (failures, stamp + policy['circuit_cooldown_seconds'] if opened else 0,
                      int(opened or ticket['probe']), ticket['project'], ticket['backend']))
-            elif ticket.get('received') and not circuit['probe']:
+            elif responded and not circuit['probe']:
                 db.execute('UPDATE sg_resource_circuits SET failures=0 WHERE project=? AND backend=?',
                            (ticket['project'], ticket['backend']))
     finally:

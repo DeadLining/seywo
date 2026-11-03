@@ -1,0 +1,341 @@
+{
+  "schema_version": "1.0.0",
+  "run_id": "evidence-cleanup-20261027",
+  "title": "Exact evidence address repair and lossless V2 task cleanup",
+  "status": "verified",
+  "updated_at": "2026-10-27T03:01:15.524606+00:00",
+  "capability": {
+    "actor": "SessionGraph user",
+    "trigger": "Fruit-fly V2 error survives model switch and cleanup button",
+    "outcome": "Validate exact cited atomic fields and explicitly dismiss blocked V2 batches without deleting facts",
+    "participation": {
+      "user": [
+        "Select global model"
+      ],
+      "agent": [
+        "Repair, test and install"
+      ],
+      "runtime": [
+        "Honor upstream no-thinking and retry deadlines"
+      ]
+    },
+    "invariants": [
+      "Only fruit-fly real evidence",
+      "Strict one-token classifier unchanged",
+      "No inferred/fuzzy/cross-speaker source repairs",
+      "No source/fact/coverage deletion",
+      "Retain retry debt, payloads and reservations"
+    ],
+    "non_goals": [
+      "Bulk replay",
+      "Change global provider",
+      "Silence errors without terminal dismissal"
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC1",
+        "statement": "Misaddressed exact literal in a unique already cited span of the same entry decodes; invented or uncited facts fail",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC2",
+        "statement": "Cleanup retires blocked V2 batches without success coverage, retains history and permits new input",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC3",
+        "statement": "Signed installed app reads the fix and exposes cleanup counts",
+        "required_evidence_types": [
+          "build",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC4",
+        "statement": "Selective cleanup succeeds during an active leased request without invalidating its response; compaction remains guarded",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      },
+      {
+        "id": "AC5",
+        "statement": "Legacy pending failures without sg2_control are consistently blocked and explicitly clearable; normal pending, running and scheduled retry work remains protected",
+        "required_evidence_types": [
+          "test",
+          "runtime"
+        ]
+      }
+    ],
+    "unknowns": []
+  },
+  "baseline": {
+    "repository_path": "/Users/shengzhoukong/Documents/AI_Agent/sessiongraph",
+    "git": {
+      "base_revision": "1cdcfac3994ee3ce5db69684904c6eff432159b8",
+      "worktree_state": "dirty",
+      "reviewable": true,
+      "notes": "Preserve preexisting dirty changes; no commit requested"
+    },
+    "architecture_entrypoint": "runtime/sessiongraph/continuation.py",
+    "frozen_boundaries": [
+      "Original chats and graph facts",
+      "Global model and credentials",
+      "Other projects"
+    ],
+    "current_truth_evidence": [
+      {
+        "id": "E0",
+        "type": "runtime",
+        "source": "Fruit-fly request-e016173379624808aa443db11a0d1f1b and maintenance.clear_tasks",
+        "status": "observed",
+        "observed_at": "2026-10-27T02:16:08.898968+00:00",
+        "summary": "All evidence anchors exist. Atomic predicate/value point at a20 but are exact literals in already cited a21. Adapter masks invalid_atomic_source_ref as unknown_source_anchor. Existing cleanup omits sg2_jobs/sg2_control."
+      }
+    ]
+  },
+  "architecture_decisions": [
+    {
+      "id": "D1",
+      "statement": "Repair only the source address within same-entry already-cited exact unique spans; never repair text or expand evidence",
+      "classification": "current_decision",
+      "rationale": "Preserve factual authority and evidence boundaries",
+      "status": "active"
+    },
+    {
+      "id": "D2",
+      "statement": "Explicit dismissed state with compact before receipt and retained source reservations",
+      "classification": "current_decision",
+      "rationale": "Cleanup must change scheduling and diagnostics, not fabricate completion or cause replay",
+      "status": "active"
+    },
+    {
+      "id": "D3",
+      "statement": "Task cleanup uses the short graph writer lock and excludes active attempts AND stage leases; only compaction requires whole-project quiescence",
+      "classification": "current_decision",
+      "rationale": "User screenshot shows active coordinator preventing cleanup even while graph writer is free during transport",
+      "status": "active"
+    },
+    {
+      "id": "D4",
+      "statement": "Use one effective control-state expression for legacy orphan failures in scheduler, diagnostics and cleanup; explicit controls override historical errors",
+      "classification": "current_decision",
+      "rationale": "The remaining Oct14 graph_io row has no durable control or attempts; INNER JOIN cleanup omitted it and diagnostics counted it ready",
+      "status": "active"
+    }
+  ],
+  "slices": [
+    {
+      "id": "S1",
+      "title": "Exact evidence address repair and lossless V2 task cleanup",
+      "status": "verified",
+      "user_outcome": "Validate exact cited atomic fields and explicitly dismiss blocked V2 batches without deleting facts",
+      "dominant_risk": "Dismissal loses facts or source matching admits fabricated content",
+      "depends_on": [],
+      "scope": {
+        "included": [
+          "Evidence adapter",
+          "V2 dismissal",
+          "Cleanup UI and install"
+        ],
+        "excluded": [
+          "Other project state",
+          "Provider changes",
+          "Full backlog replay"
+        ]
+      },
+      "decisions": {
+        "command_owner": "Explicit native clear_tasks and exact evidence adapter",
+        "data_owner": "Existing database and queue",
+        "state_transition": "blocked -> dismissed, never complete",
+        "idempotency_boundary": "Existing reservations, checkpoints and lease fences",
+        "recovery_behavior": "Compact before receipt; original payload/error/control debt retained",
+        "user_approval_point": "User repair request"
+      },
+      "implementation": {
+        "modules": [
+          "runtime/sessiongraph/graph_contract.py",
+          "runtime/sessiongraph/extraction.py",
+          "runtime/sessiongraph/maintenance.py",
+          "runtime/sessiongraph/stages.py",
+          "runtime/sessiongraph/graph_v2.py",
+          "src/components/SessionGraphTaskCleanup.tsx"
+        ],
+        "contracts": [
+          "Strict exact-source validation",
+          "Project-scoped explicit terminal dismissal",
+          "Zero-model cleanup"
+        ],
+        "migrations": [
+          "Explicit maintenance creates sg2_task_dismissals only"
+        ],
+        "documents": [
+          "runtime/README.md",
+          "docs/evidence-cleanup-fix.json"
+        ]
+      },
+      "acceptance_gates": [
+        {
+          "id": "G1",
+          "name": "Evidence and cleanup regression suites",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E1"
+          ]
+        },
+        {
+          "id": "G2",
+          "name": "Signed installed fruit-fly smoke and exact response replay",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E2",
+            "E3"
+          ]
+        },
+        {
+          "id": "G3",
+          "name": "Active-request cleanup and installed actual cleanup",
+          "required": true,
+          "status": "passed",
+          "evidence_refs": [
+            "E4"
+          ]
+        }
+      ],
+      "evidence": [
+        {
+          "id": "E1",
+          "type": "test",
+          "source": "Hermetic runtime/tests; frontend Vitest; Rust tests",
+          "status": "passed",
+          "observed_at": "2026-10-27T02:25:39.372644+00:00",
+          "summary": "Python1318 passed, frontend88 passed, Rust8 passed/1 ignored. Includes same-entry exact address repair, rejection of foreign/uncited/ambiguous/fabricated text, bounded feedback, lossless/idempotent/project-scoped cleanup, preserved pending/running work, new input processing and chat-delete cascade. Tests isolate global provider settings; no real-project model requests."
+        },
+        {
+          "id": "E2",
+          "type": "build",
+          "source": "npm run app:build; npm run app:install",
+          "status": "passed",
+          "observed_at": "2026-10-27T02:25:39.372644+00:00",
+          "summary": "Signed app installed at /Applications/SessionGraph.app, immutable runtime bedfbfb8941908a828a1. All60 installed Python modules match workspace; installed-source focused suite74 passed."
+        },
+        {
+          "id": "E3",
+          "type": "runtime",
+          "source": "Fruit-fly audited response replay; scripts/verify-installed.py; installed native UI",
+          "status": "passed",
+          "observed_at": "2026-10-27T02:25:39.372644+00:00",
+          "summary": "Exact failed request e016173379624808aa443db11a0d1f1b now passes full source/schema validation with9 nodes/6 relations, zero model calls. Another first-attempt receipt c1a5f548edcb46e3b687a08c7ab0366f passes with7 nodes/5 relations. Invalid alternative responses remain rejected. Installed MCP7 tools recall/expand and native reads pass; configured nothink model and six hooks unchanged. Native fruit-fly UI shows updated cleanup scope. User cleanup NOT automatically invoked:293 historical/current blocked batches remain pending explicit dismissal or selected recovery."
+        },
+        {
+          "id": "E4",
+          "type": "runtime",
+          "source": "Active leased-request regressions; installed fruit-fly native clear_tasks; backup fruitfly-cleanup-1793068929; native UI",
+          "status": "passed",
+          "observed_at": "2026-10-27T02:44:41.609684+00:00",
+          "summary": "Python1321 passed. New tests reproduce update.lock/coordinator held during model transport, prove cleanup excludes active lease/attempt, unchanged dependency revision and successful real-child graph publication afterward. Signed installed fix used native clear_tasks:294 blocked V2 batches dismissed,1 blocked continuation dismissed,5 failed receipts archived,0 unreadable,0 model calls. Exact before/after counts unchanged:110521 entries,30805 memories,29903 nodes,12189 relations,95145 evidence,5974 jobs,98391 coverage rows. Config/global template byte-identical; foreign_key_check empty. Refreshed fruit-fly UI:running0,ready1,retry_wait0,blocked0. Actual production cleanup occurred after its active round ended; concurrency separately proven using real subprocess fixture."
+        },
+        {
+          "id": "E5",
+          "type": "runtime",
+          "source": "/Users/shengzhoukong/Library/Application Support/local-ai-gateway/sessiongraph/backups/fruitfly-orphan-cleanup-1793069860; installed runtime bf0610e028ffbf406fca; expanded native UI",
+          "status": "passed",
+          "observed_at": "2026-10-27T03:00:17.683540+00:00",
+          "summary": "Target ce0ead80 chat suffix1a2ba9 datedOct14 is pending graph_io without control/attempt/lease, all15 frozen entry IDs exist. Installed native cleanup dismisses1 batch +1 scheduler task with0 model calls. Exact target non-state fields, config and all10 fact/provenance counts unchanged; FK check clean. Expanded object-v2 diagnostic contains no graph_io/blocked item; ready1 preserved. Installed MCP7 tools recall/expand pass, global model and6 Hooks unchanged. Original OSError detail was not persisted; no claim of repairing an identified filesystem fault."
+        },
+        {
+          "id": "E6",
+          "type": "test",
+          "source": "runtime/tests/test_task_cleanup.py; full isolated Python suite; npm test; signed npm run app:build/app:install",
+          "status": "passed",
+          "observed_at": "2026-10-27T03:01:15.524606+00:00",
+          "summary": "Final source:1327 Python tests passed,88 frontend tests passed;6 new regression cases cover orphan failure cleanup, scheduler/diagnostic agreement, normal pending/call-budget/continuation preservation, active-attempt exclusion and idempotence. Production typecheck/build, signed install and git diff --check passed. Existing dateutil deprecation only."
+        }
+      ],
+      "residual_items": []
+    }
+  ],
+  "traceability": [
+    {
+      "id": "T1",
+      "user_promise": "Repair V2 errors and make cleanup cover blocked batches",
+      "architecture_rule": "Exact evidence boundaries and auditable terminal dismissal",
+      "contract_or_schema": "Atomic wire references and sg2_task_dismissals receipt",
+      "implementation_owner": "Evidence adapter / explicit maintenance",
+      "positive_test": "test_atomic_wrong_span_is_repaired_only_inside_existing_same_entry_citations; test_cleanup_dismisses_v2_batches_without_losing_progress_or_replaying",
+      "regression_guard": "Fabricated/cross-entry/ambiguous references fail; running/ready/retry_wait batches untouched"
+    },
+    {
+      "id": "T2",
+      "user_promise": "Clear chat 1a2ba9 graph_io without losing data or clearing normal work",
+      "architecture_rule": "Shared effective scheduling state and reversible dismissal",
+      "contract_or_schema": "Legacy pending error without sg2_control is blocked, not ready",
+      "implementation_owner": "stages.CONTROL_STATE_SQL / graph_v2 / maintenance",
+      "positive_test": "test_legacy_error_without_control_is_blocked_and_clearable",
+      "regression_guard": "test_legacy_normal_pending_is_not_dismissed; test_legacy_error_with_active_attempt_is_not_dismissed; existing lease and retry protections"
+    }
+  ],
+  "verification_gates": [
+    {
+      "id": "G1",
+      "name": "Evidence and cleanup regression suites",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E1"
+      ]
+    },
+    {
+      "id": "G2",
+      "name": "Signed installed fruit-fly smoke and exact response replay",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E2",
+        "E3"
+      ]
+    },
+    {
+      "id": "G3",
+      "name": "Active-request cleanup and installed actual cleanup",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E4"
+      ]
+    },
+    {
+      "id": "G4",
+      "name": "Legacy graph_io orphan diagnosis, cleanup and installed fruit-fly verification",
+      "required": true,
+      "status": "passed",
+      "evidence_refs": [
+        "E5",
+        "E6"
+      ]
+    }
+  ],
+  "residual_items": [],
+  "delivery": {
+    "reviewable_git_baseline": true,
+    "reproducible_from_baseline": false,
+    "migration_required": true,
+    "migration_rehearsed": true,
+    "rollback_documented": true,
+    "documents_synchronized": true
+  },
+  "completion": {
+    "implemented": true,
+    "verified": true,
+    "delivery_ready": false,
+    "decision": "Legacy orphan graph_io cleanup fixed, signed app installed and actual fruit-fly target dismissed with before/after receipts. Expanded UI verified no blocked item; normal ready1 retained.1327 Python and88 frontend tests passed. No original data or provider configuration change; uncommitted existing dirty workspace remains."
+  }
+}

@@ -47,18 +47,22 @@ def test_status_is_lazy_readonly_and_never_opens_database_or_network(tmp_path, m
     assert "untouched" not in json.dumps(r)
 
 
-def test_model_save_is_scoped_atomic_and_preserves_provider_credentials(tmp_path):
+def test_model_save_is_global_atomic_and_preserves_project_bytes(tmp_path):
     config, args, pid = setup(tmp_path)
     prior = json.loads(config.read_text())
     prior["provider"]["api_key"] = "NEVER_RETURN"
     config.write_text(json.dumps(prior))
     old = config.read_bytes()
     r = handle({"action": "save_model", "project": pid, "model": "new/model"}, **args)
-    expected = copy.deepcopy(prior)
-    expected["provider"]["model"] = "new/model"
-    assert json.loads(config.read_text()) == expected
+    assert config.read_bytes() == old
+    template = args['state'] / 'template.json'
+    assert json.loads(template.read_text())['provider']['model'] == 'new/model'
+    assert 'NEVER_RETURN' not in template.read_text()
     assert r["model"] == "new/model" and "NEVER_RETURN" not in json.dumps(r)
-    assert any(p.read_bytes() == old for p in (args["state"] / "backups").rglob("*") if p.is_file())
+    handle({'action':'save_model', 'model':'next'}, **args)
+    assert any(json.loads(p.read_text()).get('provider', {}).get('model') == 'new/model'
+               for p in (args['state'] / 'backups').rglob('*template.json'))
+    handle({'action':'save_model', 'model':'new/model'}, **args)
     assert (
         handle({"action": "save_model", "project": pid, "model": "new/model"}, **args)[
             "changed_count"
@@ -157,6 +161,7 @@ def test_saved_model_is_used_by_real_responses_extractor(tmp_path, monkeypatch):
     from sessiongraph.extraction import ResponsesExtractor
 
     config, args, pid = setup(tmp_path)
+    monkeypatch.setenv('SESSIONGRAPH_RUNTIME_HOME', str(args['state']))
     handle({"action": "save_model", "project": pid, "model": "selected-model"}, **args)
     assert ResponsesExtractor(load_config(config)).model == "selected-model"
 
@@ -178,8 +183,8 @@ def test_model_save_supports_explicit_direct_endpoint_without_changing_provider(
     config.write_text(json.dumps(raw))
     result = handle({"action": "save_model", "project": pid, "model": "new"}, **args)
     assert result["ok"] and result["model_calls"] == 0
-    raw["provider"]["model"] = "new"
     assert json.loads(config.read_text()) == raw
+    assert json.loads((args['state'] / 'template.json').read_text())['provider']['model'] == 'new'
 
 
 @pytest.mark.parametrize("body", [b"not-json", b"x" * 4097, b"{}"])
@@ -619,3 +624,21 @@ def test_maintenance_is_explicit_scoped_and_model_free(tmp_path, monkeypatch):
         handle({'action':'storage_compact'},**args)
     with pytest.raises(ValueError,match='unexpected_model'):
         handle({'action':'storage_compact','project':pid,'model':'no'},**args)
+
+
+@pytest.mark.parametrize('action',['graph_preview','graph_assess','graph_compact','graph_undo'])
+def test_retired_graph_actions_rejected_before_project_lookup_or_network(tmp_path,monkeypatch,action):
+    config,args,pid=setup(tmp_path)
+    before=config.read_bytes()
+    monkeypatch.setattr(socket,'socket',lambda *a,**k:pytest.fail('network'))
+    monkeypatch.setattr('sessiongraph.native_settings._project',lambda *a:pytest.fail('project opened'))
+    with pytest.raises(ValueError,match='invalid_action'):
+        handle({'action':action,'project':pid},**args)
+    assert config.read_bytes()==before
+
+
+@pytest.mark.parametrize('field',['token','run_id'])
+def test_retired_receipt_fields_rejected(tmp_path,field):
+    _,args,pid=setup(tmp_path)
+    with pytest.raises(ValueError,match='invalid_request'):
+        handle({'action':'status','project':pid,field:'a'*64},**args)

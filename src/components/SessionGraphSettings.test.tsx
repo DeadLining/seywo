@@ -18,7 +18,7 @@ describe('Standalone provider fields',()=>{
   expect(screen.getByLabelText('MODEL NAME')).toHaveValue('old')
   expect(screen.queryByLabelText('密钥环境变量')).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
-  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',project:'p1',model:'old',endpoint:provider.endpoint,api_key_env:'EXISTING_KEY'}))
+  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'old',endpoint:provider.endpoint,api_key_env:'EXISTING_KEY'}))
  })
  it.each(['https://new.test/v1','https://new.test/v1/','https://new.test/v1/responses'])(
   'saves a Responses endpoint from %s and clears the entered key',async(base)=>{
@@ -29,7 +29,7 @@ describe('Standalone provider fields',()=>{
    fireEvent.change(screen.getByLabelText('API KEY'),{target:{value:'fixture-key'}})
    fireEvent.change(screen.getByLabelText('MODEL NAME'),{target:{value:'new-model'}})
    fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
-   await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',project:'p1',model:'new-model',endpoint:'https://new.test/v1/responses',api_key_env:'EXISTING_KEY',api_key:'fixture-key'}))
+   await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'new-model',endpoint:'https://new.test/v1/responses',api_key_env:'EXISTING_KEY',api_key:'fixture-key'}))
    await waitFor(()=>expect(screen.getByLabelText('API KEY')).toHaveValue(''))
   })
  it('does not normalize an unchanged endpoint bound to an existing key',async()=>{
@@ -62,7 +62,7 @@ describe('SessionGraph real settings',()=>{
   expect(manage).toHaveBeenCalledTimes(1)
   manage.mockResolvedValue({...state,model:'new',message:'模型已保存'})
   fireEvent.click(screen.getByRole('button',{name:'保存模型'}));await screen.findByText('模型已保存')
-  expect(manage).toHaveBeenLastCalledWith({action:'save_model',project:'p1',model:'new'})
+  expect(manage).toHaveBeenLastCalledWith({action:'save_model',model:'new'})
  })
  it('installs hooks and MCP independently without claiming trusted',async()=>{
   const manage=vi.fn().mockResolvedValue(state)
@@ -88,13 +88,18 @@ describe('SessionGraph real settings',()=>{
   fireEvent.click(screen.getByRole('button',{name:'重新检查'}))
   await waitFor(()=>expect(screen.queryByRole('alert')).not.toBeInTheDocument())
  })
- it('does not poll or allow writes without a selected project',async()=>{
+ it('allows global provider editing without a selected project, without polling',async()=>{
   const manage=vi.fn().mockResolvedValue({...state,model:''})
   render(<SessionGraphSettings project="" models={[]} manage={manage}/>);
   await screen.findByText(/请选择已初始化项目/)
   await act(async()=>{await new Promise(resolve=>setTimeout(resolve,20))})
   expect(manage).toHaveBeenCalledTimes(1)
   expect(screen.getByRole('button',{name:'自动安装 Hook'})).toBeDisabled()
+  expect(screen.getByLabelText('BASE URL')).not.toBeDisabled()
+  fireEvent.change(screen.getByLabelText('BASE URL'),{target:{value:'https://app.example/v1'}})
+  fireEvent.change(screen.getByLabelText('MODEL NAME'),{target:{value:'shared'}})
+  fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
+  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'shared',endpoint:'https://app.example/v1/responses',api_key_env:'GRAPH_LLM_API_KEY'}))
  })
  it('blocks duplicate actions and ignores a late response after unmount',async()=>{
   let resolve!:(v:SessionGraphSettingsSnapshot)=>void
@@ -139,10 +144,10 @@ it('keeps a saved raw model usable without silently changing its routing',async(
  expect(screen.getByRole('option',{name:'Friendly · Provider'})).toHaveValue('alias')
  expect(select.querySelector('option[value="raw"]')).toHaveTextContent('当前配置')
  fireEvent.click(screen.getByRole('button',{name:'保存模型'}))
- await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_model',project:'p1',model:'raw'}))
+ await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_model',model:'raw'}))
  fireEvent.change(select,{target:{value:'alias'}})
  fireEvent.click(screen.getByRole('button',{name:'保存模型'}))
- await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_model',project:'p1',model:'alias'}))
+ await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_model',model:'alias'}))
 })
 
 

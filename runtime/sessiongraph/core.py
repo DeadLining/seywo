@@ -77,6 +77,10 @@ def load_config(path: Path) -> dict:
         raise ValueError("context_entries must be between 0 and 20")
     if opts["max_input_chars"] < opts["max_batch_chars"]:
         raise ValueError("max_input_chars must be >= max_batch_chars")
+    from .pipeline_settings import apply_defaults
+    apply_defaults(cfg)
+    from .provider_settings import apply_provider
+    apply_provider(cfg)
     return cfg
 
 
@@ -202,6 +206,8 @@ class Store:
             os.close(fd)
             self.db = sqlite3.connect(path, timeout=10)
         self.db.row_factory = sqlite3.Row
+        from .source_text import register as register_sources
+        register_sources(self)
         self.db.execute("PRAGMA foreign_keys=ON")
         if readonly:
             self.db.execute("PRAGMA query_only=ON")
@@ -215,6 +221,8 @@ class Store:
         try:
             for key, value in (("schema_version", "1"), ("project_id", config["project_id"])):
                 prior = self.db.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
+                if key == 'schema_version' and prior and prior[0] in {'2', '3', '4'}:
+                    continue  # Source-backed storage; old runtimes must fail closed.
                 if prior and prior[0] != value:
                     raise ValueError(f"database {key} does not match configuration")
             if not readonly:
@@ -234,6 +242,15 @@ class Store:
                 storage_setup(self)
                 from .read_projection import setup as projection_setup
                 projection_setup(self)
+                from .source_locator import setup as locator_setup
+                locator_setup(self)
+                from .source_text import setup as source_setup
+                source_setup(self)
+                from .source_text import activate_defaults
+                activate_defaults(self)
+                from .job_lifecycle import setup as job_lifecycle_setup
+                with self.db:
+                    job_lifecycle_setup(self.db)
         except Exception:
             self.db.close()
             raise
@@ -295,7 +312,7 @@ class Store:
                     (sid, ph),
                 ).fetchone()[0]
                 entries = self.db.execute(
-                    "SELECT line,length(text) AS size FROM entries WHERE session_id=? AND line>? ORDER BY line",
+                    "SELECT line,coalesce((SELECT chars FROM sg_entry_sizes WHERE entry_id=entries.id),length(text)) AS size FROM entries WHERE session_id=? AND line>? ORDER BY line",
                     (sid, watermark),
                 ).fetchall()
                 batch, size = [], 0
@@ -630,7 +647,8 @@ class Store:
             if remaining <= 0:
                 result["omitted_entry_ids"].append(eid)
                 continue
-            item = dict(self.db.execute("SELECT * FROM entries WHERE id=?", (eid,)).fetchone())
+            from .source_text import hydrate
+            item = hydrate(self, self.db.execute("SELECT * FROM entries WHERE id=?", (eid,)).fetchone())
             item["chat_id"] = self.chat_id(item["session_id"])
             from .source_locator import describe
             item["source_location"] = describe(self, eid, verify=eid == object_id)

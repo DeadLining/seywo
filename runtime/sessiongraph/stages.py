@@ -8,6 +8,12 @@ from .failures import describe
 
 CURRENT = ContextVar('sessiongraph_attempt', default={})
 RETRY_DELAYS = (120, 600, 1800)
+# A pre-durable-stage failure has no control row. Do not silently replay it or
+# count it as ready. Explicit ready/retry controls always override old errors.
+# Shared by scheduler, read diagnostics and selective cleanup (aliases j/c).
+CONTROL_STATE_SQL = """COALESCE(c.state, CASE
+ WHEN COALESCE(j.error,'') NOT IN ('','graph_call_budget_pending','graph_continuation_pending')
+ THEN 'blocked' ELSE j.state END)"""
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS sg2_attempts(id TEXT PRIMARY KEY,job TEXT NOT NULL,part TEXT NOT NULL,
  stage TEXT NOT NULL,state TEXT NOT NULL,started REAL NOT NULL,finished REAL,error_json TEXT,stats_json TEXT,run_id TEXT);
@@ -29,7 +35,7 @@ def setup(store):
     store.db.execute("CREATE INDEX IF NOT EXISTS sg2_attempts_run ON sg2_attempts(run_id)")
     # Backfill only this project's unfinished jobs. Sources and completion ledger stay intact.
     with store.db:
-        for row in store.db.execute("SELECT id,input_json FROM sg2_jobs WHERE project=? AND state NOT IN ('complete','superseded')", (store.config['project_id'],)).fetchall():
+        for row in store.db.execute("SELECT id,input_json FROM sg2_jobs WHERE project=? AND state NOT IN ('complete','superseded','dismissed')", (store.config['project_id'],)).fetchall():
             reserve(store, row['id'], json.loads(row['input_json']))
         store.db.execute("DELETE FROM sg2_claims WHERE job IN (SELECT id FROM sg2_jobs WHERE state IN ('complete','superseded'))")
 
@@ -150,9 +156,9 @@ def within_frontier(store, desc, through_rowid):
 
 
 def pending(store, project, chat, through_rowid=None, *, include_manual=False):
-    rows=store.db.execute("""SELECT j.id,j.segment,j.error,j.input_json,c.state,c.due,c.error_json
+    rows=store.db.execute(f"""SELECT j.id,j.segment,j.error,j.input_json,{CONTROL_STATE_SQL} state,c.due,c.error_json
         FROM sg2_jobs j LEFT JOIN sg2_control c ON c.job=j.id
-        WHERE j.project=? AND j.chat=? AND j.state NOT IN ('complete','superseded')""",(project,chat)).fetchall()
+        WHERE j.project=? AND j.chat=? AND j.state NOT IN ('complete','superseded','dismissed')""",(project,chat)).fetchall()
     return [{k:row[k] for k in row.keys() if k!="input_json"} for row in rows
             if (include_manual or not json.loads(row['input_json']).get('manual_only'))
             and within_frontier(store,json.loads(row["input_json"]),through_rowid)]

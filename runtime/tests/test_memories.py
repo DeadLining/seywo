@@ -1,5 +1,6 @@
 """Incremental work-memory extraction with a deterministic fake extractor."""
 
+from sessiongraph.source_text import hydrate
 import json
 
 import pytest
@@ -22,18 +23,18 @@ class FakeExtractor:
         return self.outputs.pop(0)
 
 
-def make_store(tmp_path, texts, sid="chat-1"):
+def make_store(tmp_path, texts, sid="chat-1", *, timestamp="2026-09-30T00:00:00Z"):
     root = tmp_path / "project"
     root.mkdir()
     cfg = init_project(root)
     store = Store(load_config(cfg))
-    path = write_session(root / "chat.jsonl", root, sid, texts)
+    path = write_session(root / "chat.jsonl", root, sid, texts, timestamp=timestamp)
     store.ingest(path)
     return root, store, path
 
 
 def entries(store):
-    return [dict(r) for r in store.db.execute(
+    return [hydrate(store, r) for r in store.db.execute(
         "SELECT id, text FROM entries ORDER BY line").fetchall()]
 
 

@@ -51,6 +51,8 @@ def ingest(store, path):
     store._ensure_writable()
     from . import source_locator
     source_locator.setup(store)
+    from .source_text import enabled, index, mark, write_doc
+    source_backed = enabled(store)
     path = Path(path).expanduser().resolve()
     added = batches = 0
     expected = None
@@ -85,6 +87,8 @@ def ingest(store, path):
             batch_added = byte_count = count = 0
             with store.db:
                 store.db.execute('BEGIN IMMEDIATE')
+                from .chat_cleanup import check_import
+                check_import(store, chat, path)
                 prior = store.db.execute('SELECT * FROM sessions WHERE path=?', (str(path),)).fetchone()
                 sid = chat
                 if prior:
@@ -154,10 +158,13 @@ def ingest(store, path):
                                 eid = 'e_' + digest(f'{sid}:{line}:{digest(record)}')[:32]
                                 store.db.execute('INSERT INTO entries VALUES (?,?,?,?,?,?,?,?)',
                                                  (eid, sid, line, str(event.get('timestamp', '')),
-                                                  kind, role, text, call_id))
+                                                  kind, role, '' if source_backed else text, call_id))
                                 source_locator.record(store, eid, payload, record, text, offset, len(raw))
-                                store.db.execute('INSERT INTO docs VALUES (?,?,?)',
-                                                 (eid, 'entry', ' '.join(tokens(text))))
+                                if source_backed:
+                                    search_rowid = index(store, eid, text)
+                                    mark(store, eid, text, search_rowid)
+                                else:
+                                    write_doc(store, eid, 'entry', ' '.join(tokens(text)))
                                 batch_added += 1
                     except (ValueError, TypeError, UnicodeError) as exc:
                         raise ValueError(f'invalid event at line {line}: {type(exc).__name__}') from exc

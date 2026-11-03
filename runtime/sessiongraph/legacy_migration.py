@@ -3,6 +3,7 @@
 The normal graph pipeline owns extraction, identity, revision and edge validation.
 Only references are stored here; old objects/edges and live input cursors survive.
 """
+from .source_text import hydrate
 from contextlib import ExitStack
 import json
 import os
@@ -65,11 +66,17 @@ def _candidate(store, row, max_chars):
     if prior:
         if snapshot != prior['snapshot']:
             return {**result, 'reason': 'legacy_snapshot_changed'}
-    size = store.db.execute('SELECT length(cast(text AS blob)) FROM entries WHERE id=?',
+    size = store.db.execute('SELECT sg_source_bytes(id,text) FROM entries WHERE id=?',
                             (row['source_entry_id'],)).fetchone()
     if not size or size[0] > 8 * 1024 * 1024:
         return {**result, 'reason': 'source_missing_or_oversize'}
-    source = dict(store.db.execute('SELECT * FROM entries WHERE id=?', (row['source_entry_id'],)).fetchone())
+    if not exists(store.db, 'sg_source_locations') or not store.db.execute(
+            'SELECT 1 FROM sg_source_locations WHERE entry_id=?', (row['source_entry_id'],)).fetchone():
+        return {**result, 'reason': 'source_metadata_missing'}
+    try:
+        source = hydrate(store, store.db.execute('SELECT * FROM entries WHERE id=?', (row['source_entry_id'],)).fetchone())
+    except (ValueError, OSError):
+        return {**result, 'reason': 'source_changed'}
     quote = row['source_quote']
     at = source['text'].find(quote) if quote else -1
     if at < 0:
@@ -82,9 +89,6 @@ def _candidate(store, row, max_chars):
         return {**result, 'eligible': True, 'reason': 'existing_replay', 'job_id': prior['job']}
     if len(quote) + 400 > max_chars:
         return {**result, 'reason': 'source_window_oversize'}
-    if not exists(store.db, 'sg_source_locations') or not store.db.execute(
-            'SELECT 1 FROM sg_source_locations WHERE entry_id=?', (source['id'],)).fetchone():
-        return {**result, 'reason': 'source_metadata_missing'}
     lower, upper = max(0, at - 200), min(len(source['text']), at + len(quote) + 200)
     safe, _ = input_pipeline.projection(store, source)
     spans = [[max(lower, a), min(upper, b)] for a, b in safe if max(lower, a) < min(upper, b)]

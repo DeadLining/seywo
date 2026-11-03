@@ -2,6 +2,7 @@
 from __future__ import annotations
 import errno
 import http.client
+import re
 import ssl
 import sqlite3
 from urllib import error
@@ -13,6 +14,28 @@ class Failure(ValueError):
         self.code, self.retryable = code, retryable
         self.stage, self.provider = stage, provider
         self.detail, self.exception_type = detail, exception_type
+
+
+SAFE_DETAIL = re.compile(
+    r'(?:'
+    r'graph_(?:schema|evidence|identity|migration):[A-Za-z0-9_.\[\]=,:| -]{1,240}'
+    r'|graph_source_changed'
+    r'|cleanup_[a-z0-9_]{1,96}'
+    r'|source_(?:missing|changed|unavailable|locator_missing|invalid|record_too_large)'
+    r'|resource_[a-z0-9_]{1,96}'
+    r'|stage_[a-z0-9_]{1,96}'
+    r'|single_token_[a-z0-9_]{1,96}'
+    r'|revision_[a-z0-9_]{1,96}'
+    r'|provider_output_json:[A-Za-z0-9_.\[\]=,:| -]{1,240}'
+    r')')
+
+
+def safe_detail(value):
+    """Internal lifecycle codes only; transcript text and credentials never qualify."""
+    if not isinstance(value, str):
+        return ''
+    value = value.strip()
+    return value if SAFE_DETAIL.fullmatch(value) else ''
 
 
 def transport(exc, provider):
@@ -48,12 +71,12 @@ def describe(exc, stage=''):
         code = ('graph_validation' if isinstance(exc, ValueError) else
                 'graph_database' if isinstance(exc, sqlite3.Error) else
                 'graph_io' if isinstance(exc, OSError) else 'graph_internal')
-    detail=getattr(exc,'detail','')
+    detail=safe_detail(getattr(exc,'detail',''))
     if not detail:
         if isinstance(exc,OSError):
             detail=f"errno={exc.errno}; {exc.strerror or type(exc).__name__}"
-        elif isinstance(exc,ValueError) and str(exc).startswith(('graph_schema:','graph_evidence:','graph_source_changed')):
-            detail=str(exc)[:500]
+        elif isinstance(exc,ValueError):
+            detail=safe_detail(str(exc)) or code
         else:
             detail=code  # arbitrary exception strings can contain transcript text or credentials
     result = dict(code=code, stage=getattr(exc, 'stage', '') or stage,

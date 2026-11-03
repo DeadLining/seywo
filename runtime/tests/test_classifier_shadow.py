@@ -16,7 +16,8 @@ from test_single_token_judge import QUESTION, response
 def fixture(tmp_path):
     _, store, _ = make_store(tmp_path, [('user', 'Keep the old result; this is not approval.'), ('assistant', 'Only a proposal.')])
     store.config['provider'].update(protocol='responses', endpoint='http://127.0.0.1:4317/openai/v1/responses', model='fixture', auth='none')
-    row = store.db.execute('SELECT id,text FROM entries ORDER BY line').fetchone()
+    from sessiongraph.source_text import hydrate
+    row = hydrate(store, store.db.execute('SELECT id,text FROM entries ORDER BY line').fetchone())
     item = dict(id='q1', question=copy.deepcopy(QUESTION), state={'candidate': 'This is approval.'},
                 evidence=[dict(entry_id=row['id'], source_hash=hashlib.sha256(row['text'].encode()).hexdigest(), start=0, end=len(row['text']))])
     manifest = dict(project_id=store.config['project_id'], run_id='shadow1',

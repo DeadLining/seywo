@@ -1,5 +1,8 @@
+from sessiongraph.source_text import hydrate
 import asyncio
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
 
@@ -118,7 +121,7 @@ def test_provider_requires_explicit_environment(setup, monkeypatch):
 def test_bad_endpoint_and_policy_types(setup):
     _, _, s, transcript = setup
     s.ingest(transcript)
-    batch = [dict(r) for r in s.db.execute("SELECT * FROM entries")]
+    batch = [hydrate(s, r) for r in s.db.execute("SELECT * FROM entries")]
     output = good_extract(batch, s.config["policy"])
     output["relations"][0]["target"] = "absent"
     with pytest.raises(ValueError, match="endpoint"):
@@ -209,7 +212,7 @@ def test_provider_http_roundtrip_and_failures(setup, monkeypatch):
         assert requests[0][1] == "Bearer fixture-key"
         assert s.status()["records"] == 2
         provider = ChatCompletionsExtractor(s.config)
-        batch = [dict(r) for r in s.db.execute("SELECT * FROM entries")]
+        batch = [hydrate(s, r) for r in s.db.execute("SELECT * FROM entries")]
         for mode, expected in [
             ("http-error", "HTTP 401"),
             ("malformed", "malformed"),
@@ -233,8 +236,10 @@ def test_real_mcp_stdio_handshake(setup):
     s.ingest(transcript)
 
     async def exercise():
+        import sessiongraph
         params = StdioServerParameters(
-            command=sys.executable, args=["-B", "-m", "sessiongraph", "--config", str(cfg), "mcp"]
+            command=sys.executable, args=["-B", "-m", "sessiongraph", "--config", str(cfg), "mcp"],
+            env={**os.environ, 'PYTHONPATH':str(Path(sessiongraph.__file__).resolve().parent.parent)},
         )
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer) as client:

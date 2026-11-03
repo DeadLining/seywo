@@ -74,6 +74,38 @@ def finish(store, ticket, *, failed=False, elapsed=1, now=100):
     resources.settle(store.config, ticket, elapsed, now=now)
 
 
+def test_explicit_allowance_keeps_original_spending_and_other_jobs_isolated(env):
+    from sessiongraph.evidence_recovery import GRANT_SCHEMA
+    store, client = env
+    ticket = reserve(store, client)
+    finish(store, ticket)
+    with store.db:
+        store.db.execute('UPDATE sg_resource_scopes SET requests=12')
+    with pytest.raises(resources.AdmissionDenied, match='resource_budget_exhausted'):
+        reserve(store, client)
+    store.db.executescript(GRANT_SCHEMA)
+    with store.db:
+        store.db.execute('INSERT INTO sg_resource_grants VALUES(?,?,?,?,?)',
+            (store.config['project_id'],'other','fixture',100,json.dumps({'max_requests':1})))
+    with pytest.raises(resources.AdmissionDenied, match='resource_budget_exhausted'):
+        reserve(store, client)
+    with store.db:
+        store.db.execute('INSERT INTO sg_resource_grants VALUES(?,?,?,?,?)',
+            (store.config['project_id'],'job','fixture',100,json.dumps({'max_requests':1})))
+    extra = reserve(store, client)
+    finish(store, extra)
+    assert spent(store)['requests'] == 13
+    with pytest.raises(resources.AdmissionDenied, match='resource_budget_exhausted'):
+        reserve(store, client)
+
+
+def test_revision_judgments_use_the_same_authenticated_budget(env):
+    store, client = env
+    ticket = reserve(store, client, stage='revisions')
+    finish(store, ticket)
+    assert spent(store)['requests'] == 1
+
+
 def transport(monkeypatch, result=b'{"status":"completed","output":[]}', callback=None):
     seen = []
     class Response:
@@ -328,6 +360,25 @@ def test_failed_half_open_probe_reopens(env):
     probe = reserve(store, client, now=221)
     finish(store, probe, failed=True, now=222)
     assert circuit(store)['open_until'] == 342
+
+
+@pytest.mark.parametrize('status,reopens', [(400,False), (401,True), (429,True), (503,True)])
+def test_half_open_http_response_is_not_a_missing_transport_response(env, monkeypatch, status, reopens):
+    import io
+    from urllib.error import HTTPError
+    store, client = env
+    store.config['graph_v2']['resource_policy']['circuit_failure_threshold'] = 1
+    finish(store, reserve(store, client), failed=True)
+    monkeypatch.setattr(resources.time, 'time', lambda: 221)
+    class Opener:
+        def open(self, request, timeout):
+            raise HTTPError(request.full_url, status, 'fixture', {}, io.BytesIO(b'{"error":"fixture"}'))
+    monkeypatch.setattr('urllib.request.build_opener', lambda *args: Opener())
+    with pytest.raises(HTTPError):
+        run_stage(store, lambda: request_audit.read_response(client, req(), []))
+    assert (circuit(store)['open_until'] > 221) is reopens
+    assert circuit(store)['probe'] is None
+    assert spent(store)['requests'] == 2
 
 
 def test_circuit_wait_preserves_retry_debt_and_checkpoint(env):

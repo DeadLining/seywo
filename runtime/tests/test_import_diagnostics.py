@@ -5,7 +5,7 @@ import pytest
 
 from sessiongraph.auto_update import run_update, update_status
 from sessiongraph.continuity import refresh_chat
-from sessiongraph.core import Store, init_project, load_config
+from sessiongraph.core import Store, digest, init_project, load_config
 from test_mvp import write_session
 
 
@@ -49,7 +49,8 @@ def test_known_source_loss_blocks_and_keeps_index(tmp_path, damage, code):
     failure = result['skipped'][0]
     assert failure['code'] == code and failure['blocking']
     assert failure['known_source'] and failure['severity'] == 'error'
-    assert store.db.execute('select text from entries').fetchone()[0] == '旧内容'
+    assert store.db.execute('select text_hash from sg_source_locations').fetchone()[0] == digest('旧内容')
+    assert store.db.execute('select count(*) from sg_external_entries').fetchone()[0] == 1
     store.close()
 
 

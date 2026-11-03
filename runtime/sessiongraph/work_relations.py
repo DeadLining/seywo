@@ -5,6 +5,8 @@ No relation changes memory status, merges entities, or asserts user acceptance.
 """
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import json
 import re
 from datetime import datetime, timezone
@@ -45,13 +47,13 @@ def existing_candidates(store, batch):
     """
     text = '\n'.join(e['text'] for e in batch).casefold()
     rows = store.db.execute(
-        "SELECT m.*,e.text AS original FROM work_memory m JOIN entries e ON e.id=m.source_entry_id "
+        "SELECT m.*,sg_source_text(e.id,e.text) AS original FROM work_memory m JOIN entries e ON e.id=m.source_entry_id "
         "WHERE m.project_id=? AND m.status IN (?,?,?,?,?) ORDER BY m.updated_at DESC,m.id LIMIT 512",
         (store.config['project_id'], *LIVE),
     )
     chosen, budget = [], 4000
     for r in rows:
-        if not r['source_quote'] or r['source_quote'] not in r['original']:
+        if not r['source_quote'] or r['source_quote'] not in (r['original'] or ''):
             continue
         try:
             aliases = json.loads(r['aliases_json'])
@@ -152,6 +154,9 @@ def save(store, edges, bindings):
     for edge in edges:
         source = bindings.get(edge['source']) if edge['source'].startswith('new:') else edge['source']
         target = bindings.get(edge['target']) if edge['target'].startswith('new:') else edge['target']
+        from .graph_compaction import canonical
+        if source: source=canonical(store,source)
+        if target: target=canonical(store,target)
         if not source or not target or source == target:
             rejected.append({'reason': 'ambiguous_deduplicated_endpoint'})
             continue
@@ -161,6 +166,8 @@ def save(store, edges, bindings):
             (source, target, store.config['project_id']),
         ).fetchall()
         evidence = store.db.execute('SELECT text FROM entries WHERE id=?', (edge['entry_id'],)).fetchone()
+        if evidence:
+            evidence = hydrate(store, dict(id=edge['entry_id'], text=evidence['text']))
         if len(rows) != 2 or not evidence or edge['quote'] not in evidence['text']:
             rejected.append({'reason': 'stale_relation_endpoint_or_evidence'})
             continue
@@ -187,21 +194,25 @@ def save(store, edges, bindings):
 def read(store, ids=None, *, both=False, chat='', limit=12):
     """Bounded deterministic retrieval. Invalid/stale evidence creates no edges."""
     from .graph_v2 import read_relations as read_v2
+    from .graph_compaction import canonical
+    if ids is not None: ids=sorted({canonical(store,node) for node in ids})
     v2 = read_v2(store, ids, both=both, chat=chat, limit=limit)
     if not exists(store.db) or ids == []:
         return v2
+    from .graph_compaction import expression
+    source,target=expression(store,'r.source'),expression(store,'r.target')
     where, args = ['r.project_id=?', 'a.project_id=r.project_id', 'b.project_id=r.project_id'], [store.config['project_id']]
     if ids is not None:
         marks = ','.join('?' for _ in ids)
-        where.append(f'(r.source IN ({marks}) {"AND" if both else "OR"} r.target IN ({marks}))')
+        where.append(f'({source} IN ({marks}) {"AND" if both else "OR"} {target} IN ({marks}))')
         args.extend([*ids, *ids])
     if chat:
         where.append('a.chat_id=? AND b.chat_id=? AND c.chat_id=?')
         args.extend([chat, chat, chat])
     rows = store.db.execute(
-        'SELECT r.*,a.title AS source_title,b.title AS target_title,a.status AS a_status,b.status AS b_status,'
-        'a.source_quote AS a_quote,b.source_quote AS b_quote,ea.text AS a_text,eb.text AS b_text,e.text AS original '
-        'FROM work_memory_relations r JOIN work_memory a ON a.id=r.source JOIN work_memory b ON b.id=r.target '
+        f'SELECT r.*,{source} canonical_source,{target} canonical_target,a.title AS source_title,b.title AS target_title,a.status AS a_status,b.status AS b_status,'
+        'a.source_quote AS a_quote,b.source_quote AS b_quote,sg_source_text(ea.id,ea.text) AS a_text,sg_source_text(eb.id,eb.text) AS b_text,sg_source_text(e.id,e.text) AS original '
+        f'FROM work_memory_relations r JOIN work_memory a ON a.id={source} JOIN work_memory b ON b.id={target} '
         'JOIN entries ea ON ea.id=a.source_entry_id JOIN entries eb ON eb.id=b.source_entry_id '
         'JOIN entries e ON e.id=r.source_entry_id JOIN session_chats c ON c.segment_id=e.session_id '
         'WHERE ' + ' AND '.join(where) + ' ORDER BY r.created_at DESC,r.id LIMIT ?',
@@ -210,11 +221,11 @@ def read(store, ids=None, *, both=False, chat='', limit=12):
     out = []
     for row in rows:
         if (row['kind'] not in KINDS or row['a_status'] not in LIVE or row['b_status'] not in LIVE
-                or not row['a_quote'] or row['a_quote'] not in row['a_text']
-                or not row['b_quote'] or row['b_quote'] not in row['b_text']
-                or not row['source_quote'] or row['source_quote'] not in row['original']):
+                or not row['a_quote'] or row['a_quote'] not in (row['a_text'] or '')
+                or not row['b_quote'] or row['b_quote'] not in (row['b_text'] or '')
+                or not row['source_quote'] or row['source_quote'] not in (row['original'] or '')):
             continue
-        out.append(dict(id=row['id'], source=row['source'], target=row['target'], kind=row['kind'],
+        out.append(dict(id=row['id'], source=row['canonical_source'], target=row['canonical_target'], kind=row['kind'],
                         source_title=row['source_title'], target_title=row['target_title'],
                         basis='extracted_claim', verification='quote_match_only', evidence=[{
                             'entry_id': row['source_entry_id'], 'quote': row['source_quote'],

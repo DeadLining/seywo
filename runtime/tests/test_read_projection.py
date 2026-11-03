@@ -15,6 +15,32 @@ def legacy(store, **kwargs):
     return module.work_map(store, **kwargs)
 
 
+def assert_legacy_equivalent(store):
+    """Keep the old projection contract intact while allowing additive view metadata."""
+    actual = work_map(store)
+    expected = legacy(store)
+    assert set(actual) == set(expected) | {"view", "tiering"}
+    assert actual["view"] == "all" and actual["page"]["view"] == "all"
+    # The tier summary is additive: old read clients still receive the original
+    # five fields unchanged, while newer clients can detect coverage/version
+    # completeness. An unavailable projection must never claim coverage.
+    assert {key: actual["tiering"][key] for key in
+            ("available", "revision", "canonical", "episode", "record_only")} == {
+                "available": False,
+                "revision": "",
+                "canonical": 0,
+                "episode": 0,
+                "record_only": 0,
+            }
+    assert actual["tiering"]["complete"] is False
+    assert actual["tiering"]["current"] is False
+    actual_legacy = {key: value for key, value in actual.items()
+                     if key not in {"view", "tiering"}}
+    actual_legacy["page"] = {key: value for key, value in actual["page"].items()
+                             if key != "view"}
+    assert actual_legacy == expected
+
+
 def test_projection_matches_legacy_and_read_does_not_write(tmp_path):
     from sessiongraph.read_projection import flush
     store, root, add = setup_map(tmp_path)
@@ -27,7 +53,7 @@ def test_projection_matches_legacy_and_read_does_not_write(tmp_path):
     ro = Store(store.config, readonly=True)
     changes = ro.db.total_changes
     try:
-        assert work_map(ro) == expected
+        assert_legacy_equivalent(ro)
         assert ro.db.total_changes == changes
     finally:
         ro.close()
@@ -43,10 +69,10 @@ def test_dirty_old_writer_and_changed_evidence_never_return_stale_projection(tmp
     store.db.execute("UPDATE entries SET text='changed' WHERE id=?", (eid,))
     store.db.commit()
     # Existing processes may commit without calling new Python code.
-    assert work_map(store) == legacy(store)
+    assert_legacy_equivalent(store)
     assert work_map(store)['stats']['invalid_sources'] > 0
     flush(store)
-    assert work_map(store) == legacy(store)
+    assert_legacy_equivalent(store)
     store.close()
 
 
@@ -57,13 +83,14 @@ def test_new_alias_finds_old_mentions_and_removal_matches_full_rebuild(tmp_path)
     flush(store)
     new = add('b', 'OldTerm 新工作', 'OldTerm 新工作', aliases=['OldTerm'])
     flush(store)
-    assert work_map(store) == legacy(store)
+    assert_legacy_equivalent(store)
     assert work_map(store)['stats']['reference_relations'] == 2
     store.db.execute("UPDATE work_memory SET aliases_json='[]' WHERE id=?", (new,))
     store.db.commit(); flush(store)
     before = work_map(store)
     rebuild(store)
-    assert work_map(store) == before == legacy(store)
+    assert work_map(store) == before
+    assert_legacy_equivalent(store)
     store.close()
 
 
@@ -116,3 +143,47 @@ def test_unicode_candidates_and_bloom_never_drop_literal_matches():
         expected={term for term in terms if _has(text,term,{})}
         assert matcher.matches(text)==expected
         assert all(possible(bloom(text),term) for term in expected)
+
+def test_evidence_mutation_invalidates_projection_even_without_python_writer(tmp_path):
+    from sessiongraph.read_projection import flush
+    from sessiongraph import graph_v2
+    from test_memories import make_store, entries
+    from test_graph_v2 import Judge, ContextExtractor, output
+    _, store, _ = make_store(tmp_path, [('assistant', '产物 /gpu3/kongsz/microduck-fly/protocol.json 通过校验')])
+    batch = entries(store)
+    graph_v2.run_chat(store, ContextExtractor([output(batch, quote=batch[0]['text'])]), 'chat-1', jev=Judge())
+    node = store.db.execute('select node from sg2_evidence').fetchone()[0]
+    store.db.execute('update work_memory set source_quote=? where id=?', ('无路径', node))
+    store.db.execute('update sg2_evidence set quote=? where node=?', ('无路径', node))
+    store.db.commit()
+    assert store.db.execute('select count(*) from sg_read_dirty').fetchone()[0] == 1
+    flush(store)
+    paths = json.loads(store.db.execute('select paths_json from sg_read_nodes where id=?', (node,)).fetchone()[0])
+    assert paths == []
+    store.close()
+
+
+def test_evidence_only_mutation_invalidates_projection(tmp_path):
+    from sessiongraph.read_projection import flush
+    from sessiongraph import graph_v2
+    from test_memories import make_store, entries
+    from test_graph_v2 import Judge, ContextExtractor, output
+    _, store, _ = make_store(tmp_path, [('assistant', '产物 /gpu3/kongsz/microduck-fly/protocol.json 通过校验')])
+    batch = entries(store)
+    graph_v2.run_chat(store, ContextExtractor([output(batch, quote=batch[0]['text'])]), 'chat-1', jev=Judge())
+    node = store.db.execute('select node from sg2_evidence').fetchone()[0]
+    # Make the representative quote independent of the path-bearing evidence so
+    # this test cannot pass through the work_memory validity gate.
+    store.db.execute('update work_memory set source_quote=? where id=?', ('无路径', node))
+    store.db.commit()
+    flush(store)
+    assert store.db.execute('select count(*) from sg_read_dirty').fetchone()[0] == 0
+    # This writer touches neither work_memory nor entries. Only the evidence
+    # trigger can invalidate the cached projection before the next read.
+    store.db.execute('update sg2_evidence set quote=? where node=?', ('无路径', node))
+    store.db.commit()
+    assert store.db.execute('select count(*) from sg_read_dirty').fetchone()[0] == 1
+    flush(store)
+    paths = json.loads(store.db.execute('select paths_json from sg_read_nodes where id=?', (node,)).fetchone()[0])
+    assert paths == []
+    store.close()

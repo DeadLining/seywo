@@ -16,7 +16,33 @@ def project_lock(config):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError('maintenance_busy') from None
-        yield
+        yield lock
+
+
+@contextmanager
+def task_cleanup_lock(config):
+    """Selective orchestration cleanup needs a short writer window, not idle AI.
+
+    Leased workers release graph-v2.lock during transport. Holding it prevents
+    selecting/changing stages while the transaction dismisses only blocked jobs.
+    We leave active attempts/leases and graph dependencies untouched, so an
+    in-flight response can still commit. Compaction keeps its quiescent guard.
+    Legacy workers lack these fences and retain the original exclusion.
+    """
+    from .stage_leases import enabled, locked
+    if enabled(config):
+        with locked(Path(config['database']).parent / 'graph-v2.lock'):
+            yield
+        return
+    runs = Path(config['database']).parent / 'hook-state'
+    runs.mkdir(parents=True, exist_ok=True)
+    with (runs / 'update.lock').open('a') as worker_lock:
+        try:
+            fcntl.flock(worker_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('maintenance_busy') from None
+        with project_lock(config):
+            yield
 
 
 def footprint(store):
@@ -36,6 +62,75 @@ def counts(store):
              'sg2_relation_evidence','sg2_jobs','sg2_attempts','sg2_cursors','sg_input_coverage')
     return {table:store.db.execute(f'SELECT count(*) FROM {table}').fetchone()[0]
             for table in names if storage.exists(store.db,table)}
+
+
+# Do not rewrite gigabytes to reclaim a handful of pages. Payload compression is
+# independent of VACUUM; the free pages remain reusable by subsequent writes.
+MIN_VACUUM_BYTES = 8 * 1024 * 1024
+COMPACTION_SECONDS = 240  # Reclamation budget below the desktop's 300-second deadline.
+PAYLOAD_TABLES = ('sg2_jobs', 'sg2_job_parts', 'sg_payload_archive', 'sg2_checkpoints')
+
+
+def check_payload_tables(store):
+    """Verify the modified B-trees, not every source/FTS page in the database.
+
+    archive_text additionally verifies exact decompression and SHA256 for every
+    changed value; fact/provenance counts are checked in the same transaction.
+    This is deliberately not a claim of a full-database integrity audit.
+    """
+    checked = []
+    for table in PAYLOAD_TABLES:
+        if storage.exists(store.db, table):
+            if any(row[0] != 'ok' for row in store.db.execute(f"PRAGMA quick_check('{table}')")):
+                raise ValueError('maintenance_integrity_failed')
+            checked.append(table)
+    return checked
+
+
+def reclaim_space(store, deadline):
+    """Best-effort physical reclamation after the lossless transaction commits."""
+    import sqlite3
+    db = store.db
+    timeout = db.execute('PRAGMA busy_timeout').fetchone()[0]
+    db.execute('PRAGMA busy_timeout=1000')
+    db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    result = dict(warning='', vacuum_performed=False, vacuum_skipped_reason='')
+    try:
+        if time.monotonic() >= deadline:
+            result.update(warning='载荷处理已完成；本次磁盘回收时限已到，可稍后再次压缩。',
+                          vacuum_skipped_reason='reclamation_deferred')
+            return result
+        # PASSIVE never waits for a long reader to release its snapshot.
+        checkpoint = db.execute('PRAGMA wal_checkpoint(PASSIVE)').fetchone()
+        if checkpoint[0] or checkpoint[1] != checkpoint[2]:
+            result.update(warning='载荷处理已完成；索引正在被读取，日志空间将在读事务结束后回收。',
+                          vacuum_skipped_reason='active_reader')
+            return result
+        footprint_now = footprint(store)
+        minimum = max(MIN_VACUUM_BYTES, footprint_now['logical_bytes'] // 100)
+        if footprint_now['reclaimable_bytes'] >= minimum:
+            if time.monotonic() >= deadline:
+                result.update(warning='载荷处理已完成；本次磁盘回收时限已到，可稍后再次压缩。',
+                              vacuum_skipped_reason='reclamation_deferred')
+                return result
+            db.execute('VACUUM')  # SQLite-atomic; interruption retains committed data.
+            result['vacuum_performed'] = True
+        else:
+            result['vacuum_skipped_reason'] = 'small_freelist'
+        checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+        if checkpoint[0]:
+            result['warning'] = '载荷处理已完成；索引正在被读取，日志空间将在读事务结束后回收。'
+    except sqlite3.OperationalError as exc:
+        # Busy readers/deadlines are deferrals, not proof of success or corruption.
+        # Disk-full, malformed database and unexpected errors must remain errors.
+        if (getattr(exc, 'sqlite_errorcode', 0) & 255) not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_INTERRUPT}:
+            raise
+        result.update(warning='载荷处理已完成；磁盘回收达到本次时限或索引正忙，可稍后再次压缩。',
+                      vacuum_skipped_reason='reclamation_deferred')
+    finally:
+        db.set_progress_handler(None, 0)
+        db.execute(f'PRAGMA busy_timeout={timeout}')
+    return result
 
 
 def run(config_path, action):
@@ -64,50 +159,81 @@ def run(config_path, action):
                 archive = storage.archive_completed_payloads(store)
                 if counts(store) != preserved:
                     raise ValueError('maintenance_fact_count_changed')
-                integrity = store.db.execute('PRAGMA quick_check').fetchone()[0]
-                if integrity != 'ok':
-                    raise ValueError('maintenance_integrity_failed')
-            # VACUUM is SQLite-atomic. A busy reader is harmless; committed
-            # payload compression stays valid even if reclamation is deferred.
-            import sqlite3
-            warning = ''
-            try:
-                store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
-                if store.db.execute('PRAGMA freelist_count').fetchone()[0]:
-                    store.db.execute('VACUUM')
-                checkpoint = store.db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
-                if checkpoint[0]:warning = '索引正在被读取，日志空间将在读事务结束后回收。'
-            except sqlite3.OperationalError:
-                warning = '载荷已压缩；磁盘空间回收暂未完成，可稍后再次压缩。'
+                checked = check_payload_tables(store)
+            reclamation = reclaim_space(store, started + COMPACTION_SECONDS)
             after = footprint(store)
             return dict(before=before,after=after,counts=preserved,archive=archive,cache=cache,
                         reclaimed_bytes=max(0,before['database_bytes']+before['wal_bytes']-after['database_bytes']-after['wal_bytes']),
-                        integrity=integrity,warning=warning,model_calls=0,elapsed_seconds=round(time.monotonic()-started,3))
+                        integrity='ok',integrity_scope=checked,**reclamation,
+                        model_calls=0,elapsed_seconds=round(time.monotonic()-started,3))
         finally:
             store.close()
+
+
+def dismiss_graph_batches(config, now):
+    """Archive blocked V2 orchestration, including pre-control legacy failures.
+
+    Never delete sources, facts or coverage.
+
+    Caller holds the project writer locks. Keep reservations so later hooks
+    cannot recreate the discarded input; new input remains eligible. The small
+    before receipt permits restoration without copying large saved payloads.
+    """
+    import json
+    if not Path(config['database']).is_file():
+        return 0
+    from .run_receipts import connection
+    from .stages import CONTROL_STATE_SQL
+    with connection(config, readonly=False) as db:
+        if not all(storage.exists(db, name) for name in ('sg2_jobs', 'sg2_control')):
+            return 0
+        project = db.execute("SELECT value FROM metadata WHERE key='project_id'").fetchone()
+        if not project or project[0] != config['project_id']:
+            raise ValueError('database project_id does not match configuration')
+        active = ("AND NOT EXISTS (SELECT 1 FROM sg2_attempts a WHERE a.job=j.id AND a.state='running')"
+                  if storage.exists(db, 'sg2_attempts') else '')
+        if storage.exists(db, 'sg2_stage_lease'):
+            # A lease exists before the attempt row is inserted. Protect that
+            # window as well, including explicitly retried formerly blocked jobs.
+            active += " AND NOT EXISTS (SELECT 1 FROM sg2_stage_lease l WHERE l.job=j.id AND l.state='running')"
+        with db:
+            db.execute('BEGIN IMMEDIATE')
+            rows = db.execute(f"""SELECT j.id,j.state job_state,j.updated_at,c.* FROM sg2_jobs j
+                LEFT JOIN sg2_control c ON c.job=j.id WHERE j.project=? AND {CONTROL_STATE_SQL}='blocked'
+                AND j.state NOT IN ('complete','superseded','dismissed') {active}""",
+                (config['project_id'],)).fetchall()
+            if not rows:
+                return 0
+            db.execute('''CREATE TABLE IF NOT EXISTS sg2_task_dismissals(
+                job TEXT PRIMARY KEY REFERENCES sg2_jobs(id) ON DELETE CASCADE,
+                project TEXT NOT NULL,dismissed_at REAL NOT NULL,before_json TEXT NOT NULL)''')
+            for row in rows:
+                db.execute('INSERT INTO sg2_task_dismissals VALUES(?,?,?,?)',
+                           (row['id'],config['project_id'],now,json.dumps(dict(row),ensure_ascii=False)))
+                db.execute("UPDATE sg2_jobs SET state='dismissed' WHERE id=?", (row['id'],))
+                db.execute("UPDATE sg2_control SET state='dismissed' WHERE job=?", (row['id'],))
+            return len(rows)
 
 
 def clear_tasks(config):
     """Dismiss obsolete orchestration, retain facts and exact historical receipts.
 
-    update.lock excludes an importer/extractor; queue.lock makes dismissal atomic
-    with dispatch/record. Dismissed entries fence late receipts, not future events.
+    Selective writer and queue locks serialize dismissal with dispatch/record;
+    leased network requests may continue. Dismissed entries fence late receipts,
+    not future events. Legacy workers still require quiescence.
     """
     from .auto_update import _folder, _pid_alive, ACTIVE, DEADLINE
     import json
     import os
     runs = _folder(config)
     runs.parent.mkdir(parents=True, exist_ok=True)
-    with (runs.parent / 'update.lock').open('a') as worker_lock:
-        try:
-            fcntl.flock(worker_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise ValueError('maintenance_busy') from None
-        with project_lock(config), continuation.locked(continuation.root(config)):
+    with task_cleanup_lock(config):
+        with continuation.locked(continuation.root(config)):
             folder = continuation.root(config)
             path = folder / 'queue.json'
             queue = continuation.read(path, {})
             now = time.time()
+            dismissed_batches = dismiss_graph_batches(config, now)
             dismissed = archived = unreadable = 0
             for item in queue.values():
                 if (Path(item['config']).resolve() != Path(config['_config_path']).resolve()
@@ -145,7 +271,7 @@ def clear_tasks(config):
                     with db:
                         archived += run_receipts.dismiss_failures(db, config['project_id'])
             return dict(dismissed_tasks=dismissed, archived_runs=archived,
-                        unreadable_runs=unreadable, model_calls=0)
+                        dismissed_batches=dismissed_batches, unreadable_runs=unreadable, model_calls=0)
 
 
 def maintain_receipts(config, **options):
@@ -191,4 +317,42 @@ def maintain_sources(config, **options):
                     raise ValueError('database project_id does not match configuration')
                 db.execute('PRAGMA foreign_keys=ON')
                 store.db, store.readonly = db, False
+                from .source_text import register
+                register(store)
                 return source_retention.maintain(store, **options)
+
+
+def externalize_sources(config, **options):
+    """Explicit source-verified batches; ordinary Hooks never migrate history."""
+    from .source_text import migrate
+    if not options.get('apply', False):
+        store = Store(config, readonly=True)
+        try:
+            return migrate(store, **options)
+        finally:
+            store.close()
+    with project_lock(config):
+        store = Store(config)
+        try:
+            return migrate(store, **options)
+        finally:
+            store.close()
+
+
+def optimize_legacy(config, **options):
+    from .legacy_storage import migrate
+    if not options.get('apply', False):
+        store = Store(config, readonly=True)
+        try:
+            return migrate(store, **options)
+        finally:
+            store.close()
+    path = Path(config['database']).parent / 'hook-state' / 'update.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('a') as lock, project_lock(config):
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        store = Store(config)
+        try:
+            return migrate(store, **options)
+        finally:
+            store.close()

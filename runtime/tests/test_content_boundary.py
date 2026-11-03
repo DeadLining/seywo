@@ -1,4 +1,5 @@
 """Media is not textual evidence, including legacy replay and malformed envelopes."""
+from sessiongraph.source_text import hydrate
 import json
 import pytest
 from test_input_framework import fixture, Empty, msg
@@ -20,7 +21,7 @@ def test_mixed_media_preserves_metrics_paths_and_source_offsets(tmp_path):
     assert 'QkFC'*10 not in sent and 'UklG'*10 not in sent
     assert all(v in sent for v in ['run_042','0.913','/tmp/metrics.json','/tmp/audio.wav','10.1234/example'])
     assert r['model_calls']==1 and not r['failed']
-    assert s.db.execute('select text from entries').fetchone()[0]==raw
+    assert hydrate(s, s.db.execute('select * from entries').fetchone())['text']==raw
     for b in ex.calls:
         for e in b:assert all(fragment in raw for fragment in e['evidence_fragments'])
     assert g.run_chat(s,Empty(),'input-chat',jev=Judge())['model_calls']==0
@@ -28,7 +29,7 @@ def test_mixed_media_preserves_metrics_paths_and_source_offsets(tmp_path):
 
 def test_legacy_mid_base64_descriptor_rechecks_whole_source(tmp_path):
     raw=mixed();s,_=fixture(tmp_path,[{'type':'function_call_output','call_id':'c','output':raw}])
-    row=dict(s.db.execute('select * from entries').fetchone());at=raw.index('QkFC')+1000
+    row=hydrate(s, s.db.execute('select * from entries').fetchone());at=raw.index('QkFC')+1000
     restored=g._restore_batch(s,[p.row_descriptor(row,[[at,at+24000]])])
     assert not restored or not restored[0]['text']
 
@@ -39,7 +40,7 @@ def test_legacy_mid_base64_descriptor_rechecks_whole_source(tmp_path):
     json.dumps({'type':'image','source':{'type':'base64','data':'QUJD'*4000},'path':'/tmp/img.png'}),
 ])
 def test_media_removed_in_plain_malformed_and_typed_envelopes(tmp_path,raw):
-    s,_=fixture(tmp_path,[msg(raw,'user')]);row=dict(s.db.execute('select * from entries').fetchone())
+    s,_=fixture(tmp_path,[msg(raw,'user')]);row=hydrate(s, s.db.execute('select * from entries').fetchone())
     spans,_=p.projection(s,row);selected='\n'.join(raw[a:b] for a,b in spans)
     assert 'QUJD'*10 not in selected
     if 'metric=0.9' in raw:assert 'metric=0.9' in selected
@@ -48,7 +49,7 @@ def test_media_removed_in_plain_malformed_and_typed_envelopes(tmp_path,raw):
 
 def test_ordinary_long_text_and_untyped_data_are_preserved(tmp_path):
     raw=json.dumps({'data':'测量值 '*5000,'accuracy':0.913,'hash':'a'*64})
-    s,_=fixture(tmp_path,[msg(raw,'user')]);row=dict(s.db.execute('select * from entries').fetchone())
+    s,_=fixture(tmp_path,[msg(raw,'user')]);row=hydrate(s, s.db.execute('select * from entries').fetchone())
     spans,_=p.projection(s,row)
     assert ''.join(raw[a:b] for a,b in spans)==raw
 
@@ -100,7 +101,7 @@ def test_judgment_context_projects_full_source_before_slicing(tmp_path):
     assert len(contexts) == 1 and quote in contexts[0]["context"]
     assert "QUJD" not in contexts[0]["context"]
     assert_text_only(contexts)
-    assert s.db.execute("select text from entries").fetchone()[0] == raw
+    assert hydrate(s, s.db.execute('select * from entries').fetchone())['text'] == raw
 
 
 def test_targeted_pending_recovery_does_not_touch_other_jobs(tmp_path):
@@ -132,7 +133,7 @@ def test_quoted_credential_fields_are_redacted_before_input(tmp_path):
     assert secret not in sent
     assert 'run_042 accuracy=0.913' in sent
     assert not result['failed']
-    assert s.db.execute('select text from entries').fetchone()[0] == text
+    assert hydrate(s, s.db.execute('select * from entries').fetchone())['text'] == text
 
 
 def test_generated_display_secret_is_redacted_without_losing_valid_nodes(tmp_path):

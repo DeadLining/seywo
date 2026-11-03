@@ -5,6 +5,8 @@ coverage are durable. A missing semantic judge never silently approves an edge.
 """
 
 from __future__ import annotations
+
+from .source_text import hydrate
 import json
 import re
 import time
@@ -79,10 +81,14 @@ def enabled(store):
 def setup(store):
     store._ensure_writable()
     store.db.executescript(SCHEMA)
+    from .read_projection import ensure_evidence_triggers
+    ensure_evidence_triggers(store)
     input_pipeline.setup(store)
     stages.setup(store)
     from .storage import revision_triggers
     revision_triggers(store.db)
+    from .graph_compaction import setup as setup_compaction
+    setup_compaction(store)
     from .relation_evidence import setup as setup_proofs
     setup_proofs(store)
     from . import revision_ledger
@@ -90,6 +96,10 @@ def setup(store):
         revision_ledger.setup(store)
     if stage_leases.enabled(store.config):
         stage_leases.setup(store)
+    from . import tiering
+    tiering.setup(store)
+    # Retire the old growth counter without touching identity mappings or evidence.
+    store.db.execute('DROP TRIGGER IF EXISTS sg_auto_compaction_insert')
 
 
 def candidates(store, text, limit=12):
@@ -99,11 +109,14 @@ def candidates(store, text, limit=12):
     if not words:
         return []
     marks = ",".join("?" for _ in words)
+    from .graph_compaction import expression
+    canonical_term = expression(store, "t.node")
     rows = store.db.execute(
         f"""SELECT n.*,m.title,m.content,m.aliases_json,m.status,m.source_entry_id,m.source_quote,
-        count(*) score FROM sg2_terms t JOIN sg2_nodes n ON n.id=t.node JOIN work_memory m ON m.id=n.id
+        count(DISTINCT t.term) score FROM sg2_terms t JOIN sg2_nodes n ON n.id={canonical_term} JOIN work_memory m ON m.id=n.id
         JOIN entries e ON e.id=m.source_entry_id WHERE t.project=? AND t.term IN ({marks})
-        AND instr(e.text,m.source_quote)>0 GROUP BY n.id ORDER BY score DESC,n.id LIMIT ?""",
+        GROUP BY n.id HAVING instr(sg_source_text(e.id,e.text),m.source_quote)>0
+        ORDER BY score DESC,n.id LIMIT ?""",
         (store.config["project_id"], *words, limit),
     ).fetchall()
     out = []
@@ -141,9 +154,9 @@ def _assertion_fields(store, node, entry, quote):
 
 
 def _identity_value(identity):
-    # DOI is case-insensitive; run ids and URL paths are not.
+    # DOI and derived conclusions are case-insensitive; run ids and URL paths are not.
     value = identity["value"]
-    return value.casefold() if identity["namespace"] == "doi" else value
+    return value.casefold() if identity["namespace"] in {"doi", "claim_conclusion"} else value
 
 
 def _identity_keys(node):
@@ -158,8 +171,21 @@ def _identity_keys(node):
         for i in node["identity"]
         if i["namespace"] in strong.get(node["type"], set())
     }
+    if node["type"] in {"Claim", "Decision"}:
+        # Derived from the node's own literal quotes by conclusion.derive(); a
+        # same-scope different-value identity is a conflict, never a merge.
+        keys.update(
+            fingerprint(['claim-conclusion-v1', node["type"], i["scope"], _identity_value(i)])
+            for i in node["identity"]
+            if i["namespace"] == "claim_conclusion"
+        )
     from .graph_contract import atomic_key, atomic_anchored
     if atomic_anchored(node) and atomic_scope_resolved(node):
+        # Lane identity is deliberate: same subject+predicate+unit+conditions is
+        # ONE node whose value changes over time. The immutable revision ledger
+        # records each value and decides which head is current. Adding `value`
+        # here would split corrections into unrelated nodes and silently lose the
+        # "later evidence supersedes earlier" semantics.
         keys.add(fingerprint(['atomic-v1', atomic_key(node)]))
     return keys
 
@@ -173,8 +199,13 @@ def _conflict(a, b):
         return True
     if atomic_key(a) is not None and atomic_key(b) is not None and atomic_key(a) != atomic_key(b):
         return True
-    aa = {(i["namespace"], i["scope"]): _identity_value(i) for i in a["identity"]}
-    bb = {(i["namespace"], i["scope"]): _identity_value(i) for i in b["identity"]}
+    def slots(node):
+        from collections import defaultdict
+        result = defaultdict(set)
+        for i in node["identity"]:
+            result[(i["namespace"],i["scope"])].add(_identity_value(i))
+        return result
+    aa, bb = slots(a), slots(b)
     return any(aa[k] != bb[k] for k in aa.keys() & bb.keys())
 
 
@@ -198,13 +229,7 @@ def _require_call_budget(stats):
         raise GraphCallBudgetPending("graph_call_budget_pending")
 
 
-def judge(store, client, stage, state, questions, stats):
-    if isinstance(client, SingleTokenJudge) and len(questions) > 1:
-        answers = {}
-        for key, question in questions.items():
-            result = judge(store, client, stage, state, {key: question}, stats)
-            answers.update(result['answers'])
-        return {'answers': answers}
+def judgment_key(store, client, stage, state, questions):
     conf = store.config.get("graph_v2", {}).get("jev", {})
     # Cache includes endpoint/model/policy and exact evidence/object snapshots.
     key = fingerprint(
@@ -220,6 +245,17 @@ def judge(store, client, stage, state, questions, stats):
             questions,
         ]
     )
+    return key
+
+
+def judge(store, client, stage, state, questions, stats):
+    if isinstance(client, SingleTokenJudge) and len(questions) > 1:
+        answers = {}
+        for name, question in questions.items():
+            result = judge(store, client, stage, state, {name: question}, stats)
+            answers.update(result['answers'])
+        return {'answers': answers}
+    key = judgment_key(store, client, stage, state, questions)
     row = store.db.execute("SELECT answer_json FROM sg2_judgments WHERE id=?", (key,)).fetchone()
     if row:
         stats["judge_cache_hits" if isinstance(client, ModelJudge) else "jev_cache_hits"] += 1
@@ -260,10 +296,11 @@ def judge(store, client, stage, state, questions, stats):
             stats["recovery_warning"] = type(exc).__name__
     stats["usage"].append({"provider": getattr(client, "provider_name", "jev"), "stage": stage, "usage": answer.get("usage")})
     with store.db:
-        store.db.execute(
+        inserted = store.db.execute(
             "INSERT OR IGNORE INTO sg2_judgments VALUES(?,?,?,?,?,?)",
             (key, store.config["project_id"], stage, key, dumps(answer), now()),
-        )
+        ).rowcount
+        stats['durable_progress'] = stats.get('durable_progress', 0) + inserted
     return answer
 
 
@@ -285,7 +322,7 @@ def _evidence_context(store, objects):
                 row = store.db.execute(
                     "SELECT id,line,kind,text,role,timestamp FROM entries WHERE id=?", (eid,)
                 ).fetchone()
-                sources[eid] = (row, [])
+                sources[eid] = (hydrate(store, row), [])
             row, windows = sources[eid]
             if not row or ev["quote"] not in row["text"]:
                 raise ValueError("graph_evidence:source_changed")
@@ -350,6 +387,52 @@ def _name_candidate(a, b):
     return False
 
 
+def _delta_output(output, batch, offered, stats):
+    """Background is read context, not another source-work event.
+
+    Keep the original provider output in the job receipt. Only this publication
+    projection is filtered; current facts may still cite old scope/qualifications.
+    Old endpoints can be referenced, but never rewritten, by a current relation.
+    """
+    context = {e['id'] for e in batch if e.get('context_only')}
+    if not context:
+        return output, set()
+
+    def background(item):
+        evidence = item.get('evidence', [])
+        return bool(evidence) and all(e['entry_id'] in context for e in evidence)
+
+    from .graph_compaction import semantic
+    dropped = [n for n in output['nodes'] if background(n)]
+    remap, blocked = {}, set()
+    for node in dropped:
+        # An atomic lane intentionally excludes value. It is not equivalence.
+        matches = [m for m in offered
+                   if node.get('context_kind', 'work') == 'work'
+                   and identity_is_anchored(node) and not _conflict(node, m)
+                   and ((node['type'] not in {'Claim', 'Decision'}
+                         and bool(_identity_keys(node) & _identity_keys(m)))
+                        or (semantic(node) == semantic(m)
+                            and any(e in m['evidence'] for e in node['evidence'])))]
+        if len(matches) == 1:
+            remap[node['id']] = matches[0]['id']
+        else:
+            blocked.add(node['id'])
+    result = dict(output)
+    result['nodes'] = [n for n in output['nodes'] if not background(n)]
+    result['relations'] = [dict(r, source=remap.get(r['source'], r['source']),
+                                target=remap.get(r['target'], r['target']))
+                           for r in output['relations'] if not background(r)]
+    result['unresolved'] = [u for u in output['unresolved'] if not background(u)]
+    for key in ('nodes', 'relations', 'unresolved'):
+        stats['context_' + key + '_skipped'] += len(output[key]) - len(result[key])
+    # If everything is old, this is a successfully consumed empty delta, not an
+    # error/retry/pending job. Raw input and original extraction are still intact.
+    if not result['nodes'] and not result['relations']:
+        result['coverage'] = dict(output['coverage'], outcome='no_durable_item')
+    return result, blocked
+
+
 def _identities(store, output, offered, client, stats, *, require_atomic=False):
     from .graph_contract import atomic_anchored
     from .revision_ledger import effective
@@ -384,10 +467,17 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
             # canonical node or permit relationships through its offered binding.
             decisions[nid] = ("pending", "existing_identity_conflict")
             continue
+        from .condensation import enabled as condensing, recall as recall_identity
+        supplemental, incomplete = recall_identity(store, n) if condensing(store) else ([], False)
+        stats['identity_recalled'] += len(supplemental)
+        for candidate in supplemental:
+            bindings[candidate['id']] = candidate['id']
         strong = []
+        from .graph_compaction import expression
+        canonical_key = expression(store, "k.node")
         for key in _identity_keys(n):
             for row in store.db.execute(
-                "SELECT m.*,n.type,n.identity_json FROM sg2_keys k JOIN sg2_nodes n ON n.id=k.node JOIN work_memory m ON m.id=n.id WHERE k.project=? AND k.key=?",
+                f"SELECT DISTINCT m.*,n.type,n.identity_json FROM sg2_keys k JOIN sg2_nodes n ON n.id={canonical_key} JOIN work_memory m ON m.id=n.id WHERE k.project=? AND k.key=?",
                 (store.config["project_id"], key),
             ):
                 strong.append(
@@ -405,7 +495,7 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
                     }
                 )
                 bindings[row["id"]] = row["id"]
-        strong_map = {m["id"]: m for m in [*prior, *strong]}
+        strong_map = {m["id"]: m for m in [*prior, *strong, *supplemental]}
         matches = [
             m
             for m in strong_map.values()
@@ -420,11 +510,30 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
                 )
             )
         ]
-        if len(matches) == 1:
+        # Exact extracted content is safe to reuse immediately. A derived
+        # conclusion key is only a candidate shortlist: same quoted sentence but
+        # different wording must still pass the semantic judge.
+        # Same type, title and content under the same literal scope is an exact
+        # duplicate even when the supporting entry differs (for example the same
+        # fact repeated in another chat). Wording differences still go to the
+        # semantic judge below.
+        exact = [m for m in matches
+                 if n['type'] == m['type'] and n['title'] == m['title']
+                 and n['content'] == m['content']]
+        if len(exact) == 1:
+            decisions[nid] = ("merge", exact[0]["id"])
+            prior.append(n) if not own else None
+            continue
+        conclusion_only = (
+            bool(n.get('identity'))
+            and all(isinstance(i, dict) and i.get('namespace') == 'claim_conclusion'
+                    for i in n.get('identity') or [])
+        )
+        if len(matches) == 1 and not conclusion_only:
             decisions[nid] = ("merge", matches[0]["id"])
             prior.append(n) if not own else None
             continue
-        if len(matches) > 1:
+        if len(matches) > 1 and not conclusion_only:
             decisions[nid] = ("pending", "ambiguous_strong_identity")
             prior.append(n) if not own else None
             continue
@@ -433,15 +542,20 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
             if own
             else [
                 m
-                for m in prior
+                for m in {v['id']:v for v in [*prior,*supplemental,*matches]}.values()
                 if not _conflict(n, m)
-                and _name_candidate(n, m)
+                and (_name_candidate(n, m) or m['id'] in {v['id'] for v in supplemental}
+                     or m['id'] in {x['id'] for x in matches})
             ]
         )
-        if len(relevant) > 4:
+        if len(relevant) > 4 and not condensing(store):
             decisions[nid] = ("pending", "identity_candidate_budget")
         elif relevant:
-            decisions[nid] = ("judge", relevant)
+            if condensing(store):
+                ordered={m['id']:m for m in [*supplemental,*relevant]}
+                incomplete = incomplete or len(ordered)>4
+                relevant=list(ordered.values())[:4]
+            decisions[nid] = ("judge_incomplete" if incomplete else "judge", relevant)
             questions.extend((n, m) for m in relevant)
         else:
             decisions[nid] = (("pending", "derived_only") if effective(store.config)
@@ -457,7 +571,7 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
         }
         qs = {
             f"p{i}": _question(
-                f"Do state.pairs[{i}].incoming and .candidate identify the SAME real object AND version/run? Use original_context. Similar titles are insufficient. Preserve distinct executions and versions.",
+                f"Do state.pairs[{i}].incoming and .candidate identify the SAME real object AND version/run? Use original_context. For Claim/Decision without an already matched atomic key, SAME requires FULL semantic equivalence: all facts, values, negation, conditions, scope and authority must agree; a subset or extra clause is different. Similar titles, a common source or subject are insufficient. Preserve distinct executions, observations and versions.",
                 {
                     "same": "Same object and version/run supported by evidence.",
                     "different": "Distinct objects, executions or versions.",
@@ -479,7 +593,8 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
     for n in output["nodes"]:
         nid = n["id"]
         action, value = decisions[nid]
-        if action == "judge":
+        if action in {"judge", "judge_incomplete"}:
+            incomplete = action == 'judge_incomplete'
             same = [
                 m
                 for m in value
@@ -489,9 +604,11 @@ def _identities(store, output, offered, client, stats, *, require_atomic=False):
                 _accept(answers[(nid, m["id"])], "different", threshold, labels=isinstance(client, SingleTokenJudge))
                 for m in value
             )
-            if len(same) == 1:
-                action, value = "merge", same[0]["id"]
-            elif different and nid not in offered_ids:
+            if len(same) == 1 or same and condensing(store):
+                # Several fully equivalent old duplicates do not justify making
+                # yet another node, nor force permanent ambiguity. Reuse one.
+                action, value = "merge", min(m['id'] for m in same)
+            elif different and not incomplete and nid not in offered_ids:
                 action, value = "new", None
             else:
                 action, value = "pending", "identity_uncertain"
@@ -781,8 +898,21 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
         # a source between this check and publication. No model calls occur here.
         if not store.db.in_transaction:
             store.db.execute("BEGIN IMMEDIATE")
+        from .graph_compaction import canonical
+        bindings={key:canonical(store,value) for key,value in bindings.items()}
         frozen_row = store.db.execute('SELECT input_json FROM sg2_jobs WHERE id=?', (job['id'],)).fetchone()
         frozen = json.loads(frozen_row[0]) if frozen_row else {}
+        from .condensation import enabled as condensing
+        if condensing(store) and any(n.get('retention')=='record_only' for n in output['nodes']):
+            raise ValueError('graph_evidence:record_only_publication')
+        if frozen.get('condensation_revision') == 'condensation-v1' and any('retention' not in n for n in output['nodes']):
+            raise ValueError('graph_evidence:retention_required')
+        context_ids = {e['id'] for e in frozen.get('entries', []) if e.get('context_only')}
+        # Fail closed even if an old stage checkpoint or a direct caller bypasses
+        # the delta projection. A background-only node cannot create a revision.
+        if any(n.get('evidence') and all(e['entry_id'] in context_ids for e in n['evidence'])
+               for n in [*output['nodes'], *(r for r, _, _ in edges)]):
+            raise ValueError('graph_evidence:context_only_publication')
         if revision_ledger.effective(store.config):
             for node in output['nodes']:
                 if bindings.get(node['id']) and node.get('assertion') and not atomic_scope_resolved(node):
@@ -805,8 +935,9 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
         for item in items:
             for ev in item.get("evidence", []):
                 if ev["entry_id"] not in originals:
-                    row = store.db.execute("SELECT text FROM entries WHERE id=?", (ev["entry_id"],)).fetchone()
-                    originals[ev["entry_id"]] = row[0] if row else None
+                    row = store.db.execute("SELECT id,text FROM entries WHERE id=?", (ev["entry_id"],)).fetchone()
+                    row = hydrate(store, row)
+                    originals[ev["entry_id"]] = row['text'] if row else None
                 text = originals[ev["entry_id"]]
                 if text is None or not ev["quote"] or ev["quote"] not in text:
                     raise ValueError("graph_evidence:source_changed")
@@ -820,8 +951,10 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
             if not nid:
                 continue
             e = n["evidence"][0]
+            from .evidence_paths import for_node as evidence_paths
+            node_paths = evidence_paths(n)
             row = store.db.execute(
-                "SELECT project_id,aliases_json FROM work_memory WHERE id=?", (nid,)
+                "SELECT project_id,aliases_json,paths_json FROM work_memory WHERE id=?", (nid,)
             ).fetchone()
             if row and row["project_id"] != project:
                 raise ValueError("graph_identity:project_conflict")
@@ -840,7 +973,7 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
                         n["content"],
                         store.config["roots"][0],
                         n["status"],
-                        "[]",
+                        dumps(node_paths),
                         dumps(n["aliases"]),
                         e["entry_id"],
                         e["quote"],
@@ -860,16 +993,31 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
                 aliases = sorted(
                     set(json.loads(row["aliases_json"])) | set(n["aliases"]) | {n["title"]}
                 )[:100]
-                store.db.execute(
-                    "UPDATE work_memory SET aliases_json=?,updated_at=? WHERE id=?",
-                    (dumps(aliases), timestamp, nid),
-                )
-                old = json.loads(
+                # A derived conclusion identity is only a candidate key. Do not
+                # append it to a node whose other facts differ: otherwise later
+                # reads would claim equivalence the merge never established.
+                old_identity = json.loads(
                     store.db.execute(
                         "SELECT identity_json FROM sg2_nodes WHERE id=?", (nid,)
                     ).fetchone()[0]
                 )
-                keys = {dumps(k): k for k in [*old, *n["identity"]]}
+                derived_only = [i for i in n["identity"]
+                                if isinstance(i, dict) and i.get("namespace") == "claim_conclusion"]
+                if derived_only and _conflict({"type": n["type"], "identity": old_identity},
+                                              {"type": n["type"], "identity": n["identity"]}):
+                    n = {**n, "identity": [i for i in n["identity"]
+                                           if not (isinstance(i, dict)
+                                                   and i.get("namespace") == "claim_conclusion")]}
+                # Paths are citations, not claims about the filesystem. Keep the
+                # newly grounded ones in the same bounded list as earlier ones.
+                paths = list(dict.fromkeys(
+                    [*json.loads(row["paths_json"] or "[]"), *node_paths]
+                ))[:16]
+                store.db.execute(
+                    "UPDATE work_memory SET aliases_json=?,paths_json=?,updated_at=? WHERE id=?",
+                    (dumps(aliases), dumps(paths), timestamp, nid),
+                )
+                keys = {dumps(k): k for k in [*old_identity, *n["identity"]]}
                 store.db.execute(
                     "UPDATE sg2_nodes SET identity_json=? WHERE id=?",
                     (dumps(list(keys.values())), nid),
@@ -930,6 +1078,13 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
                     ),
                 )
             revision_ledger.capture(store, nid, n, evidence_ids)
+        from . import tiering
+        published = [bindings[n['id']] for n in output['nodes'] if n['id'] in bindings]
+        # Nodes are published before relationships so a relation failure cannot
+        # discard valid objects. Relation-dependent tier rules are therefore
+        # re-evaluated after final publication below.
+        if not finalize:
+            tiering.project(store, published)
         for nid in sorted({bindings[n['id']] for n in output['nodes']
                            if n['type'] in revision_ledger.KINDS and n['id'] in bindings}):
             revision_ledger.refresh(store, nid)
@@ -968,6 +1123,9 @@ def _commit(store, job, output, offered, bindings, pending, edges, unresolved, s
                     (fingerprint([eid, ev]), eid, ev["entry_id"], ev["quote"], job["id"]),
                 )
         _resolve_pending(store, job, output, offered, bindings, edges)
+        # Relations are now visible in the same transaction. Final tiering can
+        # recognize knowledge artifacts whose durable identity is a typed link.
+        tiering.project(store, published)
         for value, reason in [
             *pending,
             *unresolved,
@@ -1070,6 +1228,7 @@ def _add_stats(prior, current):
 
 def _stats():
     return dict(
+        durable_progress=0,
         adaptive_splits=0,
         schema_repairs=0,
         deepseek_calls=0,
@@ -1083,6 +1242,13 @@ def _stats():
         quote_format_repairs=0,
         display_fields_redacted=0,
         identity_evidence_repairs=0,
+        context_nodes_skipped=0,
+        context_relations_skipped=0,
+        context_unresolved_skipped=0,
+        identity_recalled=0,
+        conclusion_identities=0,
+        conclusion_identities_ignored=0,
+        routine_nodes_skipped=0,
         nodes_merged=0,
         nodes_saved=0,
         relations_saved=0,
@@ -1103,10 +1269,10 @@ def _window(store, segment, line, start, max_chars, through_rowid=None):
     used = 0
     end = (line, start)
     for raw in rows:
-        row = dict(raw)
-        offset = start if row["line"] == line else 0
         if len(batch) >= 24 or (batch and used >= max_chars):
             break
+        row = hydrate(store, raw)
+        offset = start if row["line"] == line else 0
         text = row["text"]
         remaining = max_chars - used
         if not text or offset >= len(text):
@@ -1149,6 +1315,7 @@ def _related_context(store, batch, offered, max_chars=6000):
         row = store.db.execute(
             "SELECT id,line,role,kind,text,timestamp FROM entries WHERE id=?", (ev["entry_id"],)
         ).fetchone()
+        row = hydrate(store, row)
         if not row or ev["quote"] not in row["text"]:
             continue
         at = row["text"].find(ev["quote"])
@@ -1163,12 +1330,46 @@ def _related_context(store, batch, offered, max_chars=6000):
     return out
 
 
+def _without_deleted_context(store, desc):
+    """Drop absent optional background only; never change a source reservation."""
+    covered = {item[0] for item in desc.get('coverage', [])}
+    kept = []
+    for entry in desc['entries']:
+        missing = not store.db.execute('SELECT 1 FROM entries WHERE id=?', (entry['id'],)).fetchone()
+        if missing and entry.get('context_only') is True and entry['id'] not in covered:
+            continue
+        kept.append(entry)
+    return {**desc, 'entries':kept} if len(kept) != len(desc['entries']) else desc
+
+
+def _live_offered(store, offered):
+    """Recheck at most the original offered set, not a new whole-graph search."""
+    sources, kept = {}, []
+    for node in offered:
+        valid = True
+        for evidence in node['evidence']:
+            eid = evidence['entry_id']
+            if eid not in sources:
+                row = store.db.execute('SELECT * FROM entries WHERE id=?', (eid,)).fetchone()
+                sources[eid] = hydrate(store, row) if row else None
+            if not sources[eid] or evidence['quote'] not in sources[eid]['text']:
+                valid = False
+                break
+        if valid:
+            kept.append(node)
+    return kept
+
+
 def _restore_batch(store, description):
     batch = []
     for d in description:
         row = store.db.execute(
             "SELECT * FROM entries WHERE id=?", (d["id"],)
         ).fetchone()
+        try:
+            row = hydrate(store, row)
+        except (ValueError, OSError):
+            raise ValueError('graph_source_changed') from None
         if not row or digest(row["text"]) != d["source_hash"]:
             raise ValueError("graph_source_changed")
         if d.get('source_metadata_hash'):
@@ -1202,12 +1403,13 @@ def _schema_repairable(reason):
     # failures (changed/missing quotes, redaction) must never be retried away.
     return (reason.startswith("provider_output_json:")
             or (reason.startswith("graph_schema:") and ":sensitive_value" not in reason)
-            or reason in {"graph_evidence:invalid_endpoint", "graph_evidence:unknown_source_anchor"})
+            or reason in {"graph_evidence:invalid_endpoint", "graph_evidence:unknown_source_anchor",
+                          "graph_evidence:invalid_atomic_source_ref"})
 
 
 def _should_split(code, reason, desc):
     return (_capacity_failure(code, reason)
-            or (code in {"graph_validation", "provider_output_json_invalid"} and desc.get("repair_attempts", 0) >= 1
+            or (code in {"graph_validation", "provider_output_json_invalid", "provider_evidence_reference"} and desc.get("repair_attempts", 0) >= 1
                 and _schema_repairable(reason)))
 
 
@@ -1324,6 +1526,7 @@ def run_chat(
     from .recovery_policy import settings as recovery_settings
     recovery = recovery_settings(store.config)
     opts = store.config.get("graph_v2", {})
+    from .condensation import enabled as condensing
     for key, default in [("identity_threshold", 0.98), ("relation_threshold", 0.9)]:
         value = opts.get(key, default)
         if type(value) not in (int, float) or not math.isfinite(value) or not 0.5 <= value <= 1:
@@ -1403,7 +1606,7 @@ def run_chat(
             if step_budget is not None and worker_steps >= step_budget:
                 break
             choices = store.db.execute(
-                "SELECT j.*,c.state AS control_state,c.due FROM sg2_jobs j LEFT JOIN sg2_control c ON c.job=j.id WHERE j.project=? AND j.chat=? AND j.segment=? AND j.state NOT IN ('complete','superseded') ORDER BY j.created_at",
+                f"SELECT j.*,{stages.CONTROL_STATE_SQL} AS control_state,c.due FROM sg2_jobs j LEFT JOIN sg2_control c ON c.job=j.id WHERE j.project=? AND j.chat=? AND j.segment=? AND j.state NOT IN ('complete','superseded','dismissed') ORDER BY j.created_at",
                 (project, chat_id, segment),
             ).fetchall()
             pending = next((j for j in choices if (selected_jobs is None or j["id"] in selected_jobs) and (selected_jobs is not None or not json.loads(j['input_json']).get('manual_only')) and j["id"] not in attempted and stages.within_frontier(store,json.loads(j["input_json"]),through_rowid) and
@@ -1413,6 +1616,17 @@ def run_chat(
                 job = dict(pending)
                 desc = json.loads(job["input_json"])
                 try:
+                    refreshed = _without_deleted_context(store, desc) if not job['output_json'] else desc
+                    if refreshed != desc:
+                        batch = _restore_batch(store, refreshed['entries'])
+                        refreshed_candidates = _live_offered(store, load_payload(store,job['candidates_json']))
+                        with store.db:
+                            store.db.execute('DELETE FROM sg2_checkpoints WHERE job=?', (job['id'],))
+                            store.db.execute('UPDATE sg2_jobs SET input_json=?,candidates_json=? WHERE id=?',
+                                (dumps(refreshed), dumps(refreshed_candidates), job['id']))
+                        desc = refreshed
+                        job['candidates_json'] = dumps(refreshed_candidates)
+                        total['durable_progress'] += 1
                     batch = _restore_batch(store, desc["entries"])
                 except Exception as exc:
                     info=describe(exc,"restore")
@@ -1470,6 +1684,7 @@ def run_chat(
                     if not any(c[4] == "extracted" for c in plan["coverage"]):
                         with store.db:
                             input_pipeline.commit(store, plan, "rule:" + plan["work_unit"], segment, project)
+                        total['durable_progress'] += 1
                         for key,value in plan["input_stats"].items():total[key]=total.get(key,0)+value
                         continue
                 else:
@@ -1523,7 +1738,7 @@ def run_chat(
             # must not bind a new safe projection to a previous binary-bearing input.
             original_spans = {e["id"]:e.get("source_spans",[[e["source_start"],e["source_end"]]]) for e in desc["entries"]}
             projection_changed = any(e.get("source_spans", original_spans[e["id"]]) != original_spans[e["id"]] for e in batch)
-            part = fingerprint([desc["entries"],VERSION,{k:v for k,v in opts.items() if k not in {"recovery_policy", "resource_policy", "stage_policy", "revision_policy"}},offered] + ([SELECTION_VERSION] if projection_changed else []))
+            part = fingerprint([desc["entries"],VERSION,{k:v for k,v in opts.items() if k not in {"recovery_policy", "resource_policy", "stage_policy", "revision_policy", "auto_compaction"}},offered] + ([SELECTION_VERSION] if projection_changed else []))
             from .revision_ledger import effective
             if effective(store.config):
                 part = fingerprint([part, 'effective-atomic-v1', ATOMIC_SOURCE_REVISION])
@@ -1544,7 +1759,7 @@ def run_chat(
                     output = load_payload(store,job["output_json"])
                 else:
                     from .revision_ledger import effective
-                    contract = policy(offered, effective=effective(store.config))
+                    contract = policy(offered, effective=effective(store.config), condense=condensing(store))
                     if desc.get('manual_only') and desc.get('migration_revision'):
                         contract['instructions'] += (
                             ' This is primary-source migration: re-extract independent facts from the original, '
@@ -1583,11 +1798,17 @@ def run_chat(
                     def validate_candidate():
                         candidate, redacted = redact_display_fields(output)
                         stats["display_fields_redacted"] += redacted
+                        if condensing(store) and any('retention' not in n for n in candidate.get('nodes', [])):
+                            raise ValueError('graph_schema:retention_required')
                         candidate = normalize_references(candidate, offered)
                         candidate, repairs = restore_source_quotes(candidate, batch)
                         stats["quote_format_repairs"] += repairs
                         candidate, repairs = anchor_identity_evidence(candidate, batch)
                         stats["identity_evidence_repairs"] += repairs
+                        from .conclusion import enrich as enrich_conclusions
+                        candidate, derived, ignored = enrich_conclusions(candidate)
+                        stats["conclusion_identities"] += derived
+                        stats["conclusion_identities_ignored"] += ignored
                         validate(candidate, batch, offered, defer_unanchored_identities=True)
                         return candidate
                     output=stages.execute(store,job["id"],part,"validate",validate_candidate,stats,cache=False)
@@ -1596,19 +1817,30 @@ def run_chat(
                     with store.db:
                         if desc.get('manual_only') and desc.get('migration_revision'):
                             desc['atomic_source_revision'] = ATOMIC_SOURCE_REVISION
+                        if condensing(store):
+                            desc['condensation_revision'] = 'condensation-v1'
                         store.db.execute(
                             "UPDATE sg2_jobs SET output_json=?,input_json=?,state='judging',updated_at=? WHERE id=?",
                             (dumps(output), dumps(desc), now(), job["id"]),
                         )
                         store.db.execute("DELETE FROM sg2_checkpoints WHERE job=? AND stage='extract'", (job["id"],))
+                    stats['durable_progress'] += 1
                 output, redacted = redact_display_fields(output)
                 stats["display_fields_redacted"] += redacted
                 assert_text_only(output)
                 validate(output, batch, offered, defer_unanchored_identities=True)
+                from .condensation import enabled as condensing, project_output
+                output, routine_blocked = project_output(output, stats) if condensing(store) else (output, set())
+                output, context_blocked = _delta_output(output, batch, offered, stats)
+                context_blocked |= routine_blocked
+                # Identity/revision judgments from the old background-replay policy
+                # must not be reused. Extraction caches and original receipts stay valid.
+                judgment_part = fingerprint([judgment_part, 'source-delta-v1', 'condensation-v1' if condensing(store) else '', output, sorted(context_blocked)])
                 stats["relations_proposed"] = len(output["relations"])
                 bindings, uncertain = stages.execute(store,job["id"],judgment_part,"identity",
                     lambda: _identities(store, output, offered, client, stats,
                         require_atomic=bool(desc.get('manual_only') and desc.get('migration_revision'))),stats)
+                bindings = {k: v for k, v in bindings.items() if k not in context_blocked}
                 # Publish only evidence-validated, identity-resolved objects. Relations
                 # remain separate and cannot block these objects or unrelated source work.
                 node_saved, _ = stages.execute(store,job["id"],part,"publish_nodes",
@@ -1625,6 +1857,7 @@ def run_chat(
                     lambda: _commit(store, job, output, offered, bindings, uncertain, edges, rejected, stats, end),stats,cache=False)
                 saved.extend(s)
                 relations.extend(r)
+                stats['durable_progress'] += 1
                 if desc.get("input_stats") and store.db.execute("SELECT state FROM sg2_jobs WHERE id=?", (job["id"],)).fetchone()[0] == "complete":
                     for key,value in desc["input_stats"].items():total[key]=total.get(key,0)+value
                 used.append(
@@ -1697,6 +1930,7 @@ def run_chat(
                                 ),
                             )
             for key in (
+                "durable_progress",
                 "adaptive_splits",
                 "schema_repairs",
                 "deepseek_calls",
@@ -1710,6 +1944,11 @@ def run_chat(
                 "quote_format_repairs",
                 "display_fields_redacted",
                 "identity_evidence_repairs",
+                "context_nodes_skipped",
+                "context_relations_skipped",
+                "context_unresolved_skipped",
+                "identity_recalled",
+                "routine_nodes_skipped",
                 "nodes_merged",
                 "nodes_saved",
                 "relations_saved",
@@ -1761,7 +2000,7 @@ def run_chat(
             backlog_failures.append(dict(segment_id=item["segment"],from_line=0,job_id=item["id"],
                 error_code=info["code"],retryable=item["state"]=="retry_wait",failure=info))
     due=[item["due"] for item in backlog if item["state"]=="retry_wait"]
-    total.update(durable_stages=True,
+    total.update(durable_stages=True, progress_tracked=True,
         runnable_remaining=bool(available or any(item["state"] not in {"blocked","retry_wait"} or (item["state"]=="retry_wait" and item["due"]<=time.time()) for item in backlog)),
         next_retry_at=min(due) if due else None,
         blocked_jobs=sum(item["state"]=="blocked" for item in backlog),
@@ -1799,27 +2038,30 @@ def run_chat(
 def read_relations(store, ids=None, *, both=False, chat="", limit=1000):
     if not exists(store) or ids == []:
         return []
+    from .graph_compaction import expression, canonical
+    if ids is not None: ids=sorted({canonical(store,node) for node in ids})
+    source, target = expression(store,"r.source"), expression(store,"r.target")
     where = [
         "r.project=?",
         "a.status IN ('proposed','active','in_progress','blocked','completed')",
         "b.status IN ('proposed','active','in_progress','blocked','completed')",
-        "EXISTS(SELECT 1 FROM entries e WHERE e.id=a.source_entry_id AND length(a.source_quote)>0 AND instr(e.text,a.source_quote)>0)",
-        "EXISTS(SELECT 1 FROM entries e WHERE e.id=b.source_entry_id AND length(b.source_quote)>0 AND instr(e.text,b.source_quote)>0)",
+        "EXISTS(SELECT 1 FROM entries e WHERE e.id=a.source_entry_id AND length(a.source_quote)>0 AND instr(sg_source_text(e.id,e.text),a.source_quote)>0)",
+        "EXISTS(SELECT 1 FROM entries e WHERE e.id=b.source_entry_id AND length(b.source_quote)>0 AND instr(sg_source_text(e.id,e.text),b.source_quote)>0)",
     ]
     args = [store.config["project_id"]]
     if ids is not None:
         marks = ",".join("?" for _ in ids)
         op = "AND" if both else "OR"
-        where.append(f"(r.source IN ({marks}) {op} r.target IN ({marks}))")
+        where.append(f"({source} IN ({marks}) {op} {target} IN ({marks}))")
         args.extend([*ids, *ids])
     if chat:
         where.append(
-            "EXISTS(SELECT 1 FROM sg2_evidence x WHERE x.node=r.source AND x.chat=?) AND EXISTS(SELECT 1 FROM sg2_evidence x WHERE x.node=r.target AND x.chat=?)"
+            f"EXISTS(SELECT 1 FROM sg2_evidence x WHERE {expression(store,'x.node')}={source} AND x.chat=?) AND EXISTS(SELECT 1 FROM sg2_evidence x WHERE {expression(store,'x.node')}={target} AND x.chat=?)"
         )
         args.extend([chat, chat])
     rows = store.db.execute(
-        """SELECT r.*,a.title source_title,b.title target_title FROM sg2_relations r
-        JOIN work_memory a ON a.id=r.source JOIN work_memory b ON b.id=r.target
+        f"""SELECT r.*,{source} canonical_source,{target} canonical_target,a.title source_title,b.title target_title FROM sg2_relations r
+        JOIN work_memory a ON a.id={source} JOIN work_memory b ON b.id={target}
         WHERE """
         + " AND ".join(where)
         + " ORDER BY r.updated_at DESC,r.id LIMIT ?",
@@ -1837,8 +2079,10 @@ def read_relations(store, ids=None, *, both=False, chat="", limit=1000):
         result.append(
             {
                 "id": r["id"],
-                "source": r["source"],
-                "target": r["target"],
+                "source": r["canonical_source"],
+                "target": r["canonical_target"],
+                "original_source": r["source"],
+                "original_target": r["target"],
                 "source_title": r["source_title"],
                 "target_title": r["target_title"],
                 "kind": r["kind"],
@@ -1850,7 +2094,20 @@ def read_relations(store, ids=None, *, both=False, chat="", limit=1000):
                 "evidence": evidence,
             }
         )
-    return result
+    from .graph_compaction import available
+    if not available(store):
+        return result
+    grouped={}
+    for edge in result:
+        if edge['source']==edge['target'] and edge['original_source']!=edge['original_target']:
+            continue  # Internal backing edge remains expandable, not an inferred self fact.
+        key=tuple(edge[k] for k in ('source','target','kind','scope','statement_mode','state'))
+        if key not in grouped:
+            grouped[key]={**edge,'relation_ids':[],'evidence':[]}
+        group=grouped[key]
+        group['relation_ids'].append(edge['id'])
+        group['evidence'].extend(ev for ev in edge['evidence'] if ev not in group['evidence'])
+    return list(grouped.values())
 
 
 def _job_diagnostics(store):
@@ -1866,10 +2123,11 @@ def _job_diagnostics(store):
     control = table_exists(store.db, "sg2_control")
     migrations = table_exists(store.db, "sg2_judge_migrations")
     join = "LEFT JOIN sg2_control c ON c.job=j.id" if control else ""
-    extra = "c.state control_state,c.due,c.failures,c.error_json" if control else "NULL control_state,NULL due,0 failures,NULL error_json"
+    extra = (f"{stages.CONTROL_STATE_SQL} control_state,c.due,c.failures,c.error_json" if control else
+             "CASE WHEN COALESCE(j.error,'') NOT IN ('','graph_call_budget_pending','graph_continuation_pending') THEN 'blocked' ELSE j.state END control_state,NULL due,0 failures,NULL error_json")
     migrated = "EXISTS(SELECT 1 FROM sg2_judge_migrations m WHERE m.job=j.id)" if migrations else "0"
     parents = {item["chat"]:item for item in snapshot(store.config) if item.get("state") == "blocked"}
-    rows = store.db.execute(f"SELECT j.id,j.chat,j.state,j.error,j.stats_json,{extra},{migrated} migrated FROM sg2_jobs j {join} WHERE j.project=? AND j.state NOT IN ('complete','superseded') ORDER BY j.updated_at DESC", (store.config["project_id"],))
+    rows = store.db.execute(f"SELECT j.id,j.chat,j.state,j.error,j.stats_json,{extra},{migrated} migrated FROM sg2_jobs j {join} WHERE j.project=? AND j.state NOT IN ('complete','superseded','dismissed') ORDER BY j.updated_at DESC", (store.config["project_id"],))
     for row in rows:
         info = json.loads(row["error_json"] or "{}")
         state = row["control_state"] or row["state"]
@@ -1887,7 +2145,7 @@ def _job_diagnostics(store):
         progress = (state if state in {"blocked", "retry_wait"} else
                     "running" if state in {"extracting", "validating", "judging", "relating"} else "ready")
         result["progress"][progress] = result["progress"].get(progress, 0) + 1
-        if error is None:
+        if not error:
             continue
         deferred = state == "retry_wait" or (state in {"pending", "ready"} and
                     error in {"graph_call_budget_pending", "graph_continuation_pending"})
@@ -1906,6 +2164,7 @@ def diagnostics(store):
     if not exists(store):
         return {"enabled": enabled(store), "initialized": False, "model_calls": 0}
     project = store.config["project_id"]
+    from .graph_compaction import visible
     states = dict(
         store.db.execute(
             "SELECT state,count(*) FROM sg2_jobs WHERE project=? GROUP BY state", (project,)
@@ -1928,36 +2187,44 @@ def diagnostics(store):
         **_job_diagnostics(store),
         "unresolved": reasons,
         "nodes": store.db.execute(
-            "SELECT count(*) FROM sg2_nodes WHERE project=?", (project,)
+            f"SELECT count(*) FROM sg2_nodes WHERE project=? AND {visible(store,'id')}", (project,)
         ).fetchone()[0],
         "relations": store.db.execute(
             "SELECT count(*) FROM sg2_relations WHERE project=?", (project,)
         ).fetchone()[0],
+        "raw_nodes": store.db.execute("SELECT count(*) FROM sg2_nodes WHERE project=?",(project,)).fetchone()[0],
         "thresholds_calibrated": False,
         "model_calls": 0,
     }
 
 
-def node_details(store, nid):
+def node_details(store, nid, *, offset=0, limit=30):
     if not exists(store):
         return None
+    if type(offset) is not int or offset<0 or type(limit) is not int or not 1<=limit<=100:
+        raise ValueError("invalid_evidence_page")
+    from .graph_compaction import canonical, members, member_sql
+    requested, nid = nid, canonical(store,nid)
+    membership, member_args = member_sql(store,nid)
     row = store.db.execute(
         "SELECT * FROM sg2_nodes WHERE id=? AND project=?", (nid, store.config["project_id"])
     ).fetchone()
     if not row:
         return None
     assertions = []
-    for r in store.db.execute(
-        """SELECT x.* FROM sg2_evidence x JOIN entries e ON e.id=x.entry_id
-        WHERE x.node=? AND instr(e.text,x.quote)>0 ORDER BY x.rowid DESC LIMIT 30""",
-        (nid,),
-    ):
+    evidence_rows = list(store.db.execute(
+        f"""SELECT x.*,e.timestamp,e.role,e.kind FROM sg2_evidence x JOIN entries e ON e.id=x.entry_id
+        WHERE x.node IN ({membership}) AND instr(sg_source_text(e.id,e.text),x.quote)>0 ORDER BY x.id LIMIT ? OFFSET ?""",
+        (*member_args,limit+1,offset)))
+    for r in evidence_rows[:limit]:
         assertions.append(
             {
                 "entry_id": r["entry_id"],
                 "quote": r["quote"],
                 "chat_id": r["chat"],
                 "assertion": json.loads(r["assertion_json"]),
+                "evidence_id": r["id"], "original_node_id":r["node"],
+                "source_time":r["timestamp"], "role":r["role"], "kind":r["kind"],
             }
         )
     from .revision_ledger import projected
@@ -1967,7 +2234,11 @@ def node_details(store, nid):
     return {
         "type": row["type"],
         "identity": json.loads(row["identity_json"]),
+        "requested_id":requested,"canonical_id":nid,"member_ids":members(store,nid),
+        "evidence_page":dict(offset=offset,limit=limit,has_more=len(evidence_rows)>limit,next_offset=offset+limit if len(evidence_rows)>limit else None),
         "assertions": assertions,
+        "internal_relations": [dict(r) for r in store.db.execute(
+            f"SELECT * FROM sg2_relations WHERE source IN ({membership}) AND target IN ({membership}) ORDER BY id LIMIT 31",(*member_args,*member_args))],
         "model_calls": 0,
         **({'validity': validity} if validity is not None else {}),
         **({'legacy_migration': migration} if migration is not None else {}),

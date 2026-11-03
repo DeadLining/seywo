@@ -12,6 +12,9 @@ def _relocate_known_source(store, missing, roots, chat_id):
     Stable segment/entry IDs, scope and evidence are retained. A basename alone
     is never identity; ambiguous matches and changed prefixes fail closed.
     """
+    from .chat_cleanup import enabled
+    if enabled(store.config):
+        return missing  # This project explicitly treats archival as graph cleanup.
     from .ingestion import _prefix, SOURCE_CHANGED
     prior = store.db.execute("SELECT s.* FROM sessions s JOIN session_chats c ON c.segment_id=s.id WHERE s.path=? AND c.chat_id=?", (str(missing), chat_id)).fetchone()
     if prior is None:

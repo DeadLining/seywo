@@ -1,5 +1,6 @@
 """Selective publication must not mark skipped history processed."""
 
+from sessiongraph.source_text import hydrate
 import pytest
 
 from sessiongraph.core import Store, init_project, load_config
@@ -17,7 +18,7 @@ def test_reviewed_excerpt_idempotence_coverage_and_watermark(tmp_path):
             [("user", "前文不允许外发。"), ("user", "前缀。查询不能调用模型。后缀。")],
         )
     )
-    e = dict(s.db.execute("SELECT * FROM entries ORDER BY line DESC LIMIT 1").fetchone())
+    e = hydrate(s, s.db.execute("SELECT * FROM entries ORDER BY line DESC LIMIT 1").fetchone())
     excerpt = dict(e, text="查询不能调用模型。")
     output = {
         "summary": "人工筛选片段",
@@ -59,7 +60,7 @@ def test_reviewed_spans_segments_not_chats(tmp_path):
                 tmp_path / f"part{i}.jsonl", tmp_path, "same-chat", [("user", f"约束{i}")]
             )
         )
-    batch = [dict(r) for r in s.db.execute("SELECT * FROM entries")]
+    batch = [hydrate(s, r) for r in s.db.execute("SELECT * FROM entries")]
     output = {
         "summary": "同一聊天跨段",
         "records": [
@@ -93,7 +94,7 @@ def test_snapshot_replaces_only_prior_reviewed_graph(tmp_path):
             tmp_path / "s.jsonl", tmp_path, "chat", [("user", "限制一"), ("user", "限制二")]
         )
     )
-    batch = [dict(r) for r in s.db.execute("SELECT * FROM entries ORDER BY line")]
+    batch = [hydrate(s, r) for r in s.db.execute("SELECT * FROM entries ORDER BY line")]
 
     def output(entries):
         return {
@@ -117,7 +118,7 @@ def test_snapshot_replaces_only_prior_reviewed_graph(tmp_path):
     assert new["records"] == 2
     assert s.status()["records"] == 2
     assert s.db.execute("SELECT count(*) FROM evidence").fetchone()[0] == 2
-    assert s.db.execute("SELECT count(*) FROM docs WHERE type='record'").fetchone()[0] == 2
+    assert s.db.execute("SELECT count(*) FROM sg_search_keys WHERE kind='record'").fetchone()[0] == 2
     assert s.status()["reviewed_excerpts"] == 2
     assert (
         publish_reviewed(s, batch, output(batch), {}, replace_job_ids=[old["job_id"]])["state"]

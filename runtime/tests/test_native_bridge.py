@@ -48,6 +48,30 @@ def test_rejects_invalid_input(tmp_path, payload):
         read(registry, payload)
 
 
+@pytest.mark.parametrize("view", ["knowledge", "episode", "all"])
+def test_work_map_view_is_explicit_and_model_free(tmp_path, view):
+    _, registry = setup(tmp_path)
+    pid = catalog(registry)["projects"][0]["id"]
+    result = read(registry, {"operation": "work_map", "project": pid, "view": view})
+    assert result["view"] == view
+    assert result["page"]["view"] == view
+    assert result["model_calls"] == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"operation": "work_map", "project": "a" * 20, "view": "deleted"},
+        {"operation": "memory", "project": "a" * 20, "id": "x", "view": "knowledge"},
+        {"operation": "projects", "view": "all"},
+    ],
+)
+def test_view_is_work_map_only_and_validated(tmp_path, payload):
+    _, registry = setup(tmp_path)
+    with pytest.raises(ValueError, match="invalid view"):
+        read(registry, payload)
+
+
 def test_catalog_does_not_open_databases(tmp_path, monkeypatch):
     _, registry = setup(tmp_path)
     import sqlite3

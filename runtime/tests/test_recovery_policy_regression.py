@@ -1,5 +1,7 @@
 """Project-gated recovery: real graph state transitions, no provider network."""
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +10,16 @@ from sessiongraph.auto_update import run_update
 from sessiongraph.extraction import ProviderError
 from test_memories import make_store, entries, FakeExtractor
 from test_graph_v2 import Judge, output
+
+
+@pytest.fixture(autouse=True)
+def automatic_registration(tmp_path, monkeypatch):
+    home = tmp_path / 'codex-registration'
+    home.mkdir()
+    (home / 'sessiongraph.json').write_text(json.dumps({'enabled':True}))
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    monkeypatch.setenv('PYTHONPATH', os.pathsep.join([str(Path(g.__file__).resolve().parents[1]),
+        str(Path(__file__).resolve().parent), os.environ.get('PYTHONPATH','')]))
 
 
 def enable(store):

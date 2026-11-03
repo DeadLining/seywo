@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import fcntl
 import json
+import os
 from pathlib import Path
 import select
 import sqlite3
@@ -21,6 +22,16 @@ from test_graph_v2 import Judge, output
 from test_memories import make_store, entries, FakeExtractor
 from test_mvp import write_session
 from test_resource_policy import enable, add_job, req, transport
+
+
+@pytest.fixture(autouse=True)
+def automatic_registration(tmp_path, monkeypatch):
+    home = tmp_path / 'codex-registration'
+    home.mkdir()
+    (home / 'sessiongraph.json').write_text(json.dumps({'enabled':True}))
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    monkeypatch.setenv('PYTHONPATH', os.pathsep.join([str(Path(graph.__file__).resolve().parents[1]),
+        str(Path(__file__).resolve().parent), os.environ.get('PYTHONPATH','')]))
 
 
 def configure(store):
@@ -319,6 +330,8 @@ def test_snapshot_change_in_real_graph_keeps_job_identity_and_cost_but_not_deriv
     assert job['output_json'] is None
     assert store.db.execute('SELECT count(*) FROM sg2_checkpoints').fetchone()[0] == 0
     assert store.db.execute('SELECT failures FROM sg2_control').fetchone()[0] == 0
+    with store.db:
+        store.db.execute("UPDATE entries SET role='user'")
     transport(monkeypatch, raw)
     second = graph.run_chat(store, create_extractor(store.config), 'chat-1', jev=Judge())
     assert len(second['saved_relations']) == 1
@@ -527,3 +540,85 @@ def test_read_only_opted_in_project_does_not_migrate_or_launch(tmp_path, monkeyp
         assert not list(Path(config['database']).parent.glob('stage-*.lock'))
     finally:
         with_store.close()
+
+
+def test_selective_cleanup_succeeds_during_transport_without_invalidating_response(env, monkeypatch):
+    from sessiongraph import continuation
+    from sessiongraph.auto_update import _atomic, _folder
+    import time
+    _, store, _, client = env
+    config_path = Path(store.config['_config_path'])
+    raw = json.loads(config_path.read_text())
+    raw['graph_v2'] = store.config['graph_v2']
+    config_path.write_text(json.dumps(raw))
+    add_job(store, 'obsolete')
+    with store.db:
+        store.db.execute("INSERT INTO sg2_control VALUES('obsolete','blocked',0,9,'{\"code\":\"old_error\"}')")
+    folder = continuation.root(store.config)
+    current = dict(config=str(config_path),chat='chat-1',state='running',lease='live',due=0,target=42,updated_at=1)
+    continuation.write(folder/'queue.json', {'live':current,'old':dict(current,chat='old',state='blocked')})
+    runs = _folder(store.config)
+    _atomic(runs/'live.json',dict(run_id='live',chat_id='chat-1',state='extracting',created_at=time.time(),updated_at=time.time(),pid=__import__('os').getpid()))
+    _atomic(runs/'failed.json',dict(run_id='failed',chat_id='old',state='failed',created_at=1,updated_at=1))
+    before = maintenance.counts(store)
+    revision = leases.revision(store)
+    active_receipt = (runs/'live.json').read_bytes()
+    def callback():
+        # The exact screenshot condition: coordinator active, update.lock held,
+        # model transport in progress. Full compaction must STILL be rejected.
+        with available(runs.parent/'update.lock'):
+            with pytest.raises(ValueError, match='maintenance_busy'), maintenance.project_lock(store.config):
+                pass
+            result = maintenance.run(config_path, 'clear_tasks')
+        assert result['dismissed_batches'] == result['dismissed_tasks'] == 1
+        assert result['model_calls'] == 0
+        assert continuation.read(folder/'queue.json',{})['live'] == current
+        assert (runs/'live.json').read_bytes() == active_receipt
+        assert lease(store)['state'] == 'running' and lease(store)['job'] == 'job'
+        assert maintenance.counts(store) == {**before,'sg2_attempts':before['sg2_attempts']+1}
+        assert leases.revision(store) == revision
+    transport(monkeypatch, callback=callback)
+    with leases.coordinator(store.config,'chat-1'):
+        result = invoke(store,client,'chat-1',operation=lambda:bool(request_audit.read_response(client,req(),[])))
+    assert result and lease(store)['state'] == 'released'
+    assert store.db.execute("SELECT state FROM sg2_attempts WHERE job='job'").fetchone()[0] == 'complete'
+    assert store.db.execute("SELECT state FROM sg2_jobs WHERE id='obsolete'").fetchone()[0] == 'dismissed'
+
+
+def test_cleanup_protects_lease_before_attempt_row_exists(env):
+    _, store, _, _ = env
+    config_path = Path(store.config['_config_path'])
+    raw = json.loads(config_path.read_text()); raw['graph_v2'] = store.config['graph_v2']
+    config_path.write_text(json.dumps(raw))
+    with store.db:
+        store.db.execute("INSERT INTO sg2_control VALUES('job','blocked',0,7,'{}')")
+        store.db.execute("INSERT INTO sg2_stage_lease VALUES(?,1,'owner','job','part','extract','not-yet-inserted',1,'running',1,NULL)", (store.config['project_id'],))
+    assert maintenance.run(config_path,'clear_tasks')['dismissed_batches'] == 0
+    assert store.db.execute('SELECT state FROM sg2_jobs').fetchone()[0] == 'pending'
+    assert store.db.execute('SELECT failures FROM sg2_control').fetchone()[0] == 7
+
+
+def test_real_child_can_publish_after_concurrent_task_cleanup(tmp_path):
+    root,store,_ = make_store(tmp_path,[('user','synthetic training A produced model B')])
+    configure(store); graph.setup(store)
+    path = Path(store.config['_config_path'])
+    raw=json.loads(path.read_text());raw['graph_v2']=store.config['graph_v2'];path.write_text(json.dumps(raw))
+    add_job(store,'obsolete')
+    with store.db:
+        store.db.execute("INSERT INTO sg2_control VALUES('obsolete','blocked',0,5,'{}')")
+    process=subprocess.Popen([sys.executable,'-B','-c',CHILD,json.dumps(store.config)],
+        stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    try:
+        ready,_,_=select.select([process.stdout],[],[],15)
+        assert ready and process.stdout.readline().strip()=='NETWORK'
+        result=maintenance.run(path,'clear_tasks')
+        assert result['dismissed_batches']==1 and result['model_calls']==0
+        assert process.poll() is None
+        stdout,stderr=process.communicate('\n',timeout=15)
+        assert process.returncode==0,stderr
+        completed=json.loads(stdout.strip())
+        assert len(completed['saved'])==2 and len(completed['saved_relations'])==1
+        assert store.db.execute("SELECT state FROM sg2_jobs WHERE id='obsolete'").fetchone()[0]=='dismissed'
+    finally:
+        if process.poll() is None:process.kill();process.communicate()
+        store.close()

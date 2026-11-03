@@ -49,6 +49,65 @@ def test_retries_backoff_then_block_without_losing_queue(configured):
     assert not c.process_one(c.root(config),now=99999)
 
 
+@pytest.mark.parametrize('deadline', [50, 0, None])
+def test_circuit_wait_overrides_expired_batch_and_fresh_work(configured, deadline):
+    path, config = configured
+    c.record(path, receipt(chat_id='other'), launch=False, now=100)
+    for stamp in (100, 101, 102):
+        c.record(path, receipt(event='AutoContinue', state='pending',
+            updated_at=stamp, error_code='resource_circuit_open',
+            graph_v2={'durable_stages':True, 'source_remaining':True,
+                      'runnable_remaining':True, 'next_retry_at':deadline},
+            backlog_failures=[{'error_code':'resource_circuit_open', 'retryable':True,
+                               'failure':{'retry_at':160}}]), launch=False, now=stamp)
+        items = {item['chat']:item for item in c.snapshot(config)}
+        assert items['chat']['state'] == 'retry_wait' and items['chat']['due'] == 160
+        assert items['chat']['failures'] == 0 and items['chat']['no_progress'] == 0
+        assert items['chat']['target'] == 10 and items['other']['state'] == 'ready'
+    c.record(path, receipt(chat_id='other', state='succeeded', error_code=None,
+        graph_v2={'source_remaining':False}, updated_at=103), launch=False, now=103)
+    assert not c.process_one(c.root(config), now=159, project=str(path),
+                             execute=lambda *_:pytest.fail('cooldown sent a request'))
+
+
+def test_circuit_receipt_without_valid_deadline_never_requeues_immediately(configured):
+    path, config = configured
+    c.record(path, receipt(event='AutoContinue', state='failed', error_code='resource_circuit_open',
+        graph_v2={'durable_stages':True, 'source_remaining':True,
+                  'runnable_remaining':True, 'next_retry_at':50}), launch=False, now=100)
+    item = c.snapshot(config)[0]
+    assert item['state'] == 'retry_wait' and item['due'] == 220
+    assert not c.process_one(c.root(config), now=219,
+                             execute=lambda *_:pytest.fail('cooldown sent a request'))
+
+
+@pytest.mark.parametrize('deadline', [50, 160, None])
+def test_provider_failure_yields_despite_fresh_runnable_source(configured, deadline):
+    path, config = configured
+    c.record(path, receipt(chat_id='other'), launch=False, now=100)
+    c.record(path, receipt(event='AutoContinue', state='failed',
+        error_code='provider_http_502', pending_retry_count=1,
+        graph_v2={'durable_stages': True, 'source_remaining': True,
+                  'runnable_remaining': True, 'next_retry_at': deadline}), launch=False, now=100)
+    items = {item['chat']: item for item in c.snapshot(config)}
+    assert items['chat']['state'] == 'retry_wait'
+    assert items['chat']['due'] == (160 if deadline == 160 else 220)
+    assert items['chat']['failures'] == 1 and items['chat']['target'] == 10
+    assert items['other']['state'] == 'ready'
+
+
+def test_permanent_label_failure_does_not_extract_fresh_source(configured):
+    path, config = configured
+    c.record(path, receipt(event='AutoContinue', state='failed',
+        error_code='single_token_label_invalid', pending_retry_count=0,
+        graph_v2={'durable_stages': True, 'source_remaining': True,
+                  'runnable_remaining': True}), launch=False, now=100)
+    item = c.snapshot(config)[0]
+    assert item['state'] == 'blocked' and item['target'] == 10
+    assert not c.process_one(c.root(config), now=1000,
+                             execute=lambda *_:pytest.fail('invalid route sent another request'))
+
+
 def test_one_due_continuation_uses_fixed_target_and_finishes(configured):
     path,config=configured
     c.record(path,receipt(target_rowid=0),launch=False,now=100)

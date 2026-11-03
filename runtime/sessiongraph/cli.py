@@ -122,6 +122,18 @@ def parser():
     receipts.add_argument("--limit", type=int, default=100)
     receipts.add_argument("--max-bytes", type=int, default=16 * 1024 * 1024)
     receipts.add_argument("--after", default="", help="exclusive filename cursor from the previous result")
+    receipts.add_argument('--cleared', action='store_true', help='archive dismissed receipts without making them visible again')
+    external = sub.add_parser('source-externalize', help='verify and externalize bounded original text; enables source-backed future imports for this project')
+    external.add_argument('--apply', action='store_true')
+    external.add_argument('--limit', type=int, default=256)
+    external.add_argument('--max-bytes', type=int, default=16 * 1024 * 1024)
+    external.add_argument('--after', type=int, default=0)
+    legacy = sub.add_parser('legacy-optimize', help='migrate legacy search or losslessly compress raw events; no models')
+    legacy.add_argument('--phase', choices=['search', 'events'], required=True)
+    legacy.add_argument('--apply', action='store_true')
+    legacy.add_argument('--limit', type=int, default=256)
+    legacy.add_argument('--max-bytes', type=int, default=16 * 1024 * 1024)
+    legacy.add_argument('--after', type=int, default=0)
     receipt = sub.add_parser("receipt-read", help="expand one hot or losslessly archived Hook receipt; no models")
     receipt.add_argument("run_id")
     sources = sub.add_parser('source-retain', help='preview or retain published evidence snapshots; no models')
@@ -172,6 +184,34 @@ def parser():
     recovery.add_argument("--job-id", action="append", default=[])
     recovery.add_argument("--request-id", help="validated project-local Jev receipt proving service recovery")
     recovery.add_argument("--apply", action="store_true", help="requeue eligible jobs and wake installed automatic worker")
+    recovery.add_argument('--repair-evidence', action='store_true', help='revalidate exact audited responses; no model calls')
+    recovery.add_argument('--retry-invalid', action='store_true', help='grant one explicit retry to still-invalid evidence jobs')
+    recovery.add_argument('--grant-budget', action='store_true', help='add one audited bounded allowance to exhausted jobs; never reset spending')
+    recovery.add_argument('--no-launch', action='store_true', help='persist recovery without launching workers')
+    orphan_cleanup = sub.add_parser('cleanup-orphan-job-ledgers', help='preview orphan job ledgers in this project; no models')
+    orphan_cleanup.add_argument('--apply', action='store_true', help='delete only ledgers with no parent job; preserve live budgets')
+    content_cleanup = sub.add_parser('cleanup-orphan-content',
+        help='preview deleted-chat receipts, orphan diagnostics and unreferenced archived payloads; no models')
+    content_cleanup.add_argument('--apply', action='store_true',
+        help='delete only proven orphan content; preserve live/shared payloads, budgets and graph facts')
+    paths = sub.add_parser('backfill-node-paths',
+        help='preview or fill paths_json from cited evidence; no models, no graph facts changed')
+    paths.add_argument('--apply', action='store_true', help='write only work_memory.paths_json')
+    paths.add_argument('--limit', type=int, default=None)
+    paths.add_argument('--after', default='', help='exclusive node ID cursor')
+    paths.add_argument('--rebuild-read-index', action='store_true',
+                       help='with --apply, rebuild every derived read-projection row from source facts')
+    conclusions = sub.add_parser('backfill-conclusion-identities',
+        help='preview or fill derived Claim/Decision identities; no nodes or evidence change')
+    conclusions.add_argument('--apply', action='store_true', help='write only sg2_nodes.identity_json and sg2_keys')
+    conclusions.add_argument('--limit', type=int, default=None)
+    conclusions.add_argument('--after', default='', help='exclusive node ID cursor')
+    tiering = sub.add_parser('tier-graph', help='audit or materialize canonical/episode tiers; never deletes graph facts')
+    tiering.add_argument('--apply', action='store_true', help='write only the shadow tier mapping')
+    tiering.add_argument('--limit', type=int, default=None, help='bounded nodes for preview or backfill; default all')
+    tiering.add_argument('--max-samples', type=int, default=20)
+    tiering.add_argument('--after', default='', help='exclusive node ID cursor')
+    tiering.add_argument('--chat-id', default='')
     sub.add_parser("retry", help="explicitly requeue failed legacy jobs under the current policy")
     worker = sub.add_parser("worker", help="extract queued ranges using configured provider")
     worker.add_argument(
@@ -201,7 +241,15 @@ def main(argv=None) -> int:
         elif args.command == 'receipt-maintain':
             from .maintenance import maintain_receipts
             result = maintain_receipts(load_config(args.config), apply=args.apply, limit=args.limit,
-                                       max_bytes=args.max_bytes, after=args.after)
+                                       max_bytes=args.max_bytes, after=args.after, cleared=args.cleared)
+        elif args.command == 'source-externalize':
+            from .maintenance import externalize_sources
+            result = externalize_sources(load_config(args.config), apply=args.apply, limit=args.limit,
+                                         max_bytes=args.max_bytes, after=args.after)
+        elif args.command == 'legacy-optimize':
+            from .maintenance import optimize_legacy
+            result = optimize_legacy(load_config(args.config), phase=args.phase, apply=args.apply,
+                                     limit=args.limit, max_bytes=args.max_bytes, after=args.after)
         elif args.command == 'receipt-read':
             from .run_receipts import read
             result = json.loads(read(load_config(args.config), args.run_id))
@@ -255,11 +303,61 @@ def main(argv=None) -> int:
                 with store.db:
                     store.db.execute('BEGIN IMMEDIATE' if args.apply else 'BEGIN')
                     result = (control if args.command=='revision-control' else assess)(store, manifest, apply=args.apply)
+        elif args.command == 'backfill-node-paths':
+            from .evidence_paths import backfill
+            from .maintenance import project_lock
+            from .read_projection import flush as flush_read_projection
+            from contextlib import nullcontext
+            config = load_config(args.config)
+            with project_lock(config) if args.apply else nullcontext():
+                store = Store(config, readonly=not args.apply)
+                result = backfill(store, apply=args.apply, limit=args.limit, after=args.after)
+                if args.apply and args.rebuild_read_index:
+                    from .read_projection import rebuild
+                    rebuild(store)
+                    result['read_index_rebuilt'] = True
+                elif args.apply:
+                    flush_read_projection(store)
+                    result['read_projection_flushed'] = True
+        elif args.command == 'backfill-conclusion-identities':
+            from .conclusion import backfill
+            from .maintenance import project_lock
+            from contextlib import nullcontext
+            config = load_config(args.config)
+            with project_lock(config) if args.apply else nullcontext():
+                store = Store(config, readonly=not args.apply)
+                result = backfill(store, apply=args.apply, limit=args.limit, after=args.after)
+        elif args.command == 'tier-graph':
+            from .tiering import run as run_tiering
+            from .maintenance import project_lock
+            from contextlib import nullcontext
+            config = load_config(args.config)
+            with project_lock(config) if args.apply else nullcontext():
+                store = Store(config, readonly=not args.apply)
+                result = run_tiering(store, apply=args.apply, limit=args.limit,
+                                     max_samples=args.max_samples, after=args.after,
+                                     chat=args.chat_id)
         else:
-            preview = (args.command == "memories" and args.dry_run) or (args.command == "recover-blocked" and not args.apply)
+            preview = (args.command == "memories" and args.dry_run) or (
+                args.command in {"recover-blocked", "cleanup-orphan-job-ledgers", "cleanup-orphan-content"}
+                and not args.apply)
             store = Store(load_config(args.config), readonly=preview or args.command in {"recall", "resume", "search", "expand", "status", "packet"})
-            if args.command == "recover-blocked":
+            if args.command == 'cleanup-orphan-job-ledgers':
+                from .job_lifecycle import prune_orphans
+                result = prune_orphans(store, apply=args.apply)
+            elif args.command == 'cleanup-orphan-content':
+                from .chat_cleanup import cleanup_orphan_content
+                result = cleanup_orphan_content(store, apply=args.apply)
+            elif args.command == "recover-blocked":
                 from .recovery import recover
+                if (args.retry_invalid or args.grant_budget) and not args.repair_evidence:
+                    raise ValueError('explicit evidence recovery required')
+                if args.repair_evidence:
+                    if args.job_id or args.request_id:
+                        raise ValueError('evidence recovery does not accept legacy recovery filters')
+                    from .evidence_recovery import repair
+                    recover = lambda selected, **kw: repair(selected, apply=kw.get('apply', False),
+                        retry_invalid=args.retry_invalid, grant_budget=args.grant_budget, launch=not args.no_launch)
                 if not args.apply:
                     result = recover(store, request_id=args.request_id, job_ids=args.job_id)
                 else:
@@ -270,7 +368,7 @@ def main(argv=None) -> int:
                             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                         except BlockingIOError:
                             raise ValueError("recover-blocked: project batch active; retry after completion") from None
-                        result = recover(store, request_id=args.request_id, job_ids=args.job_id, apply=True)
+                        result = recover(store, request_id=args.request_id, job_ids=args.job_id, apply=True, launch=not args.no_launch)
             elif args.command == "storage-maintain":
                 import fcntl
                 from .storage import migrate_sources, compact_term_tables, prune_completed_checkpoints, archive_completed_payloads

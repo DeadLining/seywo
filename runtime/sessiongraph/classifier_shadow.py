@@ -5,6 +5,8 @@ receipts live in the existing SQLite database; no second queue or daemon exists.
 """
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import fcntl
 import hashlib
 import json
@@ -45,14 +47,18 @@ def _sources(store, references, cache=None):
                 or type(ref['start']) is not int or type(ref['end']) is not int):
             raise invalid('source_reference')
         if ref['entry_id'] not in cache:
-            size = store.db.execute('SELECT length(CAST(text AS BLOB)) FROM entries WHERE id=?', (ref['entry_id'],)).fetchone()
+            size = store.db.execute('SELECT sg_source_bytes(id,text) FROM entries WHERE id=?', (ref['entry_id'],)).fetchone()
             if not size or size[0] is None:
                 raise invalid('source_changed')
             if cache.get(None, 0) + size[0] > 8 * 1024 * 1024:
                 raise invalid('source_read_budget')
             cache[None] = cache.get(None, 0) + size[0]
-            row = store.db.execute('SELECT id,role,timestamp,text FROM entries WHERE id=? AND length(CAST(text AS BLOB))<=?',
+            row = store.db.execute('SELECT id,role,timestamp,text FROM entries WHERE id=? AND sg_source_bytes(id,text)<=?',
                                    (ref['entry_id'], size[0])).fetchone()
+            try:
+                row = hydrate(store, row)
+            except (ValueError, OSError):
+                raise invalid('source_changed')
             cache[ref['entry_id']] = (row, hashlib.sha256(row['text'].encode()).hexdigest() if row else None)
         row, source_hash = cache[ref['entry_id']]
         if not row or source_hash != ref['source_hash']:

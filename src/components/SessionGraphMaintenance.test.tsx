@@ -5,6 +5,15 @@ import type { SessionGraphManage } from '../sessionGraph'
 const base={ok:true,model_calls:0,changed_count:0,model:'',runtime_installed:true,hook_registered:true,hook_events:4,hook_enabled:true,mcp_registered:true,mcp_guidance_installed:true,message:''}
 const before={database_bytes:100*1024*1024,wal_bytes:0,logical_bytes:100*1024*1024,reclaimable_bytes:10*1024*1024}
 describe('lossless storage maintenance',()=>{
+  it('explains skipped whole-file rewrite for a small reusable freelist',async()=>{
+    const manage=vi.fn(async({action})=>({...base,maintenance:action==='storage_preview'?{before,model_calls:0}:{before,after:{...before,reclaimable_bytes:44*1024},reclaimed_bytes:0,vacuum_performed:false,vacuum_skipped_reason:'small_freelist',model_calls:0}})) as SessionGraphManage
+    render(<SessionGraphMaintenance project="selected" manage={manage} onChanged={vi.fn()}/>)
+    await screen.findByText('100.0 MB')
+    fireEvent.click(screen.getByRole('button',{name:'开始压缩'}))
+    expect(await screen.findByRole('status')).toHaveTextContent('已跳过整库重写')
+    expect(screen.getByRole('status')).toHaveTextContent('页面可供后续写入复用')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
   it('previews only, then performs an explicit scoped compaction and reports reclaimed space',async()=>{
     const manage=vi.fn(async({action})=>({...base,maintenance:action==='storage_preview'?{before,model_calls:0}:{before,after:{...before,database_bytes:80*1024*1024},reclaimed_bytes:20*1024*1024,model_calls:0}})) as unknown as ReturnType<typeof vi.fn>&SessionGraphManage
     const changed=vi.fn()

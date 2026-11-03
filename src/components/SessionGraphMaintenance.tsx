@@ -22,7 +22,9 @@ export function SessionGraphMaintenance({project,manage=manageSessionGraph,onCha
       if(!m)throw new Error('维护结果缺失，请刷新后检查。')
       if(action==='storage_compact'){
         setResult(m)
-        setNotice(`已回收 ${size(m.reclaimed_bytes||0)}，节点、关系和原文证据保留。${m.warning||''}`)
+        const skipped=m.vacuum_skipped_reason==='small_freelist'&&((m.after||m.before)?.reclaimable_bytes||0)>0
+          ?'空闲页较少，已跳过整库重写；这些页面可供后续写入复用。':''
+        setNotice(`已回收 ${size(m.reclaimed_bytes||0)}，节点、关系和原文证据保留。${skipped}${m.warning||''}`)
       } else setNotice(`已清理 ${m.removed||0} 条已恢复告警；保留历史记录。`)
       onChanged()
     } catch(e){if(mounted.current)setError(String(e))}

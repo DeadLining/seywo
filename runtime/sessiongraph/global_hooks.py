@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .core import Store, digest, load_config
 
-EVENTS = ('SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop')
+EVENTS = ('SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop', 'SessionEnd')
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -76,14 +76,8 @@ def register_project(registry: Path, root: Path) -> None:
 
 
 def graph_template(config):
-    graph = config.get("graph_v2")
-    if not isinstance(graph, dict) or type(graph.get("enabled")) is not bool:
-        return None
-    fields = ("enabled", "max_output_tokens", "max_batches", "identity_threshold", "relation_threshold", "input_pipeline")
-    result = {k: graph[k] for k in fields if k in graph}
-    judge = graph.get("jev", {})
-    result["jev"] = {k: judge[k] for k in ("model", "api_key_env", "timeout_seconds") if k in judge}
-    return result
+    from .pipeline_settings import graph_template as selected
+    return selected(config)
 
 
 def ensure_project(cwd: str, settings: dict) -> Path | None:
@@ -212,6 +206,8 @@ def install(codex_home: Path, local_config: Path, command: str, settings: dict) 
         if settings_path.exists():
             prior = json.loads(settings_path.read_text())
             settings = {**settings, 'enabled_since': prior['enabled_since']}
+            if 'cleanup_missing_chats' not in settings and 'cleanup_missing_chats' in prior:
+                settings['cleanup_missing_chats'] = prior['cleanup_missing_chats']
         planned = {
             settings_path: json.dumps(settings, ensure_ascii=False, indent=2) + '\n',
             hooks_path: json.dumps(merged, ensure_ascii=False, indent=2) + '\n',

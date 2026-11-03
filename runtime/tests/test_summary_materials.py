@@ -1,3 +1,4 @@
+from sessiongraph.source_text import hydrate
 import hashlib
 import json
 import socket
@@ -12,14 +13,12 @@ from test_graph_v2 import output, Judge
 
 
 def fixture(tmp_path):
-    root, store, _ = make_store(tmp_path, [('assistant', '训练 A 得到模型 B')])
+    root, store, _ = make_store(tmp_path, [('assistant', '训练 A 得到模型 B')], timestamp='2026-10-23T01:00:00Z')
     batch = entries(store)
     result = output(batch)
     for n in result['nodes']:
         n['context_kind'] = 'work'
     run_chat(store, FakeExtractor([result]), 'chat-1', jev=Judge())
-    store.db.execute("UPDATE entries SET timestamp='2026-10-23T01:00:00Z'")
-    store.db.commit()
     cfg = store.config
     store.close()
     registry = tmp_path / 'registry.json'
@@ -73,7 +72,7 @@ def test_revision_mismatch_and_invalid_quotes(tmp_path):
 def test_sparse_graph_coverage_does_not_imply_incomplete_read(tmp_path):
     cfg, registry, query = fixture(tmp_path)
     store = Store(cfg)
-    seed = dict(store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
+    seed = hydrate(store, store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
     store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?,?,?,?)',
         ('unreferenced', seed['session_id'], seed['line'] + 1000, seed['timestamp'],
          seed['kind'], seed['role'], '一条没有图谱引用的原文', None))
@@ -116,7 +115,7 @@ def test_proposed_relations_do_not_merge_work(tmp_path):
 def test_historical_parent_is_context_not_new_work(tmp_path):
     cfg, registry, query = fixture(tmp_path)
     store = Store(cfg)
-    original = store.db.execute('SELECT * FROM entries LIMIT 1').fetchone()
+    original = hydrate(store, store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
     store.db.execute('INSERT INTO entries VALUES(?,?,?,?,?,?,?,?)',
         ('historical', original['session_id'], original['line'] + 1000,
          '2026-10-20T00:00:00Z', original['kind'], original['role'], original['text'], None))
@@ -174,7 +173,7 @@ def test_coverage_without_entry_index_has_bounded_work(tmp_path):
     from sessiongraph.summary_materials import candidates
     cfg, _, query = fixture(tmp_path)
     store = Store(cfg)
-    seed = dict(store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
+    seed = hydrate(store, store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
     ev = dict(store.db.execute('SELECT * FROM sg2_evidence LIMIT 1').fetchone())
     store.db.executemany('INSERT INTO entries VALUES (?,?,?,?,?,?,?,?)', [
         (f'bulk-{i}', seed['session_id'], i + 100, seed['timestamp'], seed['kind'], seed['role'], seed['text'], None)
@@ -213,7 +212,7 @@ def test_page_does_not_load_original_text_before_limit(tmp_path):
     from sessiongraph.summary_materials import candidates
     cfg, _, query = fixture(tmp_path)
     store = Store(cfg)
-    seed = dict(store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
+    seed = hydrate(store, store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
     ev = dict(store.db.execute('SELECT * FROM sg2_evidence LIMIT 1').fetchone())
     store.db.execute('DELETE FROM sg2_relation_evidence')
     store.db.execute('DELETE FROM sg2_relations')
@@ -284,7 +283,7 @@ def test_range_first_preserves_offsets_boundaries_order_and_coverage(tmp_path, m
     """Do not replace instant comparison with lexicographic timestamp filtering."""
     cfg, registry, query = fixture(tmp_path)
     store = Store(cfg)
-    seed = dict(store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
+    seed = hydrate(store, store.db.execute('SELECT * FROM entries LIMIT 1').fetchone())
     ev = dict(store.db.execute('SELECT * FROM sg2_evidence LIMIT 1').fetchone())
     store.db.execute('DELETE FROM sg2_relation_evidence')
     store.db.execute('DELETE FROM sg2_relations')

@@ -3,6 +3,7 @@
 Existing graph evidence owns statement payloads. This ledger stores references,
 source fingerprints and review deltas, never infers authority from recency.
 """
+from .source_text import hydrate
 import json
 import math
 from contextvars import ContextVar
@@ -103,10 +104,18 @@ def setup(store):
         # historical source at recall time. Only writers rebuild the projection.
         for action in ('UPDATE', 'DELETE'):
             fields = ' OF text,role,kind,timestamp,call_id,session_id,line' if action == 'UPDATE' else ''
+            from .graph_compaction import expression
+            source_node=expression(store,'x.node')
+            trigger='sg_revision_projection_'+action.lower()
+            prior=store.db.execute('SELECT sql FROM sqlite_master WHERE name=?',(trigger,)).fetchone()
+            if prior and 'sg_graph_redirects' not in prior[0]:
+                store.db.execute('DROP TRIGGER '+trigger)
             store.db.execute(f'''CREATE TRIGGER IF NOT EXISTS sg_revision_projection_{action.lower()}
                 AFTER {action}{fields} ON entries BEGIN
                 UPDATE sg_revision_projection SET state='needs_review' WHERE node IN (
-                    SELECT x.node FROM sg2_evidence x WHERE x.entry_id=old.id); END''')
+                    SELECT {source_node} FROM sg2_evidence x WHERE x.entry_id=old.id); END''')
+    from .storage import revision_triggers
+    revision_triggers(store.db)
     store.db.commit()
 
 
@@ -147,7 +156,7 @@ def bounded_read(function):
 
 
 def source(store, evidence_id):
-    size = store.db.execute('SELECT length(cast(e.text AS blob)) FROM sg2_evidence v JOIN entries e ON e.id=v.entry_id WHERE v.id=?', (evidence_id,)).fetchone()
+    size = store.db.execute('SELECT sg_source_bytes(e.id,e.text) FROM sg2_evidence v JOIN entries e ON e.id=v.entry_id WHERE v.id=?', (evidence_id,)).fetchone()
     if not size or size[0] > 8*1024*1024:
         fail('source_read_limit' if size else 'source_changed')
     meter = READ.get()
@@ -161,6 +170,10 @@ def source(store, evidence_id):
         e.*,n.project,n.type FROM sg2_evidence v JOIN entries e ON e.id=v.entry_id
         JOIN sg2_nodes n ON n.id=v.node WHERE v.id=? AND n.project=?''',
         (evidence_id, store.config['project_id'])).fetchone()
+    try:
+        row = hydrate(store, row)
+    except (ValueError, OSError):
+        fail('source_changed')
     if not row or not row['quote'] or row['quote'] not in row['text']:
         fail('source_changed')
     if row['type'] != json.loads(row['assertion_json'])['type']:
@@ -233,6 +246,20 @@ def baseline(store, node_id):
         if [proposal[k] for k in ('type', 'title', 'content', 'status')] == [row['type'], row['title'], row['content'], row['status']]:
             capture(store, node_id, proposal, [item['id']])
             return
+    # A shared node's primary citation can be reanchored independently of its
+    # immutable revision payload. Reuse only that exact, still-valid baseline.
+    recorded = store.db.execute('''SELECT r.id,e.assertion_json FROM sg_revision_items r
+        JOIN sg2_evidence e ON e.id=r.payload_evidence
+        WHERE r.project=? AND r.node=? AND e.node=? ORDER BY r.id LIMIT 65''',
+        (store.config['project_id'], node_id, node_id)).fetchall()
+    if len(recorded) > 64:
+        fail('baseline_unavailable')
+    for item in recorded:
+        proposal = json.loads(item['assertion_json'])
+        if ([proposal[k] for k in ('type', 'title', 'content', 'status')]
+                == [row['type'], row['title'], row['content'], row['status']]
+                and valid_sources(store, item['id'])):
+            return
     fail('baseline_unavailable')
 
 
@@ -300,7 +327,8 @@ def assess(store, manifest, *, apply=False):
     a, b = _item(store, manifest['source']), _item(store, manifest['target'])
     if a['id'] == b['id']:
         fail('self_edge')
-    if a['node'] != b['node'] or a['kind'] != b['kind']:
+    from .graph_compaction import canonical, member_sql, members
+    if canonical(store,a['node']) != canonical(store,b['node']) or a['kind'] != b['kind']:
         fail('subject_mismatch')
     current = valid_sources(store, a['id'], evidence=manifest['evidence'])
     cited = next((row for row in current if row['evidence_id'] == manifest['evidence']), None)
@@ -313,7 +341,11 @@ def assess(store, manifest, *, apply=False):
     if manifest['authority'] == 'direct_user' and (cited['role'] != 'user' or cited['kind'] != 'message'):
         fail('authority_invalid')
     if destructive:
-        old_roles = {r[0] for r in store.db.execute('SELECT DISTINCT role FROM sg_revision_sources WHERE revision=?', (b['id'],))}
+        if len(members(store,b['node']))>1:
+            membership,member_args=member_sql(store,b['node'])
+            old_roles={r[0] for r in store.db.execute(f'SELECT DISTINCT s.role FROM sg_revision_sources s JOIN sg_revision_items i ON i.id=s.revision WHERE i.node IN ({membership})',member_args)}
+        else:
+            old_roles = {r[0] for r in store.db.execute('SELECT DISTINCT role FROM sg_revision_sources WHERE revision=?', (b['id'],))}
         if proposal['status'] == 'proposed':
             fail('proposed_cannot_revoke')
         if a['kind'] == 'Decision' and manifest['authority'] != 'direct_user':
@@ -356,13 +388,16 @@ def refresh(store, node_id):
     if not store.db.in_transaction:
         fail('transaction_required')
     from .graph_contract import atomic_key
+    from .graph_compaction import canonical, member_sql, semantic, members
+    node_id=canonical(store,node_id)
+    membership, member_args=member_sql(store,node_id)
     projection = inspect(store, node_id, limit=100)
     revisions = projection['revisions']
     if not revisions:
         return
-    payloads = {r['id']: json.loads(r['assertion_json']) for r in store.db.execute('''
+    payloads = {r['id']: json.loads(r['assertion_json']) for r in store.db.execute(f'''
         SELECT r.id,e.assertion_json FROM sg_revision_items r JOIN sg2_evidence e ON e.id=r.payload_evidence
-        WHERE r.project=? AND r.node=? ORDER BY r.id LIMIT 100''', (store.config['project_id'], node_id))}
+        WHERE r.project=? AND r.node IN ({membership}) ORDER BY r.id LIMIT 100''', (store.config['project_id'], *member_args))}
     keys = {serial(atomic_key(p)) for p in payloads.values()}
     complete_lane = len(keys) == 1 and 'null' not in keys
     removed, disputed, invalid = set(), set(), projection.get('has_more', False)
@@ -380,20 +415,32 @@ def refresh(store, node_id):
                     removed.add(rev['id'])
                 elif effect['effect'] == 'disputes':
                     disputed.update((rev['id'], effect['source']))
+    # Equivalent snapshots keep all immutable sources, but are one semantic head.
+    # A reviewed full-lane correction covers exact duplicates, not another value.
+    if len(members(store,node_id))>1:
+        removed_values={semantic(payloads[r]) for r in removed}
+        disputed_values={semantic(payloads[r]) for r in disputed if r in payloads}
+        # Equal source/target values must not erase both equivalence classes.
+        invalid |= any(effect['state']=='reviewed' and effect['effect'] in {'corrects','replaces','withdraws'}
+            and effect['source'] in payloads and semantic(payloads[effect['source']]) in removed_values
+            for rev in revisions for effect in rev['effects'])
+        removed.update(r for r,p in payloads.items() if semantic(p) in removed_values)
+        disputed.update(r for r,p in payloads.items() if semantic(p) in disputed_values)
     heads = [r for r in revisions if r['id'] not in removed
              and payloads[r['id']].get('provenance', 'direct') == 'direct']
     # No timestamp winner, including competing replacements and incomplete scope.
-    chosen = heads[0] if complete_lane and len(heads) == 1 and not invalid and not disputed.intersection(r['id'] for r in heads) else None
+    one_head = len(heads)==1 or (len(members(store,node_id))>1 and len({semantic(payloads[r['id']]) for r in heads})==1)
+    chosen = heads[0] if complete_lane and one_head and heads and not invalid and not disputed.intersection(r['id'] for r in heads) else None
     state = ('needs_review' if invalid else 'disputed' if disputed.intersection(r['id'] for r in heads)
              else 'legacy_unassessed' if all(atomic_key(p) is None for p in payloads.values())
              else 'current' if chosen else 'derived_only' if not heads else 'needs_review')
     now = stamp()
-    future = store.db.execute('''SELECT min(effective_from) FROM (
+    future = store.db.execute(f'''SELECT min(effective_from) FROM (
         SELECT r.effective_from FROM sg_revision_reviews r JOIN sg_revision_items i ON i.id=r.target
-          WHERE i.node=? AND r.effective_from>?
+          WHERE i.node IN ({membership}) AND r.effective_from>?
         UNION ALL SELECT c.effective_from FROM sg_revision_review_controls c
-          JOIN sg_revision_items i ON i.id=c.source WHERE i.node=? AND c.effective_from>?)''',
-        (node_id, now, node_id, now)).fetchone()[0]
+          JOIN sg_revision_items i ON i.id=c.source WHERE i.node IN ({membership}) AND c.effective_from>?)''',
+        (*member_args, now, *member_args, now)).fetchone()[0]
     store.db.execute('''INSERT INTO sg_revision_projection VALUES(?,?,?,?,?,?)
         ON CONFLICT(node) DO UPDATE SET state=excluded.state,revision=excluded.revision,
         alternatives_json=excluded.alternatives_json,next_change=excluded.next_change''',
@@ -421,7 +468,9 @@ def projected_many(store, node_ids):
     if not effective(store.config) or not exists(store.db, 'sg2_nodes'):
         return {}
     materialized = exists(store.db, 'sg_revision_projection')
-    ids = sorted(set(node_ids))
+    from .graph_compaction import canonical
+    bindings={node:canonical(store,node) for node in node_ids}
+    ids = sorted(set(bindings.values()))
     result, now = {}, stamp()
     for start in range(0, len(ids), 200):
         chunk = ids[start:start+200]
@@ -438,7 +487,7 @@ def projected_many(store, node_ids):
             expired = row['next_change'] is not None and row['next_change'] <= now
             result[row['node']] = dict(state='needs_review' if expired else row['state'] or 'legacy_unassessed',
                                       revision=row['revision'], alternatives=json.loads(row['alternatives_json'] or '[]'))
-    return result
+    return {node:result[cid] for node,cid in bindings.items() if cid in result}
 
 
 def adjudicate(store, output, bindings, client, stats):
@@ -536,8 +585,10 @@ def inspect(store, node_id, *, at=None, limit=50, after=''):
     if not exists(store.db, 'sg_revision_items'):
         return dict(available=False, revisions=[], model_calls=0)
     now = _time(at) if at is not None else stamp()
-    rows = list(store.db.execute('SELECT * FROM sg_revision_items WHERE project=? AND node=? AND id>? ORDER BY id LIMIT ?',
-                                (store.config['project_id'], node_id, after, limit + 1)))
+    from .graph_compaction import member_sql
+    membership, member_args=member_sql(store,node_id)
+    rows = list(store.db.execute(f'SELECT * FROM sg_revision_items WHERE project=? AND node IN ({membership}) AND id>? ORDER BY id LIMIT ?',
+                                (store.config['project_id'], *member_args, after, limit + 1)))
     output = []
     for row in rows[:limit]:
         evidence = store.db.execute('SELECT assertion_json FROM sg2_evidence WHERE id=?', (row['payload_evidence'],)).fetchone()

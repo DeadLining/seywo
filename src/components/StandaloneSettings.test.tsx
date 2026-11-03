@@ -9,7 +9,7 @@ it('saves a direct endpoint without requiring Gateway model catalog and clears t
   fireEvent.change(screen.getByLabelText('BASE URL'),{target:{value:'https://direct.test/v1'}})
   fireEvent.change(screen.getByLabelText('API KEY'),{target:{value:'fixture-private-key'}})
   fireEvent.click(screen.getByRole('button',{name:'保存模型配置'}))
-  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',project:'a'.repeat(20),model:'MiniMax-M3',endpoint:'https://direct.test/v1/responses',api_key_env:'GRAPH_LLM_API_KEY',api_key:'fixture-private-key'}))
+  await waitFor(()=>expect(manage).toHaveBeenLastCalledWith({action:'save_provider',model:'MiniMax-M3',endpoint:'https://direct.test/v1/responses',api_key_env:'GRAPH_LLM_API_KEY',api_key:'fixture-private-key'}))
   await waitFor(()=>expect(screen.getByLabelText('API KEY')).toHaveValue(''))
   expect(document.body.textContent).not.toContain('fixture-private-key')
 })

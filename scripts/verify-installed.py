@@ -26,13 +26,27 @@ async def main():
     runtime = json.loads(subprocess.check_output([str(LAUNCHER), "runtime-status"], text=True))
     assert runtime["model_calls"] == 0
     assert "/runtimes/" in runtime["source"] and "Gateway.app" not in runtime["source"]
+    assert not (Path(runtime['source']) / 'sessiongraph/auto_compaction.py').exists()
     graph = read("work_map")
     status = read("status")
     # Read settings only for this project. Never change selection/model/hooks.
     result = subprocess.run([runtime["python"], "-B", str(APP / "entrypoint.py"), "native-settings"], input=json.dumps({"action":"status","project":PID}), capture_output=True, text=True, check=True, timeout=15)
     settings = json.loads(result.stdout)
     assert settings["ok"] and settings["model_calls"] == 0
-    assert settings["model"] == "MiniMax-M3"
+    template = json.loads((STATE / 'template.json').read_text())
+    assert settings["model"] == template['provider']['model']
+    assert template.get('graph_v2', {}).get('auto_compaction', {}).get('enabled') is not True
+    for action in ('graph_preview','graph_assess','graph_compact','graph_undo'):
+        retired = subprocess.run([str(LAUNCHER),'native-settings'],
+            input=json.dumps({'action':action,'project':PID}),capture_output=True,text=True,timeout=15)
+        rejected = json.loads(retired.stdout)
+        assert rejected['ok'] is False and rejected['model_calls'] == 0
+        assert rejected['message'] and 'graph_compaction' not in rejected
+    global_result = subprocess.run([str(LAUNCHER), 'native-settings'],
+        input=json.dumps({'action':'status'}), capture_output=True, text=True, check=True, timeout=15)
+    global_settings = json.loads(global_result.stdout)
+    assert global_settings['model'] == settings['model']
+    assert global_settings['endpoint'] == settings['endpoint']
     assert settings["mcp_registered"] and settings["hook_registered"]
     parameters = StdioServerParameters(command=str(LAUNCHER), args=["--config", str(PROJECT / ".sessiongraph/config.json"), "mcp"], cwd=str(PROJECT))
     async with stdio_client(parameters) as (reader, writer):
@@ -51,7 +65,7 @@ async def main():
             assert not expanded.isError
             evidence = json.loads(next(c.text for c in expanded.content if c.type == "text"))
             assert evidence.get("model_calls",0) == 0
-    output = {"project_id":PID,"model_calls":0,"runtime_source":runtime["source"],"mcp_tools":len(names),"recall_and_expand":True,"work_map_nodes":len(graph.get("nodes",[])),"work_map_edges":len(graph.get("edges",[])),"settings_model":settings["model"],"hook_events":settings["hook_events"],"mcp_registered":settings["mcp_registered"],"native_status_ok":status.get("model_calls")==0}
+    output = {"project_id":PID,"model_calls":0,"runtime_source":runtime["source"],"mcp_tools":len(names),"recall_and_expand":True,"graph_compaction_retired":True,"work_map_nodes":len(graph.get("nodes",[])),"work_map_edges":len(graph.get("edges",[])),"settings_model":settings["model"],"hook_events":settings["hook_events"],"mcp_registered":settings["mcp_registered"],"native_status_ok":status.get("model_calls")==0}
     print(json.dumps(output,ensure_ascii=False,indent=2))
 
 

@@ -1,3 +1,4 @@
+from sessiongraph.source_text import hydrate
 import pytest
 from sessiongraph.core import Store, init_project, load_config
 from test_mvp import write_session
@@ -13,7 +14,7 @@ def memory_store(tmp_path):
         ('user', '改为 theta 方法处理 sigma，替代 delta 方案。'),
     ])
     store.ingest(source)
-    entries = [dict(r) for r in store.db.execute('SELECT * FROM entries ORDER BY line')]
+    entries = [hydrate(store, r) for r in store.db.execute('SELECT * FROM entries ORDER BY line')]
     yield store, entries
     store.close()
 

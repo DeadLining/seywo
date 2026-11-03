@@ -274,6 +274,37 @@ def test_missing_baseline_provenance_fails_publication_without_fabricating_histo
     s.close()
 
 
+def test_reanchored_primary_reuses_exact_valid_ledger_baseline(env):
+    _, s, _, e = env
+    first = publish(s, e[0], 'first')
+    with s.db:
+        s.db.execute('UPDATE work_memory SET source_entry_id=?,source_quote=? WHERE id=?',
+            (e[1]['id'], e[1]['text'], 'subject'))
+    second = publish(s, e[1], 'second')
+    assert first != second
+    assert s.db.execute('SELECT count(*) FROM sg_revision_items').fetchone()[0] == 2
+    assert item(s, first)['content'] == 'first'
+
+
+@pytest.mark.parametrize('defect', ['changed_payload', 'changed_attribution', 'missing_sources'])
+def test_reanchored_baseline_still_requires_exact_payload_and_valid_source(env, defect):
+    _, s, _, e = env
+    publish(s, e[0], 'first')
+    with s.db:
+        s.db.execute('UPDATE work_memory SET source_entry_id=?,source_quote=? WHERE id=?',
+            (e[1]['id'], e[1]['text'], 'subject'))
+        if defect == 'changed_payload':
+            s.db.execute("UPDATE work_memory SET content='unsupported edit'")
+        elif defect == 'changed_attribution':
+            s.db.execute("UPDATE entries SET role='user' WHERE id=?", (e[0]['id'],))
+        else:
+            s.db.execute('DROP TRIGGER sg_revision_sources_delete')
+            s.db.execute('DELETE FROM sg_revision_sources')
+    with pytest.raises(Failure, match='baseline_unavailable'):
+        publish(s, e[1], 'second')
+    assert s.db.execute('SELECT count(*) FROM sg_revision_items').fetchone()[0] == 1
+
+
 def test_read_and_review_preview_are_read_only_and_do_not_launch_or_call_models(env,monkeypatch):
     _,s,_,e=env
     a=publish(s,e[0],'initial');b=publish(s,e[1],'correction')

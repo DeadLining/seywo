@@ -9,7 +9,8 @@ from sessiongraph.extraction import create_extractor
 
 
 @pytest.fixture
-def cfg(tmp_path):
+def cfg(tmp_path, monkeypatch):
+    monkeypatch.setenv("SESSIONGRAPH_RUNTIME_HOME", str(tmp_path / "runtime"))
     config = load_config(init_project(tmp_path))
     config["provider"].update(
         protocol="responses",

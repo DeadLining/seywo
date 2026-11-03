@@ -1,3 +1,4 @@
+from sessiongraph.source_text import hydrate
 import json
 import pytest
 from sessiongraph.graph_v2 import run_chat, diagnostics, read_relations, candidates
@@ -224,7 +225,7 @@ def test_cross_chat_same_identity_adds_evidence(tmp_path):
         root / "second.jsonl", root, "chat-2", [("user", "项目 P 的训练 R17 的输出是模型 B")]
     )
     s.ingest(path)
-    b = [dict(r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
+    b = [hydrate(s, r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
     o2 = output(b)
     o2["nodes"][0]["identity"] = o["nodes"][0]["identity"]
     r = run_chat(s, ContextExtractor([o2]), "chat-2", jev=Judge(identity="same"))
@@ -244,7 +245,7 @@ def test_same_title_different_run_not_merged(tmp_path):
             root / "second.jsonl", root, "chat-2", [("user", "项目 P 的训练 R18 得到模型 B")]
         )
     )
-    b = [dict(r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
+    b = [hydrate(s, r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
     o2 = output(b)
     o2["nodes"][0]["identity"] = [{"namespace": "run_id", "value": "R18", "scope": "项目 P"}]
     r = run_chat(s, ContextExtractor([o2]), "chat-2", jev=Judge(identity="same"))
@@ -324,7 +325,7 @@ def test_cross_chat_scoped_recall_after_merge(tmp_path):
     s.ingest(
         write_session(root / "c2.jsonl", root, "chat-2", [("user", "项目 P 的训练 R17 得到模型 B")])
     )
-    b = [dict(r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
+    b = [hydrate(s, r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
     o2 = output(b)
     o2["nodes"][0]["identity"] = o["nodes"][0]["identity"]
     run_chat(s, ContextExtractor([o2]), "chat-2", jev=Judge(identity="same"))
@@ -340,7 +341,7 @@ def test_unrelated_same_title_is_pending_not_destroyed(tmp_path):
     s.ingest(
         write_session(root / "c2.jsonl", root, "chat-2", [("user", "另一次训练 A 得到模型 B")])
     )
-    b = [dict(r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
+    b = [hydrate(s, r) for r in s.db.execute("select * from entries where session_id='chat-2'")]
     r = run_chat(
         s, ContextExtractor([output(b)]), "chat-2", jev=Judge(identity="insufficient_evidence")
     )
@@ -412,7 +413,7 @@ def test_pending_relation_closes_only_after_new_supported_evidence(tmp_path):
             root / "next.jsonl", root, "chat-2", [("assistant", "确认训练 A 已产出模型 B")]
         )
     )
-    new = [dict(r) for r in s.db.execute("SELECT * FROM entries WHERE session_id='chat-2'")]
+    new = [hydrate(s, r) for r in s.db.execute("SELECT * FROM entries WHERE session_id='chat-2'")]
     second = output(original)
     second["relations"][0]["evidence"].append({"entry_id": new[0]["id"], "quote": new[0]["text"]})
     result = run_chat(s, ContextExtractor([second]), "chat-2", jev=Judge(identity="same"))

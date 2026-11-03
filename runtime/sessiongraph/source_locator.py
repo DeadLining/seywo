@@ -32,9 +32,11 @@ def setup(store):
       CREATE TRIGGER IF NOT EXISTS sg_size_delete BEFORE DELETE ON entries BEGIN
         DELETE FROM sg_entry_sizes WHERE entry_id=old.id; END;
     """)
-    with store.db:
-        store.db.execute("""INSERT INTO sg_entry_sizes SELECT id,length(text) FROM entries e
-            WHERE NOT EXISTS (SELECT 1 FROM sg_entry_sizes z WHERE z.entry_id=e.id)""")
+    if not store.db.execute("SELECT 1 FROM metadata WHERE key='source_sizes_backfilled_v1'").fetchone():
+        with store.db:
+            store.db.execute("""INSERT INTO sg_entry_sizes SELECT id,length(text) FROM entries e
+                WHERE NOT EXISTS (SELECT 1 FROM sg_entry_sizes z WHERE z.entry_id=e.id)""")
+            store.db.execute("INSERT INTO metadata VALUES('source_sizes_backfilled_v1','1')")
 
 
 def record(store, eid, payload, raw, text, offset=None, length=None):
@@ -59,14 +61,12 @@ def metadata(store, row):
     if saved:
         return dict(saved)
     # Original indexed JSON, not an inferred assistant role. Do not scan whole files.
-    raw = store.db.execute(
-        "SELECT event_json FROM raw_events WHERE session_id=? AND line=?",
-        (row["session_id"], row["line"]),
-    ).fetchone()
-    if raw:
-        event = json.loads(raw[0])
+    from .legacy_storage import read_raw
+    raw = read_raw(store, row['session_id'], row['line'])
+    if raw is not None:
+        event = json.loads(raw)
         payload = event.get("payload", {})
-        record(store, row["id"], payload, raw[0].encode(), row["text"])
+        record(store, row["id"], payload, raw.encode(), row["text"])
         return dict(
             store.db.execute(
                 "SELECT * FROM sg_source_locations WHERE entry_id=?", (row["id"],)
@@ -94,11 +94,11 @@ def metadata(store, row):
         raise ValueError("graph_source_metadata_missing") from exc
 
 
-def read_original(store, entry_id):
+def read_original(store, entry_id, *, prefer_retained=True):
     """Read one record by byte location. Fallback scans only a legacy source on demand."""
     from .core import normalize
     from .source_retention import read
-    retained = read(store, entry_id)
+    retained = read(store, entry_id) if prefer_retained else None
     if retained:
         return {k: v for k, v in retained.items() if k != 'record'}
 
@@ -123,10 +123,14 @@ def read_original(store, entry_id):
     try:
         with Path(row["path"]).open("rb") as stream:
             if loc and loc["byte_offset"] is not None:
-                if not 0 < loc["byte_length"] <= MAX_RECORD_BYTES:
+                if (type(loc['byte_offset']) is not int or loc['byte_offset'] < 0
+                        or type(loc['byte_length']) is not int
+                        or not 0 < loc["byte_length"] <= MAX_RECORD_BYTES):
                     return {"status": "invalid_locator"}
                 stream.seek(loc["byte_offset"])
                 raw = stream.read(loc["byte_length"])
+                if len(raw) != loc['byte_length'] or not raw.endswith(b'\n'):
+                    return {'status': 'changed', 'entry_id': entry_id}
             else:
                 raw = b""
                 for _ in range(row["line"]):
@@ -146,7 +150,12 @@ def read_original(store, entry_id):
         if expected and digest(record_bytes) != expected:
             return {"status": "changed", "entry_id": entry_id}
         normalized = normalize(event["payload"])
-        if not normalized or digest(normalized[2]) != digest(row["text"]):
+        from .source_text import source_hash
+        if (not normalized or event.get('type') != 'response_item'
+                or normalized[:2] != (row['kind'], row['role'])
+                or normalized[3] != row['call_id']
+                or str(event.get('timestamp', '')) != row['timestamp']
+                or digest(normalized[2]) != source_hash(store, entry_id, row['text'])):
             return {"status": "changed", "entry_id": entry_id}
         if (
             not expected
@@ -189,6 +198,9 @@ def describe(store, entry_id, verify=False):
         "byte_offset": loc["byte_offset"] if loc else None,
         "byte_length": loc["byte_length"] if loc else None,
     }
+    from .source_text import external
+    if external(store, entry_id):
+        result['storage'] = 'codex_source'
     if store.db.execute("SELECT 1 FROM sqlite_master WHERE name='sg_retained_sources'").fetchone():
         retained = store.db.execute('SELECT policy,record_hash,snapshot_hash,redactions_json '
                                     'FROM sg_retained_sources WHERE entry_id=?', (entry_id,)).fetchone()

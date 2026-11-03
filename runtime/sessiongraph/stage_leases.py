@@ -143,7 +143,7 @@ def ensure(store, *, allow_complete=False, check_attempt=True):
         WHERE l.project=?''', (store.config['project_id'],)).fetchone()
     if (not row or row['owner'] != claim['owner'] or row['generation'] != claim['generation']
             or any(row[k] != claim[k] for k in ('job', 'part', 'stage', 'attempt'))
-            or row['state'] != 'running' or row['job_state'] == 'superseded'
+            or row['state'] != 'running' or row['job_state'] in {'superseded', 'dismissed'}
             or check_attempt and row['attempt_state'] != 'running'
             or row['job_state'] == 'complete' and not allow_complete):
         raise Failure('stage_lease_lost')

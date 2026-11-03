@@ -37,13 +37,14 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
     pending.current = true
     setBusy(true); setError(''); setMessage(''); setConfirm(null)
     const removing = action === 'uninstall_hooks' || action === 'uninstall_mcp'
+    const globalProvider = action === 'save_model' || action === 'save_provider'
     try {
       // Preserve the exact stored endpoint so existing endpoint-bound keys still match.
       const endpoint = action === 'save_provider'
         ? (snapshot?.endpoint && baseUrl.trim() === baseUrlFromEndpoint(snapshot.endpoint)
           ? snapshot.endpoint : endpointFromBaseUrl(baseUrl))
         : undefined
-      const result = await manage({ action, ...(project && !removing ? { project } : {}), ...(['save_model','save_provider'].includes(action) ? { model } : {}), ...(action === 'save_provider' ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
+      const result = await manage({ action, ...(project && !removing && !globalProvider ? { project } : {}), ...(globalProvider ? { model } : {}), ...(action === 'save_provider' ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
       if (!active.current) return
       if (!result.ok) throw new Error(result.message || '设置操作失败')
       setSnapshot(result)
@@ -65,21 +66,21 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
 
   return <section className="sg-settings-card" aria-label="项目记忆设置" aria-busy={busy}>
     <div className="sg-settings-heading"><h3>设置</h3><button type="button" disabled={busy} onClick={() => void run('status')}>重新检查</button></div>
-    {models.length > 0 && <label htmlFor="sg-extraction-model">记忆模型 <small>当前项目</small></label>}
-    {models.length > 0 ? <><select id="sg-extraction-model" aria-label="记忆模型" value={model} disabled={busy || !project} onChange={e => setModel(e.target.value)}>
+    {models.length > 0 && <label htmlFor="sg-extraction-model">记忆模型 <small>全局</small></label>}
+    {models.length > 0 ? <><select id="sg-extraction-model" aria-label="记忆模型" value={model} disabled={busy} onChange={e => setModel(e.target.value)}>
       {!model && <option value="">选择模型</option>}
       {legacy && <option value={model} hidden>{legacy.label}（当前配置）</option>}
       {model && !available && <option value={model}>{model}（不在当前可用模型中）</option>}
       {models.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
     </select>
-    <button type="button" disabled={busy || !project || !available || !snapshot} onClick={() => void run('save_model')}>保存模型</button>
+    <button type="button" disabled={busy || !available || !snapshot} onClick={() => void run('save_model')}>保存模型</button>
     </> : <div className="sg-provider-fields">
-      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy || !project} onChange={e=>setBaseUrl(e.target.value)} />
-      <label htmlFor="sg-api-key">API KEY</label><input id="sg-api-key" type="password" autoComplete="off" placeholder="留空保留现有凭据" value={apiKey} disabled={busy || !project} onChange={e=>setApiKey(e.target.value)} />
-      <label htmlFor="sg-model-id">MODEL NAME</label><input id="sg-model-id" value={model} disabled={busy || !project} onChange={e=>setModel(e.target.value)} />
-      <button type="button" disabled={busy || !project || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('save_provider')}>保存模型配置</button>
+      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy} onChange={e=>setBaseUrl(e.target.value)} />
+      <label htmlFor="sg-api-key">API KEY</label><input id="sg-api-key" type="password" autoComplete="off" placeholder="留空保留现有凭据" value={apiKey} disabled={busy} onChange={e=>setApiKey(e.target.value)} />
+      <label htmlFor="sg-model-id">MODEL NAME</label><input id="sg-model-id" value={model} disabled={busy} onChange={e=>setModel(e.target.value)} />
+      <button type="button" disabled={busy || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('save_provider')}>保存模型配置</button>
     </div>}
-    {!project && <p>请选择已初始化项目，再保存模型或安装。</p>}
+    {!project && <p>请选择已初始化项目，再安装 Hook 或 MCP。</p>}
     <div className="sg-install-row">
       <strong>对象图谱 v2</strong>
       <span>{snapshot?.graph_v2_enabled ? '已启用：新内容自动抽取、判断与去重' : '未启用：当前使用旧抽取路径'}</span>

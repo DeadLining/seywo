@@ -10,7 +10,7 @@ import posixpath
 import re
 import zlib
 
-VERSION = 'literal-projection-v1'
+VERSION = 'literal-projection-v2'
 BITS = 4096
 PATH = re.compile(r'(?<![\w:/])(?:/|\./|[\w.-]+/)[\w./@+~-]+\.[a-zA-Z0-9]{1,12}(?![\w/])')
 
@@ -111,6 +111,7 @@ def setup(store):
     CREATE TRIGGER IF NOT EXISTS sg_read_source_delete AFTER DELETE ON entries BEGIN
       INSERT OR IGNORE INTO sg_read_dirty SELECT id FROM work_memory WHERE source_entry_id=old.id; END;
     ''')
+    ensure_evidence_triggers(store)
     version=db.execute("SELECT value FROM metadata WHERE key='read_projection_version'").fetchone()
     if not version or version[0]!=VERSION:
         with db:
@@ -121,6 +122,27 @@ def setup(store):
     flush(store)
 
 
+def ensure_evidence_triggers(store):
+    """Install evidence invalidation once the graph schema exists.
+
+    Store initialization runs the disposable read projection before graph_v2's
+    optional schema, so SQLite may not know sg2_evidence yet. graph_v2.setup
+    calls this again after creating its tables. No evidence rows are rewritten.
+    """
+    db=store.db
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='sg2_evidence'").fetchone():
+        return False
+    db.executescript("""
+    CREATE TRIGGER IF NOT EXISTS sg_read_evidence_insert AFTER INSERT ON sg2_evidence BEGIN
+      INSERT OR IGNORE INTO sg_read_dirty VALUES(new.node); END;
+    CREATE TRIGGER IF NOT EXISTS sg_read_evidence_update AFTER UPDATE OF quote,entry_id ON sg2_evidence BEGIN
+      INSERT OR IGNORE INTO sg_read_dirty VALUES(new.node); END;
+    CREATE TRIGGER IF NOT EXISTS sg_read_evidence_delete AFTER DELETE ON sg2_evidence BEGIN
+      INSERT OR IGNORE INTO sg_read_dirty VALUES(old.node); END;
+    """)
+    return True
+
+
 def rows_by_id(db,ids):
     ids=list(ids)
     for start in range(0,len(ids),400):
@@ -129,31 +151,69 @@ def rows_by_id(db,ids):
 
 
 def derive(store,rows):
-    ids={r['source_entry_id'] for r in rows if r['source_entry_id']}
+    """Project only literals found in this node's validated evidence set.
+
+    A node may cite several entries. Its representative `source_quote` alone is
+    not the whole evidence set, so aliases and paths must be checked against
+    every source-verified `sg2_evidence` quote. The projected graph never trusts
+    `paths_json` or generated node content without that literal check.
+    """
+    rows=list(rows)
+    all_ids={r['source_entry_id'] for r in rows if r['source_entry_id']}
+    evidence={}
+    evidence_table=bool(store.db.execute("SELECT 1 FROM sqlite_master WHERE name='sg2_evidence'").fetchone())
+    if evidence_table and rows:
+        node_ids=[r['id'] for r in rows]
+        for start in range(0,len(node_ids),400):
+            chunk=node_ids[start:start+400]
+            for nid,entry_id,quote in store.db.execute(
+                'SELECT node,entry_id,quote FROM sg2_evidence WHERE node IN ('+','.join('?' for _ in chunk)+')',
+                chunk,
+            ):
+                evidence.setdefault(nid,[]).append((entry_id,quote))
+                all_ids.add(entry_id)
     originals={}
-    ids=list(ids)
+    ids=list(all_ids)
     for start in range(0,len(ids),400):
         chunk=ids[start:start+400]
-        originals.update(store.db.execute('SELECT id,text FROM entries WHERE id IN ('+','.join('?' for _ in chunk)+')',chunk))
+        originals.update(store.db.execute('SELECT id,sg_source_text(id,text) FROM entries WHERE id IN ('+','.join('?' for _ in chunk)+')',chunk))
     result={}; root=store.config['roots'][0]
     for row in rows:
-        quote=row['source_quote'] or ''; text=row['title']+' '+row['content']
-        valid=bool(quote and quote in originals.get(row['source_entry_id'],''))
+        representative=row['source_quote'] or ''
+        text=row['title']+' '+row['content']
+        # Representative validity remains the first gate for compatibility.
+        representative_ok=bool(representative and representative in (originals.get(row['source_entry_id']) or ''))
+        quotes=[]
+        if representative_ok:
+            quotes.append(representative)
+        for entry_id,quote in evidence.get(row['id'],[]):
+            if quote and quote not in quotes and quote in (originals.get(entry_id) or ''):
+                quotes.append(quote)
+        valid=bool(quotes)
         aliases=set(); paths=[]
+        # Stored paths are immutable-evidence metadata, not a substitute for a
+        # live source. When the external original is unavailable, retaining a
+        # path only if it occurs literally in an immutable sg2_evidence quote
+        # keeps navigation useful while `valid=0` continues to exclude the node
+        # from verified alias/reference edges.
+        literal_quotes=quotes or [quote for _,quote in evidence.get(row['id'],[]) if quote]
         if valid:
             for value in items(row['aliases_json']):
                 term=value.strip().casefold()
                 if (3<=len(term)<=48 and '/' not in term and '.' not in term
                     and not re.fullmatch(r'[\d\W_]+',term) and not re.fullmatch(r'[a-f\d-]{20,}',term)):
                     pattern=re.compile(r'(?<![A-Za-z0-9_])'+re.escape(term)+r'(?![A-Za-z0-9_])',re.I)
-                    if pattern.search(quote) and pattern.search(text): aliases.add(term)
-            raw=set(items(row['paths_json']))
-            raw.update(m.group(0) for m in PATH.finditer(quote) if m.group(0) in row['title']+'\n'+row['content'])
-            seen=set()
-            for path in sorted(raw):
-                if not path or path not in quote or '\x00' in path or '://' in path: continue
-                canonical=posixpath.normpath(path if path.startswith('/') else posixpath.join(root,path))
-                if canonical not in seen: paths.append([canonical,path]); seen.add(canonical)
+                    if any(pattern.search(quote) for quote in quotes) and pattern.search(text): aliases.add(term)
+        raw=set(items(row['paths_json']))
+        if valid:
+            for quote in quotes:
+                raw.update(m.group(0) for m in PATH.finditer(quote) if m.group(0) in row['title']+'\n'+row['content'])
+        seen=set()
+        for path in sorted(raw):
+            if not path or '\x00' in path or '://' in path: continue
+            if not any(path in quote for quote in literal_quotes): continue
+            canonical=posixpath.normpath(path if path.startswith('/') else posixpath.join(root,path))
+            if canonical not in seen: paths.append([canonical,path]); seen.add(canonical)
         result[row['id']]={'valid':valid,'aliases':sorted(aliases),'paths':paths,'mentions':set()}
     return result
 

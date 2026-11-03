@@ -18,7 +18,8 @@ import time
 import uuid
 
 DEFERRED_CODES = {'graph_call_budget_pending', 'graph_continuation_pending',
-                  'daily_call_budget_pending', 'runtime_upgrade_pending'}
+                  'daily_call_budget_pending', 'runtime_upgrade_pending',
+                  'resource_circuit_open'}
 RETRY_DELAYS = (120, 600, 1800)
 
 
@@ -71,6 +72,14 @@ def release_legacy_waits(queue, now):
 
 def key(config_path, chat):
     return hashlib.sha256(f'{Path(config_path).resolve()}\0{chat}'.encode()).hexdigest()
+
+
+def provider_identity(config):
+    provider = config['provider']
+    values = [provider.get('protocol'), provider.get('endpoint'),
+              provider.get('model') or os.environ.get(provider.get('model_env', ''), ''),
+              os.environ.get(provider.get('base_url_env', ''), '')]
+    return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
 
 def import_retryable(run):
@@ -148,7 +157,11 @@ def record(config_path, run, *, launch=True, now=None, claimed=None):
             graph=run.get('graph_v2') or {}
             if error in {'graph_call_budget_pending','graph_continuation_pending'} or (more and not error):
                 progressed=any(graph.get(k,0) for k in ('input_source_chars','nodes_saved','relations_saved','adaptive_splits')) or run.get('saved_count',0) or run.get('saved_relation_count',0) or (run.get('input_stats') or {}).get('selected_chars',0)
-                if recovery and graph.get('deferred_reason') == 'graph_call_budget_pending':
+                if graph.get('progress_tracked'):
+                    progressed = bool(graph.get('durable_progress', 0)
+                                      or graph.get('adaptive_splits', 0)
+                                      or graph.get('schema_repairs', 0))
+                elif recovery and graph.get('deferred_reason') == 'graph_call_budget_pending':
                     # Successful judgments can advance cached work before any
                     # complete relation is published. A zero-call spin cannot.
                     progressed = progressed or run.get('reported_model_calls', 0) > 0
@@ -165,17 +178,46 @@ def record(config_path, run, *, launch=True, now=None, claimed=None):
                 blocked=not deferred and not next_retry
                 due=stamp if deferred else max(stamp,next_retry or stamp)
                 if deferred and not error:error='graph_continuation_pending'
-                if not recovery or not deferred:
+                if (not recovery and not graph.get('progress_tracked')) or not deferred:
                     no_progress=0
                 if not deferred and not error:
                     backlog=run.get('backlog_failures') or []
                     error=next((f.get('error_code') for f in backlog if f.get('retryable') == bool(next_retry)),None)
+            if (graph.get('durable_stages') and error
+                    and error.startswith(('provider_', 'single_token_'))):
+                # New source is not evidence that the shared provider recovered.
+                # Yield the project while preserving each job's retry controls.
+                deferred = False
+                blocked = not run.get('pending_retry_count')
+                next_retry = graph.get('next_retry_at')
+                due = (next_retry if type(next_retry) in (int, float)
+                       and stamp < next_retry < float('inf') else
+                       stamp + RETRY_DELAYS[min(max(0, failures - 1), len(RETRY_DELAYS) - 1)])
+            if error == 'single_token_budget_incompatible':
+                blocked, deferred = True, False
+            if error == 'resource_circuit_open':
+                # An expired batch deadline or fresh input cannot bypass the
+                # current backend's cooldown. Old receipts lack a single deadline.
+                deadlines = [graph.get('next_retry_at'), run.get('next_retry_at')]
+                deadlines.extend((item.get('failure') or {}).get('retry_at')
+                    for item in run.get('backlog_failures') or []
+                    if item.get('error_code') == error and item.get('retryable') is True)
+                cooldown = config.get('graph_v2', {}).get('resource_policy', {}).get('circuit_cooldown_seconds', 120)
+                if type(cooldown) is not int or cooldown < 1:
+                    cooldown = 120
+                due = max((value for value in deadlines
+                    if type(value) in (int, float) and stamp < value < float('inf')),
+                    default=stamp + cooldown)
+                blocked, deferred, no_progress = False, False, 0
+                failures = prior.get('failures', 0)
             queue[identity]={'config':str(Path(config_path).resolve()),'chat':run['chat_id'],
                 'target':run.get('target_rowid'), 'run_id':run['run_id'],
                 'source_transcript':run.get('source_transcript') or prior.get('source_transcript',''),
                 'updated_at':run.get('updated_at',stamp),'failures':failures,'no_progress':no_progress,
                 'state':'blocked' if blocked else 'ready' if deferred else 'retry_wait',
                 'due':due,'error_code':error}
+            if error == 'single_token_budget_incompatible':
+                queue[identity]['provider_identity'] = provider_identity(config)
             if pending_import:
                 queue[identity]['pending_import'] = pending_import
         from .hook_ingress import reconcile
@@ -247,18 +289,18 @@ def completed_boundary(store, item):
                       (item.get('run_id'), project, chat)).fetchall()
     if not jobs or any(r[0] != 'complete' for r in jobs):
         return False
-    if db.execute("SELECT 1 FROM sg2_jobs WHERE project=? AND chat=? AND state NOT IN ('complete','superseded') AND NOT coalesce(json_extract(input_json,'$.manual_only'),0) LIMIT 1", (project,chat)).fetchone():
+    if db.execute("SELECT 1 FROM sg2_jobs WHERE project=? AND chat=? AND state NOT IN ('complete','superseded','dismissed') AND NOT coalesce(json_extract(input_json,'$.manual_only'),0) LIMIT 1", (project,chat)).fetchone():
         return False
     if db.execute("SELECT 1 FROM sg2_attempts a JOIN sg2_jobs j ON j.id=a.job WHERE j.project=? AND j.chat=? AND a.state='running' AND NOT coalesce(json_extract(j.input_json,'$.manual_only'),0) LIMIT 1", (project,chat)).fetchone():
         return False
     if not db.execute("SELECT 1 FROM entries e JOIN session_chats sc ON sc.segment_id=e.session_id WHERE sc.chat_id=? AND e.rowid<=? LIMIT 1",(chat,item["target"])).fetchone():
         return False
     # No guess for missing segments/cursors. Partial line coverage stays visible.
-    rows = db.execute("""SELECT e.line,length(e.text),c.line,c.start FROM entries e
+    rows = db.execute("""SELECT e.line,coalesce((SELECT chars FROM sg_entry_sizes WHERE entry_id=e.id),length(e.text)),c.line,c.start FROM entries e
         JOIN session_chats sc ON sc.segment_id=e.session_id AND sc.chat_id=?
         LEFT JOIN sg2_cursors c ON c.project=? AND c.segment=e.session_id
         WHERE e.rowid<=? AND (c.line IS NULL OR e.line>c.line OR
-              (e.line=c.line AND length(e.text)>c.start)) LIMIT 1""", (chat,project,item['target'])).fetchone()
+              (e.line=c.line AND coalesce((SELECT chars FROM sg_entry_sizes WHERE entry_id=e.id),length(e.text))>c.start)) LIMIT 1""", (chat,project,item['target'])).fetchone()
     return rows is None
 
 

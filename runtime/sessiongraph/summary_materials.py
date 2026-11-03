@@ -1,6 +1,8 @@
 """Bounded source-backed material projection. Read-only, no provider or extraction."""
 from __future__ import annotations
 
+from .source_text import hydrate
+
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -63,7 +65,7 @@ def assertion_rows(store, ids):
         FROM sg2_evidence x JOIN sg2_nodes n ON n.id=x.node WHERE x.id IN ({marks})""", ids)}
     source_ids = sorted({r["entry_id"] for r in claims.values()})
     source_marks = ",".join("?" for _ in source_ids)
-    sources = {r["id"]: r for r in store.db.execute(
+    sources = {r["id"]: hydrate(store, r) for r in store.db.execute(
         f"SELECT id,timestamp,role,text FROM entries WHERE id IN ({source_marks})", source_ids)} if source_ids else {}
     rows = []
     for object_id in ids:
@@ -171,7 +173,7 @@ def candidates(store, query):
                     WHERE x.id IN ({relation_marks})""", selected)}
                 entry_ids = sorted({r["entry_id"] for r in raw.values()})
                 entry_marks = ",".join("?" for _ in entry_ids)
-                sources = {r["id"]: r for r in store.db.execute(
+                sources = {r["id"]: hydrate(store, r) for r in store.db.execute(
                     f"SELECT id,timestamp,text FROM entries WHERE id IN ({entry_marks})", entry_ids)} if entry_ids else {}
                 rels = [{**raw[key], "timestamp": sources[raw[key]["entry_id"]]["timestamp"],
                          "text": sources[raw[key]["entry_id"]]["text"]} for key in selected

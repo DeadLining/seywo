@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .source_text import hydrate
+
 
 # Upper bound on work-memory nodes drawn at once. The full item is always
 # reachable by search or by raising this; the graph is a view, not an export.
@@ -29,6 +31,7 @@ def graph_data(store, query="", chat="", include_superseded=False):
         if not r:
             return
         cid = "chat:" + r["chat_id"]
+        r = hydrate(store, r)
         nodes[cid] = dict(id=cid, type="chat", label=r["chat_id"], chat_id=r["chat_id"])
         nodes[eid] = dict(
             id=eid,
@@ -47,6 +50,8 @@ def graph_data(store, query="", chat="", include_superseded=False):
         layer tied to a policy hash. Work memory has no policy: it is explicit
         and source-backed, and it is what a new chat actually resumes from.
         """
+        from .graph_compaction import canonical
+        mid=canonical(store,mid)
         if mid in nodes:
             return
         r = store.db.execute("SELECT * FROM work_memory WHERE id=?", (mid,)).fetchone()
@@ -88,10 +93,12 @@ def graph_data(store, query="", chat="", include_superseded=False):
             entry(ev["entry_id"])
             edges.append(dict(source=rid, target=ev["entry_id"], kind="EVIDENCED_BY"))
 
+    from .graph_compaction import expression
+    canonical_memory=expression(store,"work_memory.id")
     truncated = False
     if query:
         rows = store.db.execute(
-            """SELECT id FROM work_memory
+            f"""SELECT DISTINCT {canonical_memory} id FROM work_memory
                WHERE status NOT IN ('superseded','cancelled')
                AND (title LIKE ? OR content LIKE ?)
                ORDER BY updated_at DESC LIMIT 12""",
@@ -104,14 +111,14 @@ def graph_data(store, query="", chat="", include_superseded=False):
             (entry if hit["type"] == "entry" else record)(hit["id"])
     else:
         live_total = store.db.execute(
-            """SELECT count(*) FROM work_memory
+            f"""SELECT count(DISTINCT {canonical_memory}) FROM work_memory
                WHERE status NOT IN ('superseded','cancelled')
                AND (?="" OR chat_id=?)""",
             (chat, chat),
         ).fetchone()[0]
         truncated = live_total > MEMORY_NODE_LIMIT
         rows = store.db.execute(
-            """SELECT id FROM work_memory
+            f"""SELECT DISTINCT {canonical_memory} id FROM work_memory
                WHERE status NOT IN ('superseded','cancelled')
                AND (?="" OR chat_id=?)
                ORDER BY updated_at DESC, id DESC LIMIT ?""",
@@ -166,8 +173,9 @@ def graph_data(store, query="", chat="", include_superseded=False):
                         evidence=store._evidence(r["id"]),
                     )
                 )
+    from .graph_compaction import visible
     memory_stats = dict(
-        store.db.execute("SELECT status,count(*) FROM work_memory GROUP BY status").fetchall()
+        store.db.execute(f"SELECT status,count(*) FROM work_memory WHERE {visible(store,'work_memory.id')} GROUP BY status").fetchall()
     )
     return dict(
         nodes=list(nodes.values()),
@@ -188,7 +196,7 @@ def graph_data(store, query="", chat="", include_superseded=False):
     )
 
 
-def memory_detail(store, mid: str):
+def memory_detail(store, mid: str, *, offset=0):
     """Full work-memory item plus the original evidence it was drawn from.
 
     Read-only and model-free: the quote is re-located in the source entry so the
@@ -198,6 +206,9 @@ def memory_detail(store, mid: str):
 
     if not mid or len(mid) > 256:
         raise ValueError("invalid memory id")
+    from .graph_compaction import canonical
+    requested=mid
+    mid=canonical(store,mid)
     row = store.db.execute("SELECT * FROM work_memory WHERE id=?", (mid,)).fetchone()
     if not row:
         raise ValueError("unknown memory id")
@@ -211,7 +222,7 @@ def memory_detail(store, mid: str):
             (eid,),
         ).fetchone()
         if e:
-            entries.append(dict(e))
+            entries.append(hydrate(store, e))
     superseded_by = [
         dict(r)
         for r in store.db.execute(
@@ -221,4 +232,4 @@ def memory_detail(store, mid: str):
         ).fetchall()
     ]
     from .graph_v2 import node_details
-    return dict(memory=item, entries=entries, superseded_by=superseded_by, graph_v2=node_details(store, mid), model_calls=0)
+    return dict(memory=item, entries=entries, superseded_by=superseded_by, graph_v2=node_details(store, requested, offset=offset), model_calls=0)

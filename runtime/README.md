@@ -83,6 +83,49 @@ outputs and reports all files' allocated bytes and read timings. It never writes
 the original project or invokes a provider; the snapshot parent must be a dedicated
 rehearsal folder and must not already contain `hook-state/runs`.
 
+### Missing Chat Cleanup (Global Default With Project Overrides)
+
+Set `cleanup_missing_chats` to `true` in `$CODEX_HOME/sessiongraph.json`
+(`~/.codex/sessiongraph.json` by default), with global Hooks enabled, to apply
+archive-equals-delete cleanup to all existing and newly initialized projects.
+Projects inherit the setting dynamically without config rewrites or historical
+sweeps. An explicit project `hook.cleanup_missing_chats` boolean overrides the
+global default; `false` opts that project out. With neither setting, cleanup stays
+off. Disabled projects remain disabled.
+
+A registered `SessionEnd` handler starts a detached, one-shot check
+after two seconds. It ignores `reason`; a normal exit with the original source
+present does not clean anything. Only an already-indexed chat whose registered
+sources are all missing under accessible allowlisted roots is eligible. Unknown
+paths, unavailable roots and filesystem errors preserve data. There is no model
+call, background scan, polling daemon, or source-file deletion.
+
+On macOS, enabled project Hooks also admit one singleton deletion observer.
+It sleeps in `kqueue` and watches Codex desktop state changes, not transcripts
+or graph contents. New `codex-writing-block-deleted-thread-v1:` markers cover
+unarchive/read/delete, which does not emit `SessionEnd`. A marker is only a
+trigger: the backend thread row must also be absent, and all original source
+checks still apply. Atomic state replacement is supported. Startup snapshots
+old markers without sweeping history. One small last-check receipt is retained
+in `hook-state/last-delete-check.json`; no model calls or periodic timers occur.
+Global uninstall and local disable both prevent cleanup. The private desktop
+marker/state schema is version-specific; unknown formats preserve graph data.
+Explicit, individually confirmed omissions can be reconciled with
+`sessiongraph observe-deletions --config /absolute/project/.sessiongraph/config.json --chat CHAT_ID`.
+
+Cleanup atomically removes that chat's entries, retained evidence, unsupported
+nodes/relations, assertion history and extraction jobs. Shared graph objects are
+reanchored to surviving evidence. Ordinary immutable-history guards are restored
+within the same transaction, including rollback on failure. A small metadata
+marker prevents late workers from reimporting the archived source; restoring a
+source at an original path permits fresh ingestion. Projects with cleanup off
+retain archive relocation/recovery. Existing backups/audit receipts are not secure
+erased, and freed SQLite pages are reused rather than vacuuming on every event.
+
+Hook registration still requires normal Codex trust review. The handler does not
+enroll projects or grant itself trust. Set the project option to `false` to stop future
+automatic cleanup; this does not restore data already intentionally removed.
+
 ### Independent critical evidence retention (opt-in)
 
 `source-retain` previews a bounded batch of source records referenced by published
@@ -160,6 +203,27 @@ The existing 6,000-character handoff selects whole items, retains source entry I
 and reports selected items omitted for budget instead of slicing off a condition
 or negation. This does not implement task-aware selection, effective-revision
 delivery tracking, or live host-event acceptance; those remain separate gates.
+
+## App-wide provider (2026-10-26)
+
+BASE URL, API KEY and MODEL NAME are shared app settings, not project overrides.
+The existing runtime `template.json` owns provider identity. Each worker resolves
+it on load; older projects' endpoint/model fields no longer override it. Saving
+does not rewrite project configs, graph data or checkpoints. Standalone configs
+without an app template retain their previous behavior.
+
+Project timeouts and output budgets remain local. Endpoint-bound keys keep the
+existing protected credential store; an empty API KEY preserves saved credentials.
+Changing identity drops old single-token route pins in the effective in-memory
+config so classifications cannot reuse a previous backend's cached attestation.
+Settings work without a selected project. Hook/MCP reinstall preserves the shared
+provider. Retrieval and settings do not open model connections.
+
+An open transport circuit yields until its future cooldown, including when stale
+batch deadlines or fresh input would otherwise trigger immediate continuation.
+Circuit waits do not accrue failure debt or failed-batch counts. A half-open HTTP
+400 is a real HTTP response, not a missing transport response: the configuration
+error remains visible without repeatedly reopening the connection circuit.
 
 ## Native settings (1.0.35)
 
@@ -368,6 +432,16 @@ per request**, with `max_tokens=1` (or explicitly selected
 Responses. It never changes extraction budgets or falls back to another protocol,
 JSON Judge, Jev, or a larger output limit. Unsupported routes fail closed.
 
+Failed provider stages yield until the durable retry deadline; new Hook input is
+retained without bypassing that deadline. A route must actually disable upstream
+reasoning for a one-token classifier, not merely hide reasoning in its response.
+Increasing the output cap is not a substitute for honoring that request.
+An explicit Gateway empty-output error reporting one consumed output token becomes
+`single_token_budget_incompatible`, not a generic transient HTTP502. New Hook
+input is retained but cannot revive this incompatibility for the same provider
+identity. A changed configured model/endpoint or an explicit manual run can retry;
+no classifier budget, model substitution or graph progress is silently changed.
+
 Only an exact legal label is accepted, including when the API reports a length
 termination. Empty output, refusal, tool calls, multi-token logprobs, invalid
 scores, an ignored output budget, or an unexpected pinned backend are failures.
@@ -436,16 +510,16 @@ probe of the selected route on an isolated backup; production migration and
 semantic publication remain separately gated.
 
 
-## Durable Hook Ingress (Opt-In, Not Deployed)
+## Durable Hook Ingress
 
 `hook_ingress.py` admits `Stop`, `PreCompact` and `PostCompact` notifications
-to the existing `continuation.py` project/chat queue. It is disabled by default.
-Opt-in requires `hook.durable_ingress: true`, `graph_v2.enabled: true` and an
+to the existing `continuation.py` project/chat queue. The app-wide template now
+enables this for enrolled projects by default; explicit project opt-outs remain.
+Ingress requires `hook.durable_ingress: true`, `graph_v2.enabled: true` and an
 enabled `graph_v2.recovery_policy` (at most three provider calls per dispatch).
-No global template/default changes, Hook registration changes or production
-configuration changes are implied. `Stop` has a queue-only handler but is NOT
-registered: installed-host event delivery and stdout behavior still require
-independent acceptance. It never returns a blocking decision or starts a chat.
+The existing global registration includes `Stop`; template changes do not edit
+Hook commands or trust. Installed-host delivery is distinct from unit tests.
+Ingress never returns a blocking decision or starts a chat.
 Reads and `UserPromptSubmit` restoration do not enqueue extraction.
 
 Notifications contain an allowlisted absolute transcript path and a stat
@@ -917,3 +991,141 @@ objects/relations. `source_reprocessed` means the selected source window passed
 through the pipeline, NOT semantic equivalence, complete history migration or
 permission to hide the old compound node. Unresolved evidence remains unresolved.
 No automatic full-history rebuild or old-node suppression is implemented.
+
+### V2 引用修复与“清理失效任务”（2026-10-27）
+
+- 原子断言字段若把逐字原文指向了相邻锚点，仅在**同一输入条目、该节点已引用的锚点**中唯一定位到相同原文时纠正地址。不开启跨说话人搜索，不扩充证据，不改写或模糊匹配字段；不满足条件仍拒绝，并准确报告 `invalid_atomic_source_ref`，不再统称“未知锚点”。格式错误最多一次持久化反馈重试，不扩大单 token 分类预算。
+- “清理失效任务”现在同时处理当前项目的受阻续跑队列、受阻 V2 图谱批次以及失败/中断运行记录。V2 批次明确变为 `dismissed`，不是 `complete`；不计作已完成覆盖，也不会被后续 Hook 重新执行。运行中、待执行、等待重试批次不受影响。
+- 清理不删除原文、记忆、图谱事实、失败原因、重试账本或已保存的批次载荷/检查点。保留原输入预留，防止旧批次自动重建，新追加输入仍可处理。`sg2_task_dismissals` 仅保存清理时间和原调度状态；恢复时可按该回执还原 job/control 状态，载荷仍在原处。删除原 chat 时此回执随该 chat 级联删除。
+- 这是显式停止旧受阻工作的操作，不是“修复并重试”，也不是清空图谱。安装修复不会自动替用户按下清理按钮。
+- 并发补充：已启用阶段租约的项目，清理只取得短时 `graph-v2.lock` 写窗口，不再要求整个自动续跑期间静止；它会跳过活动 attempt 与活动 stage lease，保留正在请求模型的任务和响应。只变更调度/归档状态，不变更图谱依赖版本。磁盘压缩仍要求项目静止；未启用阶段租约的旧路径仍保持原互斥保护。
+
+### 无损压缩的物理回收边界（2026-10-27）
+
+- 载荷压缩继续逐项验证解压与 SHA256，并在同一事务内核对事实/来源计数。结构检查仅覆盖实际涉及的 `sg2_jobs`、`sg2_job_parts`、`sg_payload_archive`、`sg2_checkpoints`；返回 `integrity_scope`，不冒充全库完整性审计，不扫描无关原文/FTS 数据。
+- 仅当空闲页达到 **8 MiB 与逻辑库大小 1% 中的较大值**时执行整库 `VACUUM`。更少的页面留作后续写入复用，仍执行载荷压缩、去重与可用 WAL 回收。避免为几十 KB 空闲页重写数 GB 数据。
+- 先用 PASSIVE checkpoint，不等待活动读事务；确需重写时，SQLite 进度处理器使用本次维护开始后 240 秒的截止时间。读事务占用或回收被中断时，保留已提交压缩并明确返回延后回收提示；不把磁盘满/数据库损坏等其他错误隐藏成成功。静止锁、事实边界和单 token 分类策略不变。
+
+### 图谱生命周期与旧身份兼容（2026-10-28）
+
+- 独立图谱压缩已退役：删除数量触发模块、历史候选扫描与分类、归并/撤销命令和 App 面板。旧的 graph_preview / graph_assess / graph_compact / graph_undo 请求在 Python 和 Rust 原生契约层均被拒绝，所有原生读取/设置操作保持零模型调用。
+- 旧 auto_compaction 配置不再继承或生效；抽取成功后不再调用维护，不改变抽取指纹或重抽旧 chat。图谱初始化只移除旧 sg_auto_compaction_insert 触发器，不再维护增长计数。
+- graph_compaction.py 仅保留历史身份的兼容读取与 schema：sg_graph_redirects、已有回执和原始节点/证据/修订不被移除。检索、旧 ID 展开、分页、关系和修订投影沿用统一身份。无新候选扫描、判别、归并或撤销写入。
+- 原 chat 确认永久删除后，既有级联流程解除受影响的旧身份映射，再按原证据归属清理和重选来源。其他 chat 的证据仍在则保留对应知识；失去证据的修订效果重新计算。归档不等于删除。
+- 存储维护保持显式、零模型、无损，只处理载荷和空闲页。删除后空闲页可供新写入复用，不承诺数据库文件立即缩小；不为此次退役执行 VACUUM。
+- docs/graph-compaction.json 与此前凝练证据是历史记录，不代表仍启用独立压缩。当前约定与验收见 docs/condensation-mainline.json。
+
+### Current-source delta vs. historical background
+
+After validation, the original extraction stays in the job receipt. Publication
+projects it onto current input: an object or relation whose evidence is entirely
+`context_only` is not a new graph event and does not trigger identity/revision
+judgments, publication, or routine pending records. A current fact may still cite
+old context for scope and conditions. A current relation may reference a uniquely
+resolved offered old object without rewriting that object; ambiguous references
+remain pending. Atomic lane keys alone do not establish same-value equivalence.
+Publication also fences stale checkpoints. This is not historical deletion:
+background-only provenance does not prove two existing facts are equivalent.
+See `docs/context-delta-fix.json` for the retained write-side behavior.
+
+### Source-Backed Transcript Storage
+
+Every project's next writable Store initialization now enables source-backed
+future imports, contentless search writes and lossless terminal receipt archival.
+This is a runtime default, independent of project age or copied templates; it
+does not require changing each project's config. New empty databases use only
+the unified search index. Existing databases keep mixed reads until their legacy
+index is explicitly migrated. Read-only MCP/UI access never upgrades a database.
+Activation is atomic, idempotent and does not read historical source files or
+perform full-history migration inside Hooks.
+
+`source-externalize --apply` migrates a bounded historical batch (default 256
+entries / 16 MiB). Preview is
+read-only. Continue with the returned numeric `--after` cursor. Missing, changed
+or inaccessible originals retain their inline copy. Legacy locators recover from
+the nearest known predecessor within the same byte budget; Hooks never migrate
+historical data. Entry IDs, knowledge, revisions and source-deletion rules do not
+change. No provider is called.
+
+Externalized entries retain only metadata, hashes, sizes and a 32-character
+preview. Search uses contentless-delete FTS5 (SQLite >= 3.43); exact text is read
+by verified byte location from Codex. Mixed old/new indexes remain searchable.
+Unavailable sources are explicit gaps, not deletion signals. Existing critical
+retained snapshots remain immutable and usable; sanitized snapshots cannot
+substitute for a different exact source hash. This mode is not an independent
+chat backup. Keep the Codex transcript store available.
+
+Default activation raises the project schema to v4, so old immutable runtimes fail closed
+instead of treating externalized text as empty. Install the new runtime before
+migrating, then reconnect existing MCP clients. Search IDs are explicit stable
+keys independent of entry rowids, including across VACUUM. Physical migration is not
+automatically reversible by an old app; restoring inline bodies requires the
+verified originals and a compatible migration, not merely downgrading the flag.
+
+`receipt-maintain --apply --cleared` losslessly archives dismissed terminal Hook
+receipts, verifies exact decompression and hashes before unlinking duplicate JSON
+files, and keeps them hidden in status. New terminal receipts are automatically
+archived after writable Store initialization, without manual opt-in. Active and
+pending runs remain hot. No graph facts or original Codex files are removed.
+Freed SQLite pages are reusable immediately; shrinking the physical file is a
+separate explicit reclamation step, not a per-Hook full-database rewrite.
+
+### Legacy Storage Retirement
+
+`legacy-optimize --phase search --apply` moves a bounded batch of legacy entry
+and record search tokens into the same contentless FTS5 index. Stable
+`sg_search_keys` map search IDs independently of text storage: unavailable-source
+entries keep their inline text and remain searchable. The old `docs` index stays
+readable during migration; future writes already use only the new index. Once
+empty, its residual postings are rebuilt empty and legacy reads stop. Memory recall already uses its own
+canonical index, so obsolete `docs` memory duplicates are not copied. The empty
+compatibility table remains for non-migrated projects and legacy cleanup SQL.
+
+`legacy-optimize --phase events --apply` losslessly compresses bounded raw-event
+batches into `sg_raw_archive`, preserving session/line keys, exact original bytes,
+lengths and hashes. Metadata recovery and evidence snapshots read either format;
+permanent-chat deletion removes archived events and unified search keys as well.
+Missing source files are never inferred deletions. Corruption fails closed and
+a failed batch rolls back; history, graph semantics and provider settings do not
+change. Both commands accept `--limit`, `--max-bytes` and numeric `--after` cursors,
+have read-only preview defaults, and never call a model. Do not VACUUM between
+cursor batches; reclaim physical space once the migration completes. Schema v4
+fences old runtimes; install the matching app before explicit project migration.
+
+### 写入侧凝练（2026-10-28）
+
+- `pipeline_settings.py` 从共享 `template.json` 继承图谱、凝练、单 token 判别、有限恢复、有效修订、阶段/资源控制及 durable ingress；新项目模板保留完整可移植选项，已有项目加载时合并，不逐项目改文件。项目明确关闭及预算优先；关闭依赖项不会意外继承失效的下游策略。模型/端点仍由全局 provider 统一决定，不跨项目复制旧模型路由 pin、项目路径或凭据。
+- 有效配置 `graph_v2.condensation.enabled=true` 启用新版写入侧规则，全局模板现已默认启用。新响应必须包含 `retention=knowledge|record_only`，在原有结构化抽取中完成分类，不增加每条消息的分类请求。完整输出仍留在 job 回执；过程记录、轮询和重复播报不发布为知识对象。独特数值、条件、失败、决策仍应提取；原文始终可查。未知旧回执不强制全历史重抽。原有 SQLite B-tree/FTS5 索引和增量游标继续使用，不新建正文副本或读时模型。
+- 不再只依赖批次 top12 和标题相似：每个入图对象另按原始证据索引、内容词索引召回最多4个相关规范候选。历史自由文本先通过数值/版本/条件和保守内容覆盖门槛，再比较完整描述；门槛只是拒绝条件，不是等价证明。相关候选超限且已检查者均不同，转 pending，不能据此认定“这是新知识”。索引召回本身仍有边界，不能宣称穷尽所有语义近义；改写较大的内容可能保守保留。
+- 原子断言 lane 和纠错账本沿用既有规则：不同值、条件、观测/权威或后续推翻，不因标题接近而合并。背景投影与 stale-checkpoint 提交护栏继续生效。
+- 单 token 身份判别仅服务新输入的既有入图流程，不再扫描历史节点寻找归并。数值、条件、权威或独立观测不一致时不得合并；不确定项保留待判断。此处的写入侧凝练不等同于已取消的独立图谱压缩。
+
+
+### 图谱层次投影（tiering-v3）
+
+`tier-graph` 是只读默认的确定性审计，`--apply` 只物化 `sg_node_tiers` 影子映射，不修改 `work_memory`、`sg2_nodes`、证据、关系或修订。它不会删除、合并或压缩节点，也不调用模型。
+
+- `canonical` 是可复用知识层，不是“唯一默认展示节点”或已完成的图谱凝练结果。默认视图与知识层将来仍可分离。
+- `canonical` 可收：完整且可靠锚定的原子断言；有终态量化结果和明确适用范围的诊断/审计结论；带具体控制的预注册协议；明确的 schema/接口/配置规格；部署验收；稳定报告、模型、数据集等知识对象。
+- `Execution`/`Activity` 仍以过程记录为默认。运行、进度、单次探针、状态播报和传输回执归入 `episode`；只有终态且有 standing scope/结论，或带具体约束的协议，才进入 `canonical`。
+- 标题优先表达对象用途。正文中的上传、哈希或测试数字不会单独把稳定知识改成回执；只有空标题或裸文件引用才回退读取正文。
+- 单次“8/8 通过”、误差为 0、退出码或 run id 本身不构成知识；失败现场、隔离修复和事故叙事也没有自动提升通道。
+- 只有“通过/失败/存活 + N/M”这类**计数结论**才算单次观测。正文里当作指标引用的裸分数（如 `transition 199/200 errors`、`rmse ~0.003–0.017`）不再因此被降级。
+- 留出集必须与它自己的计数结果相邻才算评估结论；只提一句“留出集未使用”“仍看留出种子的结果”不提升。
+- 正文自述“重建中/重训中/复算中”的 active 记录，在其生产者跑完前是移动中的数字，留在 `episode`；一旦同一条正文已给出结论、边界或约束，则保留在 `canonical`。
+- “最大差值为 0”“平均速度仍低于所请求的 0.3”这类对照目标的量化偏差属于诊断结果，可进入 `canonical`。
+- `episode`：执行/活动过程、上下文未定、无稳定身份、或早于对象图谱但仍保留的历史事项。用于过程记录层。
+- `record_only`：抽取时明确标为仅回执的内容。
+- 不同 subject/predicate/value 生成不同 identity key；冲突继续由 revision ledger 表达，不能借 tier 合并。
+- 原文锚定分两种事实报告：`anchor_scope=full_source|quote_only|none` 与 `full_source_recoverable`。只有 `full_source` 才表示完整原文可恢复；引用片段存在不等于全文可恢复。
+- 时间不确定、原子断言缺失或原文锚定失败时保守归入 `episode`，不伪造 `canonical`。
+- 三条写入口都必须在同一事务内投影 tier：图谱发布（`graph_v2` 的 `tiering.project`）、显式记忆写入（`session_remember` / `memory.remember`）、以及全量回填（`tier-graph --apply`）。漏掉任意一条都会让新节点没有映射行，UI 立刻显示“层次尚未全量回填”，且该节点在两个层次视图中都不可见。
+
+CLI：
+
+```bash
+sessiongraph --config <project>/.sessiongraph/config.json tier-graph
+sessiongraph --config <project>/.sessiongraph/config.json tier-graph --apply --limit 2000
+```
+
+`work_map` 的 `view=knowledge|episode|all` 只过滤展示；MCP recall/search/expand 仍检索完整历史。`--apply --limit` 使用 `next_after` 作为下一批 `--after` 游标；回填幂等。Project lock 串行化写入；不要全库连写或 `VACUUM`。

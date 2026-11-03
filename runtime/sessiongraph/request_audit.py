@@ -24,11 +24,31 @@ def scrub(value, key=""):
     return value
 
 
+def job_live(config, job_id):
+    """Fail closed only after a definite absence; unavailable DB keeps diagnostics."""
+    if not isinstance(job_id, str) or not job_id:
+        return None
+    try:
+        db = sqlite3.connect(Path(config["database"]).resolve().as_uri() + "?mode=ro", uri=True, timeout=1)
+        try:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='sg2_jobs'").fetchone():
+                return None
+            row = db.execute("SELECT 1 FROM sg2_jobs WHERE id=? AND project=?",
+                             (job_id, config["project_id"])).fetchone()
+            return bool(row)
+        finally:
+            db.close()
+    except (sqlite3.Error, KeyError, OSError):
+        return None
+
+
 def prune_diagnostics(folder, config):
-    """Keep unresolved jobs replayable; apply retention after they finish."""
+    """Keep unresolved and surviving jobs replayable; apply retention after finish."""
     db = None
     try:
         db = sqlite3.connect(Path(config["database"]).resolve().as_uri() + "?mode=ro", uri=True)
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='sg2_jobs'").fetchone():
+            return
         pending = {row[0] for row in db.execute(
             "SELECT id FROM sg2_jobs WHERE project=? AND state NOT IN ('complete','superseded')",
             (config["project_id"],))}
@@ -65,10 +85,8 @@ def _read_response(extractor, req, handlers, ticket):
     from urllib import request
     from .auto_update import _atomic
     folder = Path(extractor.config["database"]).parent / "request-audit"
-    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
-    prune_diagnostics(folder, extractor.config)
     identity = ticket['id'] if ticket else uuid.uuid4().hex
-    path = folder / ("request-" + identity + ".json")
+    job_id = CURRENT.get().get('job_id')
     req.add_header("X-SessionGraph-Request-Id", identity)
     body = json.loads(req.data)
     safe = scrub(body,extractor.key)
@@ -79,10 +97,18 @@ def _read_response(extractor, req, handlers, ticket):
                   request=safe if len(serial)<=256*1024 else None,
                   request_omitted=len(serial)>256*1024,
                   sanitized_request_sha256=hashlib.sha256(serial).hexdigest())
-    _atomic(path,record)
+    live = job_live(extractor.config, job_id) is not False
+    if live:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        prune_diagnostics(folder, extractor.config)
+    path = folder / ("request-" + identity + ".json")
     trace = dict(id=identity, path=str(path), model=extractor.model, **CURRENT.get(),
                  max_output_tokens=extractor.max_output, request_bytes=len(req.data))
-    extractor.traces.append(trace)
+    if live:
+        # Keep a bounded "started" receipt even if the process exits before
+        # transport returns. The final record replaces it atomically below.
+        _atomic(path, scrub(record, extractor.key))
+        extractor.traces.append(trace)
     from .recovery_policy import settings as recovery_settings
     timed = recovery_settings(extractor.config) is not None
     started = time.monotonic() if timed else None
@@ -169,6 +195,8 @@ def _read_response(extractor, req, handlers, ticket):
                       error_type=type(exc).__name__, http_status=getattr(exc,"code",None) if not isinstance(exc, Failure) else None,
                       failure=describe(exc if isinstance(exc, Failure) else transport(exc,getattr(extractor,"provider_name","deepseek")),CURRENT.get().get("stage","")))
         if isinstance(exc,HTTPError):
+            if ticket:
+                ticket['http_response'] = True
             try:
                 data=exc.read(65537)
                 record["error_body_truncated"] = len(data)>65536
@@ -177,6 +205,9 @@ def _read_response(extractor, req, handlers, ticket):
                 record["provider_request_id"]=headers.get("x-request-id") or headers.get("request-id")
                 try:
                     record["error_body"] = scrub(json.loads(data[:65536]),extractor.key)
+                    # Preserve bounded structured error evidence for the adapter;
+                    # the HTTPError body has now been consumed by diagnostics.
+                    exc.provider_error_body = record["error_body"]
                 except (ValueError,UnicodeError):
                     # Proxy/CDN HTTP failures often have HTML/plain-text bodies.
                     # Preserve a bounded, redacted diagnostic instead of discarding it.
@@ -207,7 +238,22 @@ def _read_response(extractor, req, handlers, ticket):
                 record["body_ms"] = round((finished_at-headers_at)*1000, 2)
             trace.update({k:record[k] for k in ("transport_phase", "headers_ms", "body_ms") if k in record})
         trace["elapsed_ms"] = record["elapsed_ms"]
-        _atomic(path,scrub(record,extractor.key))
+        if live:
+            # Re-check after transport so a deletion that raced this request
+            # also removes the initial "started" record created above.
+            if job_live(extractor.config, job_id) is not False:
+                _atomic(path,scrub(record,extractor.key))
+            else:
+                path.unlink(missing_ok=True)
+
+
+def _audit_job_live(extractor, record, job_id):
+    """Return False only for a definite absent job; None keeps diagnostics."""
+    config = getattr(extractor, "audit_config", None) or getattr(extractor, "config", None)
+    if not isinstance(config, dict):
+        return None
+    selected = job_id if job_id is not None else record.get("job_id")
+    return job_live(config, selected)
 
 
 def validation_result(extractor, failure=None, *, job_id=None, part=None):
@@ -222,6 +268,11 @@ def validation_result(extractor, failure=None, *, job_id=None, part=None):
     if job_id is not None and record.get("job_id") != job_id:return
     if part is not None and record.get("part") != part:return
     if record.get("state") == "transport_failed":return
+    # A chat can be deleted between transport completion and this validation
+    # write. Do not resurrect its audit file; an unavailable DB stays fail-open.
+    if _audit_job_live(extractor, record, job_id) is False:
+        path.unlink(missing_ok=True)
+        return
     record["state"]="validation_failed" if failure else "validated"
     if failure:record["failure"]=failure
     _atomic(path,scrub(record,getattr(extractor,"key","")))

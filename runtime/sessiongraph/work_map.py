@@ -45,28 +45,44 @@ def _id(kind, value):
     return "ref_" + hashlib.sha256((kind + ":" + value).encode()).hexdigest()[:24]
 
 
-def work_map(store, chat="", limit=1000, query="", offset=0):
+def work_map(store, chat="", limit=1000, query="", offset=0, view="all"):
     if not 1 <= limit <= 1000:
         raise ValueError("limit must be between 1 and 1000")
     if type(offset) is not int or not 0 <= offset <= 50_000_000:
         raise ValueError("invalid offset")
     if not isinstance(query, str) or len(query) > 1000 or not isinstance(chat, str) or len(chat) > 256:
         raise ValueError("invalid search")
+    if view not in {"all", "knowledge", "episode"}:
+        raise ValueError("invalid view")
     from .storage import search_filter, exists
-    where = "m.status IN (?,?,?,?,?) AND m.project_id=?"
+    from . import tiering
+    from .graph_compaction import visible, expression
+    where = "m.status IN (?,?,?,?,?) AND m.project_id=? AND "+visible(store,"m.id")
     args = [*LIVE, store.config["project_id"]]
+    if view != "all" and tiering.available(store):
+        # Canonical selects the reusable-knowledge surface; it is not a claim
+        # that the projection is small. Episode remains fully searchable and
+        # expandable and is never presented as deleted.
+        tiers = "('canonical')" if view == "knowledge" else "('episode','record_only')"
+        where += f" AND EXISTS(SELECT 1 FROM sg_node_tiers v WHERE v.node=m.id AND v.project=? AND v.tier IN {tiers})"
+        args.append(store.config["project_id"])
     total = store.db.execute(f"SELECT count(*) FROM work_memory m WHERE {where}", args).fetchone()[0]
     if chat:
         where += " AND (m.chat_id=?"
         args.append(chat)
         if exists(store.db, "sg2_evidence"):
-            where += " OR EXISTS(SELECT 1 FROM sg2_evidence x WHERE x.node=m.id AND x.chat=?)"
+            where += f" OR EXISTS(SELECT 1 FROM sg2_evidence x WHERE {expression(store,'x.node')}=m.id AND x.chat=?)"
             args.append(chat)
         where += ")"
     if query.strip():
         if not exists(store.db, "memory_search"):
             raise ValueError("memory search index needs writable runtime initialization")
         predicate, search_args = search_filter(store.db,query,'m')
+        from .graph_compaction import available
+        if available(store):
+            alias_predicate, alias_args = search_filter(store.db,query,'alias_memory')
+            predicate = "("+predicate+" OR EXISTS(SELECT 1 FROM sg_graph_redirects redirect JOIN work_memory alias_memory ON alias_memory.id=redirect.alias WHERE redirect.canonical=m.id AND "+alias_predicate+"))"
+            search_args=[*search_args,*alias_args]
         where += " AND " + predicate
         args.extend(search_args)
     matched = store.db.execute(f"SELECT count(*) FROM work_memory m WHERE {where}", args).fetchone()[0]
@@ -79,13 +95,16 @@ def work_map(store, chat="", limit=1000, query="", offset=0):
                 [*args, limit, offset],
             )
         ]
+    chat_sql = ("SELECT chat_id,count(*) AS count FROM work_memory "
+                "WHERE project_id=? AND status IN (?,?,?,?,?)")
+    chat_args = [store.config["project_id"], *LIVE]
+    if view != "all" and tiering.available(store):
+        tiers = "('canonical')" if view == "knowledge" else "('episode','record_only')"
+        chat_sql += f" AND EXISTS(SELECT 1 FROM sg_node_tiers v WHERE v.node=work_memory.id AND v.project=? AND v.tier IN {tiers})"
+        chat_args.append(store.config["project_id"])
     chats = [
-        dict(r)
-        for r in store.db.execute(
-            "SELECT chat_id,count(*) AS count FROM work_memory WHERE project_id=? "
-            "AND status IN (?,?,?,?,?) GROUP BY chat_id ORDER BY chat_id",
-            [store.config["project_id"], *LIVE],
-        )
+        dict(r) for r in store.db.execute(
+            chat_sql + " GROUP BY chat_id ORDER BY chat_id", chat_args)
     ]
     root = store.config["roots"][0]
     nodes, edges, references = {}, [], defaultdict(list)
@@ -174,26 +193,52 @@ def work_map(store, chat="", limit=1000, query="", offset=0):
         for row in store.db.execute(f"SELECT id,type FROM sg2_nodes WHERE project=? AND id IN ({marks})", (store.config["project_id"], *ids)):
             if row["id"] in nodes:
                 nodes[row["id"]]["object_type"] = row["type"]
-        for row in store.db.execute(f"SELECT DISTINCT node,chat FROM sg2_evidence WHERE node IN ({marks})", ids):
+        for row in store.db.execute(f"SELECT DISTINCT {expression(store,'node')} node,chat FROM sg2_evidence WHERE {expression(store,'node')} IN ({marks})", ids):
             if row["node"] in nodes:
                 nodes[row["node"]].setdefault("chat_ids", []).append(row["chat"])
         chat_counts = Counter()
         for node in nodes.values():
             if node["type"] == "memory":
                 chat_counts.update(node.get("chat_ids") or [node["chat_id"]])
-        # Keep project-wide chat choices across result pages.
-        chats = [dict(r) for r in store.db.execute("SELECT chat_id,count(DISTINCT id) count FROM (SELECT id,chat_id FROM work_memory WHERE project_id=? UNION SELECT m.id,x.chat FROM work_memory m JOIN sg2_evidence x ON x.node=m.id WHERE m.project_id=?) WHERE chat_id IS NOT NULL GROUP BY chat_id ORDER BY chat_id", (store.config["project_id"],store.config["project_id"]))]
+        # Keep project-wide chat choices across result pages, scoped by the
+        # selected knowledge view when tier projection is available.
+        tier_join = ""
+        tier_where = ""
+        tier_args = []
+        if view != "all" and tiering.available(store):
+            tiers = "('canonical')" if view == "knowledge" else "('episode','record_only')"
+            tier_join = (
+                f" JOIN sg_node_tiers v ON v.node={expression(store,'m.id')} "
+                f"AND v.tier IN {tiers}"
+            )
+            tier_where = " AND v.project=?"
+            tier_args = [store.config["project_id"]]
+        chat_sql = (
+            f"SELECT chat_id,count(DISTINCT id) count FROM ("
+            f"SELECT {expression(store,'id')} id,chat_id FROM work_memory "
+            f"WHERE project_id=? UNION "
+            f"SELECT {expression(store,'m.id')} id,x.chat FROM work_memory m "
+            f"JOIN sg2_evidence x ON x.node=m.id{tier_join} "
+            f"WHERE m.project_id=?{tier_where}"
+            f") WHERE chat_id IS NOT NULL GROUP BY chat_id ORDER BY chat_id"
+        )
+        chats = [dict(r) for r in store.db.execute(
+            chat_sql,
+            (store.config["project_id"], store.config["project_id"], *tier_args),
+        )]
     with phase("map.diagnostics"):
         graph_diagnostics = diagnostics(store)
     return dict(
         graph_v2=graph_diagnostics,
+        view=view,
+        tiering=tiering.summary(store),
         revision=revision(store.db, store.config["project_id"]),
         nodes=list(nodes.values()),
         edges=edges,
         chats=chats,
         model_calls=0,
         truncated=offset + len(rows) < matched,
-        page=dict(offset=offset, limit=limit, matched=matched, next_offset=offset+len(rows) if offset+len(rows)<matched else None, query=query, chat=chat),
+        page=dict(offset=offset, limit=limit, matched=matched, next_offset=offset+len(rows) if offset+len(rows)<matched else None, query=query, chat=chat, view=view),
         stats=dict(
             memories=len(rows),
             total_memories=total,

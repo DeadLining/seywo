@@ -5,6 +5,7 @@ known process noise only; unknown output retains its entire source range. Ledger
 completion shares the graph transaction. Old cursor remains a contiguous frontier.
 """
 
+from .source_text import hydrate
 import json
 import re
 import shlex
@@ -136,6 +137,7 @@ def _text_projection(store, row):
             "SELECT * FROM entries WHERE session_id=? AND call_id=? AND kind='tool_call' AND line<? ORDER BY line DESC LIMIT 1",
             (row["session_id"], row["call_id"], row["line"]),
         ).fetchone()
+        call = hydrate(store, call)
         if call:
             call_text = call["text"]
             tool = (
@@ -244,7 +246,7 @@ def render(row, desc):
 def units(store, segment, through_rowid=None):
     # Lightweight boundary query; do not load historical tool bodies to find a turn.
     rows = store.db.execute(
-        "SELECT line,role,kind,substr(text,1,32) AS preview FROM entries WHERE session_id=? AND (? IS NULL OR rowid<=?) ORDER BY line",
+        "SELECT line,role,kind,coalesce((SELECT preview FROM sg_external_entries WHERE entry_id=entries.id),substr(text,1,32)) AS preview FROM entries WHERE session_id=? AND (? IS NULL OR rowid<=?) ORDER BY line",
         (segment, through_rowid, through_rowid),
     )
     groups = []
@@ -269,17 +271,25 @@ def pending_ranges(store, row, line, start, *, include_claims=True):
     beginning = start if row["line"] == line else 0
     if row["line"] < line:
         return []
+    source_hash = digest(row['text'])
+    chars = len(row['text'])
+    if row['text'] == '':
+        saved = store.db.execute('''SELECT x.chars,l.text_hash FROM sg_external_entries x
+            JOIN sg_source_locations l ON l.entry_id=x.entry_id WHERE x.entry_id=?''',
+            (row['id'],)).fetchone()
+        if saved:
+            chars, source_hash = saved
     done = [
         list(r)
         for r in store.db.execute(
             "SELECT start,end FROM sg_input_coverage WHERE entry_id=? AND revision=? AND source_hash=?",
-            (row["id"], VERSION, digest(row["text"])),
+            (row["id"], VERSION, source_hash),
         )
     ]
     if include_claims and store.db.execute("SELECT 1 FROM sqlite_master WHERE name='sg2_claims'").fetchone():
         done.extend(list(r) for r in store.db.execute(
-            "SELECT start,end FROM sg2_claims WHERE entry_id=? AND source_hash=?",(row["id"],digest(row["text"]))))
-    return subtract([[beginning, len(row["text"])]], done)
+            "SELECT start,end FROM sg2_claims WHERE entry_id=? AND source_hash=?",(row["id"],source_hash)))
+    return subtract([[beginning, chars]], done)
 
 
 def plan(store, segment, line, start, max_chars, through_rowid=None, *, probe=False):
@@ -304,6 +314,7 @@ def plan(store, segment, line, start, max_chars, through_rowid=None, *, probe=Fa
             remaining = pending_ranges(store, row, line, start)
             if not remaining:
                 continue
+            row = hydrate(store, row)
             spans, reason = projection(store, row)
             selected = []
             for a, b in spans:
@@ -348,7 +359,7 @@ def plan(store, segment, line, start, max_chars, through_rowid=None, *, probe=Fa
                     "SELECT * FROM entries WHERE session_id=? AND line<? AND kind='message' ORDER BY line DESC LIMIT 4",
                     (segment, lo),
                 ):
-                    r = dict(raw)
+                    r = hydrate(store, raw)
                     if r["id"] in seen:
                         continue
                     spans, _ = projection(store, r)

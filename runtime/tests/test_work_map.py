@@ -18,7 +18,8 @@ def setup_map(tmp_path):
             root / f"{chat}-{store.db.total_changes}.jsonl", root, chat, [("user", text)]
         )
         store.ingest(path)
-        eid = store.db.execute("SELECT id FROM entries WHERE text=?", (text,)).fetchone()[0]
+        eid = store.db.execute("SELECT e.id FROM entries e JOIN sessions s ON s.id=e.session_id "
+                               "WHERE s.path=?", (str(path),)).fetchone()[0]
         return remember(
             store,
             kind="finding",

@@ -245,3 +245,72 @@ def test_atomic_wire_rejects_arrays_and_decodes_null_without_guessing_a_split():
         resolve_evidence_spans(wire, anchors, atomic_refs=True)
     wire['nodes'][0]['assertion'] = None
     assert resolve_evidence_spans(wire, anchors, atomic_refs=True)['nodes'][0]['assertion'] == []
+
+
+def test_atomic_wrong_span_is_repaired_only_inside_existing_same_entry_citations():
+    from sessiongraph.graph_contract import resolve_evidence_spans
+    _, wire, _, anchors = atomic_wire()
+    wire['nodes'][0]['evidence'].append(dict(anchor_id='a2'))
+    # A real failure: text belongs to another already cited span, not the
+    # model-selected adjacent span. Keep the literal and all evidence unchanged.
+    wire['nodes'][0]['assertion']['predicate'] = dict(anchor_id='a2', text='success')
+    original = copy.deepcopy(wire)
+    decoded = resolve_evidence_spans(wire, anchors, atomic_refs=True)
+    assert decoded['nodes'][0]['assertion'][0]['predicate'] == 'success'
+    assert wire == original
+    assert decoded['nodes'][0]['evidence'] == [anchors['a1'], anchors['a2']]
+
+
+@pytest.mark.parametrize('case', ['foreign_entry', 'ambiguous', 'uncited', 'fabricated', 'gap'])
+def test_atomic_address_repair_cannot_expand_or_invent_evidence(case):
+    from sessiongraph.graph_contract import resolve_evidence_spans
+    _, wire, _, anchors = atomic_wire()
+    wire['nodes'][0]['evidence'].append(dict(anchor_id='a2'))
+    wire['nodes'][0]['assertion']['predicate'] = dict(anchor_id='a2', text='success')
+    if case == 'foreign_entry':
+        anchors['a2']['entry_id'] = 'other-speaker'
+    elif case == 'ambiguous':
+        anchors['a3'] = dict(anchors['a1'])
+        wire['nodes'][0]['evidence'].append(dict(anchor_id='a3'))
+    elif case == 'uncited':
+        wire['nodes'][0]['evidence'] = [dict(anchor_id='a2')]
+    elif case == 'fabricated':
+        wire['nodes'][0]['assertion']['predicate']['text'] = 'succeeded'
+    else:
+        wire['nodes'][0]['assertion']['predicate']['text'] = 'heldout\nrunB'
+    with pytest.raises(ValueError, match='invalid_atomic_source_ref'):
+        resolve_evidence_spans(wire, anchors, atomic_refs=True)
+
+
+def test_adapter_preserves_actual_atomic_error_instead_of_unknown_anchor():
+    from sessiongraph.extraction import _resolve_evidence_response, ProviderError
+    _, wire, _, anchors = atomic_wire()
+    wire['nodes'][0]['assertion']['predicate']['text'] = 'invented'
+    decoded = _resolve_evidence_response(wire, anchors, atomic_refs=True)
+    assert decoded['nodes'][0]['assertion'] == []
+    assert decoded['nodes'][0]['context_kind'] == 'uncertain'
+    # A literal mismatch can be isolated; an unknown atomic source cannot.
+    wire['nodes'][0]['assertion']['predicate']['anchor_id'] = 'unknown'
+    with pytest.raises(ProviderError, match='graph_evidence:invalid_atomic_source_ref'):
+        _resolve_evidence_response(wire, anchors, atomic_refs=True)
+
+
+def test_atomic_invalid_reference_gets_only_one_durable_feedback_retry(tmp_path):
+    from sessiongraph.extraction import ProviderError
+    from sessiongraph.graph_v2 import run_chat
+    from test_memories import make_store
+    import json
+    _, store, _ = make_store(tmp_path, [('user', 'runA completed with artifact B')])
+    class Invalid:
+        def __call__(self, batch, policy):
+            raise ProviderError('graph_evidence:invalid_atomic_source_ref', 'provider_evidence_reference')
+    first = run_chat(store, Invalid(), 'chat-1', step_budget=1)
+    desc = json.loads(store.db.execute('SELECT input_json FROM sg2_jobs').fetchone()[0])
+    assert desc['repair_attempts'] == 1
+    assert desc['validation_feedback'] == 'graph_evidence:invalid_atomic_source_ref'
+    assert first['failed'] == []
+    second = run_chat(store, Invalid(), 'chat-1', step_budget=1)
+    assert second['failure_codes'] == ['provider_evidence_reference']
+    assert store.db.execute('SELECT state FROM sg2_control').fetchone()[0] == 'blocked'
+    assert json.loads(store.db.execute('SELECT input_json FROM sg2_jobs').fetchone()[0])['repair_attempts'] == 1
+    store.close()

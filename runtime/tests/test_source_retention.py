@@ -1,4 +1,5 @@
 """Independent evidence retention; synthetic fixtures never call a provider."""
+from sessiongraph.source_text import hydrate
 import json
 import sqlite3
 import zlib
@@ -8,11 +9,12 @@ import pytest
 from sessiongraph import maintenance, source_locator, source_retention as retention, storage
 from sessiongraph.core import Store, digest
 from sessiongraph.failures import Failure
-from test_input_framework import fixture, msg
+from test_input_framework import fixture, legacy_fixture, msg
 
 
 def remember(store, eid=None, title='result'):
     row = store.db.execute('SELECT * FROM entries WHERE id=?', (eid,)).fetchone() if eid else store.db.execute('SELECT * FROM entries ORDER BY line LIMIT 1').fetchone()
+    row = hydrate(store, row)
     return store.remember(kind='finding', title=title, content='Retained evidence',
                           source_entry_id=row['id'], source_quote=row['text'][:100])
 
@@ -32,7 +34,7 @@ def capture(store, eid=None):
 
 
 def test_not_opted_in_does_not_create_schema_or_change_old_behavior(tmp_path):
-    s, p = fixture(tmp_path, [msg('source')])
+    s, p = legacy_fixture(tmp_path, [msg('source')])
     p.unlink()
     remember(s)
     assert not storage.exists(s.db, 'sg_retained_sources')
@@ -105,7 +107,7 @@ def test_unverifiable_sources_report_gap_without_fabrication(tmp_path, change):
 
 
 def test_legacy_raw_record_is_retained_without_external_file_or_scanning(tmp_path):
-    s, p = fixture(tmp_path, [msg('legacy source')])
+    s, p = legacy_fixture(tmp_path, [msg('legacy source')])
     row = s.db.execute('SELECT * FROM entries').fetchone()
     raw = p.read_text().splitlines()[1]
     with s.db:
@@ -154,7 +156,7 @@ def test_credentials_inside_serialized_tool_arguments_are_removed(tmp_path):
 
 
 def test_publication_and_retention_share_one_transaction(tmp_path):
-    s, p = fixture(tmp_path, [msg('first source'), msg('second source')])
+    s, p = legacy_fixture(tmp_path, [msg('first source'), msg('second source')])
     enable(s)
     row1, row2 = list(s.db.execute('SELECT id FROM entries ORDER BY line'))
     remember(s, row1[0])
@@ -171,7 +173,7 @@ def test_failed_memory_write_rolls_back_new_snapshot(tmp_path):
     s, _ = fixture(tmp_path, [msg('source')])
     enable(s)
     with pytest.raises(ValueError, match='unknown supersedes_id'):
-        row = s.db.execute('SELECT * FROM entries').fetchone()
+        row = hydrate(s, s.db.execute('SELECT * FROM entries').fetchone())
         s.remember(kind='finding', title='result', content='result', source_entry_id=row['id'],
                    source_quote=row['text'], supersedes_id='missing')
     assert not s.db.execute('SELECT * FROM sg_retained_sources').fetchall()
@@ -184,7 +186,7 @@ def test_graph_publication_retains_all_citations_and_relation_proofs(tmp_path):
     from test_memories import FakeExtractor
     s, p = fixture(tmp_path, [msg('Training A produces model B')])
     enable(s)
-    value = output([dict(r) for r in s.db.execute('SELECT * FROM entries')])
+    value = output([hydrate(s, r) for r in s.db.execute('SELECT * FROM entries')])
     result = run_chat(s, FakeExtractor([value]), 'input-chat', jev=Judge())
     assert not result['failed'], result
     assert result['saved'] and result['saved_relations']

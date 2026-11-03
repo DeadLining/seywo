@@ -7,6 +7,7 @@ import math
 from collections.abc import Container
 
 from .core import digest, tokens
+from .source_text import hydrate, available, external, unified
 
 # These characters alone carry little retrieval information; compounds are preserved.
 STOP_SINGLE = frozenset("的了是在呢吗和与及或就都也而把被这那我你他她它们")
@@ -43,6 +44,39 @@ def lexical(text: str, terms: list[str], present: Container[str] | None = None) 
     return matched / max(sum(weights.values()), 1) / norm
 
 
+def _source_candidates(store, expression, kind, chat_id, segment_id):
+    if not available(store):
+        return []
+    mapped = store.db.execute("SELECT 1 FROM sqlite_master WHERE name='sg_search_keys'").fetchone()
+    args = [expression]
+    if mapped:
+        keys = 'JOIN sg_search_keys k ON k.search_rowid=sg_source_search.rowid'
+        if kind == 'entry':
+            joins = keys + " JOIN entries e ON e.id=k.id JOIN session_chats c ON c.segment_id=e.session_id"
+            where = "k.kind='entry'"
+        else:
+            joins = keys + ' JOIN records r ON r.id=k.id JOIN jobs j ON j.id=r.job_id JOIN session_chats c ON c.segment_id=j.session_id'
+            where = "k.kind='record' AND j.policy_hash=?"
+            args.append(store.config['policy_hash'])
+        object_id = 'k.id'
+    elif kind == 'entry':
+        stable = any(r['name'] == 'search_rowid' for r in
+                     store.db.execute('PRAGMA table_info(sg_external_entries)'))
+        joins = ('JOIN sg_external_entries x ON x.search_rowid=sg_source_search.rowid '
+                 'JOIN entries e ON e.id=x.entry_id' if stable else
+                 'JOIN entries e ON e.rowid=sg_source_search.rowid '
+                 'JOIN sg_external_entries x ON x.entry_id=e.id')
+        joins += ' JOIN session_chats c ON c.segment_id=e.session_id'
+        where, object_id = '1', 'e.id'
+    else:
+        return []
+    args.extend([chat_id, chat_id, segment_id, segment_id])
+    return store.db.execute(f'''SELECT {object_id},NULL,bm25(sg_source_search) rank
+        FROM sg_source_search {joins} WHERE sg_source_search MATCH ? AND {where}
+        AND (? IS NULL OR c.chat_id=?) AND (? IS NULL OR c.segment_id=?)
+        ORDER BY rank,{object_id} LIMIT 201''', args).fetchall()
+
+
 def _candidates(store, terms, kind, chat_id=None, segment_id=None):
     if not terms:
         return [], False
@@ -65,11 +99,15 @@ def _candidates(store, terms, kind, chat_id=None, segment_id=None):
         if kind == "record":
             args.append(store.config["policy_hash"])
         args.extend([chat_id, chat_id, segment_id, segment_id])
-        rows = store.db.execute(
-            f"SELECT docs.id,docs.body FROM docs WHERE docs MATCH ? AND docs.type=? AND {scope} "
+        rows = [] if unified(store) else store.db.execute(
+            f"SELECT docs.id,docs.body,bm25(docs) rank FROM docs WHERE docs MATCH ? AND docs.type=? AND {scope} "
             "ORDER BY bm25(docs), docs.id LIMIT 201",
             args,
         ).fetchall()
+        external_rows = _source_candidates(store, expression, kind, chat_id, segment_id)
+        merged = {r[0]: r for r in rows}
+        merged.update({r[0]: r for r in external_rows})
+        rows = sorted(merged.values(), key=lambda r: (r[2], r[0]))
         if rows:
             return [(r[0], r[1]) for r in rows[:CAP]], len(rows) > CAP
     return [], False
@@ -77,7 +115,7 @@ def _candidates(store, terms, kind, chat_id=None, segment_id=None):
 
 def _entry(store, eid):
     row = store.db.execute("SELECT * FROM entries WHERE id=?", (eid,)).fetchone()
-    return dict(row) if row else None
+    return hydrate(store, row)
 
 
 def _snippet(text, terms, cap):
@@ -194,13 +232,21 @@ def search(
         else ([], False)
     )
     raw_cache = {}
+    unavailable = []
     if raw_ids:
         placeholders = ",".join("?" for _ in raw_ids)
         rows = store.db.execute(
             f"SELECT * FROM entries WHERE id IN ({placeholders})", [eid for eid, _ in raw_ids]
         )
-        raw_cache = {row["id"]: dict(row) for row in rows}
-    token_cache = {eid: IndexedTokens(body) for eid, body in raw_ids}
+        for row in rows:
+            try:
+                raw_cache[row['id']] = hydrate(store, row)
+            except ValueError as exc:
+                if not str(exc).startswith('source_'):
+                    raise
+                raw_cache[row['id']] = None
+                unavailable.append(dict(entry_id=row['id'], status=str(exc)))
+    token_cache = {eid: IndexedTokens(body) for eid, body in raw_ids if body is not None}
     chat_cache = {}
 
     def chat_id(sid):
@@ -212,13 +258,19 @@ def search(
 
     def entry(eid):
         if eid not in raw_cache:
-            raw_cache[eid] = _entry(store, eid)
+            try:
+                raw_cache[eid] = _entry(store, eid)
+            except ValueError as exc:
+                if not str(exc).startswith('source_'):
+                    raise
+                raw_cache[eid] = None
+                unavailable.append(dict(entry_id=eid, status=str(exc)))
         return raw_cache[eid]
 
     def raw_score(row):
         eid = row["id"]
         if eid not in token_cache:
-            found = store.db.execute(
+            found = None if unified(store) or external(store, eid) else store.db.execute(
                 "SELECT body FROM docs WHERE id=? AND type='entry'", (eid,)
             ).fetchone()
             token_cache[eid] = IndexedTokens(found[0]) if found else set(tokens(row["text"]))
@@ -231,6 +283,8 @@ def search(
 
     for eid, _body in raw_ids:
         row = entry(eid)
+        if row is None:
+            continue
         score = raw_score(row)
         if score:
             candidates.append(
@@ -354,6 +408,7 @@ def search(
         "hits": hits,
         "related": related,
         "model_calls": 0,
+        "unavailable_sources": unavailable,
         "scope": scope,
         "coverage": {
             k: status[k]

@@ -34,10 +34,24 @@ def discover_config(cwd):
 
 
 def main(args):
+    # A signed desktop bundle is a bootstrap, not a second runtime owner.
+    if ROOT.parts[-3:] == ('Contents', 'Resources', 'sessiongraph') and (STATE / 'runtime.json').is_file():
+        manifest = STATE / 'runtime.json'
+        if manifest.stat().st_size > 16384:
+            raise ValueError('runtime manifest too large')
+        saved = Path(json.loads(manifest.read_text()).get('source', ''))
+        if saved != ROOT:
+            if (not saved.is_absolute() or saved.parent != STATE / 'runtimes'
+                    or not (saved / 'entrypoint.py').is_file()):
+                raise ValueError('active runtime missing; refusing stale bundle fallback')
+            os.environ['SESSIONGRAPH_APP_SOURCE'] = str(ROOT)
+            sys.argv = [str(saved / 'entrypoint.py'), *args]
+            runpy.run_path(str(saved / 'entrypoint.py'), run_name='__main__')
+            return 0
     if args and args[0] == "native-settings":
         from sessiongraph.native_settings import main as settings_main
 
-        return settings_main(STATE, ROOT)
+        return settings_main(STATE, Path(os.environ.get('SESSIONGRAPH_APP_SOURCE', str(ROOT))))
     if args and args[0] == "native-read":
         from sessiongraph.native_bridge import main as read_main
 
@@ -48,6 +62,10 @@ def main(args):
     if args and args[0] == "update":
         sys.argv = ["sessiongraph.auto_update", *args[1:]]
         runpy.run_module("sessiongraph.auto_update", run_name="__main__")
+        return 0
+    if args and args[0] == "observe-deletions":
+        sys.argv = ["sessiongraph.deletion_observer", *args[1:]]
+        runpy.run_module("sessiongraph.deletion_observer", run_name="__main__")
         return 0
     if args and args[0] == "continue-pending":
         from sessiongraph.continuation import start
