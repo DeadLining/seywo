@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import runpy
 import sys
+from sessiongraph.platform_paths import runtime_home
 
 ROOT = Path(__file__).resolve().parent
 sys.dont_write_bytecode = True  # Never mutate signed application resources.
@@ -13,12 +14,7 @@ sys.path.insert(0, str(ROOT))
 os.environ["PYTHONPATH"] = str(ROOT)
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["SESSIONGRAPH_PYTHON"] = sys.executable
-STATE = Path(
-    os.environ.get(
-        "SESSIONGRAPH_RUNTIME_HOME",
-        str(Path.home() / "Library/Application Support/local-ai-gateway/sessiongraph"),
-    )
-)
+STATE = runtime_home()
 os.environ.setdefault("SESSIONGRAPH_WORKER_LOCK", str(STATE / "extract.lock"))
 os.environ.setdefault("SESSIONGRAPH_LAUNCHER", str(STATE / "bin/sessiongraph"))
 
@@ -56,6 +52,12 @@ def main(args):
         from sessiongraph.native_bridge import main as read_main
 
         return read_main(STATE / "projects.json")
+    if args and args[0] == "native-flow":
+        from sessiongraph.flow_generation import main as flow_main
+        return flow_main(STATE)
+    if args and args[0] == "native-flow-edit":
+        from sessiongraph.flow_generation import edit_main
+        return edit_main(STATE)
     if args and args[0] == "hook-event":
         runpy.run_path(str(ROOT / "hooks/sg_codex_hook.py"), run_name="__main__")
         return 0

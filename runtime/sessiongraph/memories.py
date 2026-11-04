@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from .source_text import hydrate
 
-import fcntl
+from . import file_lock as fcntl
 import json
 import os
 import re
@@ -432,10 +432,11 @@ def _save_state(path: Path, state: dict) -> None:
 
 def resolve_segment(store: Store, chat_id: str, transcript_path: str) -> str | None:
     """Map a hook-supplied transcript path to its stored segment id."""
+    from .project_binding import normalized_path
     if not isinstance(transcript_path, str) or not transcript_path:
         return None
     try:
-        resolved = str(Path(transcript_path).expanduser().resolve())
+        resolved = str(normalized_path(transcript_path))
     except (OSError, ValueError):
         return None
     row = store.db.execute(
@@ -453,7 +454,7 @@ def resolve_segment(store: Store, chat_id: str, transcript_path: str) -> str | N
     from .ingestion import _prefix
     old_path = Path(resolved)
     try:
-        roots = [Path(p).expanduser().resolve()
+        roots = [normalized_path(p)
                  for p in store.config.get("hook", {}).get("allowed_transcript_roots", [])]
         if old_path.exists() or not any(old_path.is_relative_to(r) for r in roots):
             return None
@@ -463,7 +464,7 @@ def resolve_segment(store: Store, chat_id: str, transcript_path: str) -> str | N
         if len(matches) != 1:
             return None
         source = matches[0]
-        canonical = Path(source["path"]).resolve()
+        canonical = normalized_path(source["path"])
         if not any(canonical.is_relative_to(r) for r in roots):
             return None
         with canonical.open("rb") as stream:

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from .source_text import hydrate
 
-import fcntl
+from . import file_lock as fcntl
 import hashlib
 import json
 import math

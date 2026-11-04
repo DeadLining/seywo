@@ -68,7 +68,7 @@ def _read(registry: Path, request: dict, trace):
     if not isinstance(request, dict) or set(request) - {"operation", "project", "id", "offset", "query", "chat", "materials", "view"}:
         raise ValueError("invalid request")
     op = request.get("operation")
-    if op not in {"projects", "work_map", "status", "memory", "evidence", "summary_candidates"}:
+    if op not in {"projects", "work_map", "status", "memory", "evidence", "summary_candidates", "project_chats", "flow_tasks"}:
         raise ValueError("unsupported operation")
     project, object_id, offset = request.get("project"), request.get("id"), request.get("offset")
     if op != "projects" and (
@@ -107,6 +107,21 @@ def _read(registry: Path, request: dict, trace):
     cfg = load_config(Path(selected["root"]) / ".sessiongraph/config.json")
     if selected["root"] not in cfg["roots"]:
         raise ValueError("project root mismatch")
+    if op == "project_chats":
+        from .project_chats import list_project_chats
+        chats = list_project_chats(cfg)
+        with sqlite3.connect(Path(cfg['database']).as_uri() + '?mode=ro', uri=True, timeout=1.5) as db:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_run_state'").fetchone():
+                cols = {row[1] for row in db.execute('PRAGMA table_info(flow_run_state)')}
+                filtered = 'filtered_assistant' if 'filtered_assistant' in cols else '0'
+                states = {row[0]: (row[1], bool(row[2])) for row in db.execute(
+                    f'SELECT chat_id,state,{filtered} FROM flow_run_state WHERE project_id=?', (cfg['project_id'],))}
+                for chat in chats:
+                    state, omitted = states.get(chat['id'], (None, False))
+                    if state in {'partial', 'complete'}:
+                        chat['flow_state'] = state
+                        chat['flow_filtered'] = omitted
+        return {"chats": chats, "model_calls": 0}
     with trace.phase("database.open"):
         store = Store(cfg, readonly=True)
     store.db.execute("PRAGMA busy_timeout=1500")
@@ -116,6 +131,16 @@ def _read(registry: Path, request: dict, trace):
         if identity is None or identity[0] != cfg["project_id"]:
             raise ValueError("database project mismatch")
         store.db.execute("BEGIN")
+        if op == "flow_tasks":
+            exists = store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_tasks'").fetchone()
+            if not exists:
+                return {'tasks': [], 'model_calls': 0}
+            tasks = []
+            for task in store.db.execute('SELECT id,title FROM flow_tasks WHERE project_id=? ORDER BY title', (cfg['project_id'],)):
+                nodes = [dict(row) for row in store.db.execute(
+                    'SELECT id,chat_id,kind,label,entry_id,quote,source_time,manual,edited,parent_entry_id,branch_quote FROM flow_nodes WHERE task_id=? AND hidden=0 ORDER BY source_time,source_rowid,id', (task['id'],))]
+                tasks.append({'id': task['id'], 'title': task['title'], 'nodes': nodes})
+            return {'tasks': tasks, 'model_calls': 0}
         if op == "summary_candidates":
             from .summary_materials import candidates
             with trace.phase("summary.candidates"):

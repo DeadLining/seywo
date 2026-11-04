@@ -4,9 +4,11 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import tomllib
 import uuid
 
@@ -67,10 +69,33 @@ def agents_guidance_installed(path):
         return False
 
 
-def _mcp(text, launcher, legacy, *, remove=False):
+def mcp_registration(state: Path, python: Path | None = None, source: Path | None = None):
+    if os.name == "nt":
+        if python is None or source is None:
+            runtime = json.loads((state / "runtime.json").read_text())
+            python, source = Path(runtime["python"]), Path(runtime["source"])
+        return {"command": str(python), "args": ["-X", "utf8", "-B", str(source / "entrypoint.py"), "mcp"],
+                "tool_timeout_sec": 60}
+    return {"command": str(state / "bin/sessiongraph"), "args": ["mcp"],
+            "tool_timeout_sec": 60}
+
+
+def hook_command(state: Path, python: Path | None = None, source: Path | None = None):
+    if os.name == "nt":
+        if python is None or source is None:
+            runtime = json.loads((state / "runtime.json").read_text())
+            python, source = Path(runtime["python"]), Path(runtime["source"])
+        return subprocess.list2cmdline([str(python), "-X", "utf8", "-B", str(source / "entrypoint.py"), "hook-event"])
+    return shlex.quote(str(state / "bin/sessiongraph")) + " hook-event"
+
+
+def _mcp(text, launcher, legacy, *, remove=False, registration=None, previous=None):
     data = tomllib.loads(text)
+    registration = registration or {"command": str(launcher), "args": ["mcp"], "tool_timeout_sec": 60}
     old = data.get("mcp_servers", {}).get("sessiongraph")
-    if old and old.get("command") not in {str(legacy / ".venv/bin/python"), str(launcher)}:
+    owned = old and any(old.get("command") == item["command"] and old.get("args") == item["args"]
+                        for item in (registration, previous) if item)
+    if old and not owned and old.get("command") != str(legacy / ".venv/bin/python"):
         raise ValueError("custom SessionGraph registration; migrate manually")
     # Preserve all unrelated TOML bytes, including provider credentials/comments.
     headers = list(re.finditer(r"(?m)^\[([^\n]+)\][ \t]*$", text))
@@ -83,17 +108,14 @@ def _mcp(text, launcher, legacy, *, remove=False):
         text = (
             text.rstrip()
             + "\n\n[mcp_servers.sessiongraph]\ncommand = "
-            + json.dumps(str(launcher))
-            + '\nargs = ["mcp"]\ntool_timeout_sec = 60\n'
+            + json.dumps(registration["command"])
+            + "\nargs = " + json.dumps(registration["args"])
+            + "\ntool_timeout_sec = 60\n"
         )
     expected = copy.deepcopy(data)
     expected.setdefault("mcp_servers", {}).pop("sessiongraph", None)
     if not remove:
-        expected["mcp_servers"]["sessiongraph"] = {
-            "command": str(launcher),
-            "args": ["mcp"],
-            "tool_timeout_sec": 60,
-        }
+        expected["mcp_servers"]["sessiongraph"] = registration
     parsed = tomllib.loads(text)
     if not expected["mcp_servers"]:
         expected.pop("mcp_servers")
@@ -116,11 +138,16 @@ def install(
     install_mcp: bool = True,
     source_root: Path | None = None,
 ):
-    source = source_root or app / "Contents/Resources/sessiongraph"
+    source = source_root or app / ("resources/sessiongraph" if os.name == "nt" else "Contents/Resources/sessiongraph")
     if not python.is_absolute() or not python.is_file() or not (source / "entrypoint.py").is_file():
-        raise ValueError("install Gateway bundle and Python >=3.11 with mcp first")
+        raise ValueError("install SessionGraph bundle and Python >=3.11 with mcp first")
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     with locked(state / "install.lock"):
+        previous_registration = None
+        previous_hook = None
+        if os.name == "nt" and (state / "runtime.json").is_file():
+            previous_registration = mcp_registration(state)
+            previous_hook = hook_command(state)
         settings_path = codex_home / "sessiongraph.json"
         prior = (
             json.loads(settings_path.read_text())
@@ -169,13 +196,13 @@ def install(
         if not any(p["root"] == root for p in projects["projects"]):
             projects["projects"].insert(0, {"root": root, "name": Path(root).name})
         launcher = state / "bin/sessiongraph"
-        command = shlex.quote(str(launcher)) + " hook-event"
+        command = hook_command(state, python, source)
         hooks_path = codex_home / "hooks.json"
         hooks = json.loads(hooks_path.read_text()) if hooks_path.exists() else {}
         for groups in hooks.get("hooks", {}).values():
             for group in groups:
                 for hook in group.get("hooks", []):
-                    if hook.get("command") == str(legacy / "hooks/sg_codex_hook.py"):
+                    if hook.get("command") in {str(legacy / "hooks/sg_codex_hook.py"), previous_hook}:
                         hook["command"] = command
         hooks = merge_hooks(hooks, command)
         settings = {
@@ -193,12 +220,10 @@ def install(
             state / "projects.json": json.dumps(projects, ensure_ascii=False, indent=2) + "\n",
             state / "template.json": json.dumps(template, ensure_ascii=False, indent=2) + "\n",
             settings_path: json.dumps(settings, ensure_ascii=False, indent=2) + "\n",
-            launcher: "#!/bin/sh\nexec "
-            + shlex.quote(str(python))
-            + " -B "
-            + shlex.quote(str(source / "entrypoint.py"))
-            + ' "$@"\n',
         }
+        if os.name != "nt":
+            planned[launcher] = ("#!/bin/sh\nexec " + shlex.quote(str(python)) + " -B "
+                                 + shlex.quote(str(source / "entrypoint.py")) + ' "$@"\n')
         if install_hooks:
             planned[hooks_path] = json.dumps(hooks, ensure_ascii=False, indent=2) + "\n"
         expected_originals = {}
@@ -209,12 +234,15 @@ def install(
             agents_content = merge_agents_guidance(agents_text)
             expected_originals[agents_path] = agents_original
             global_config = codex_home / "config.toml"
+            registration = mcp_registration(state, python, source)
             planned[global_config] = _mcp(
-                global_config.read_text() if global_config.exists() else "", launcher, legacy
+                global_config.read_text() if global_config.exists() else "", launcher, legacy,
+                registration=registration, previous=previous_registration,
             )
             local = project_config.parent.parent / ".codex/config.toml"
             if local.exists():
-                planned[local] = _mcp(local.read_text(), launcher, legacy, remove=True)
+                planned[local] = _mcp(local.read_text(), launcher, legacy, remove=True,
+                                      registration=registration, previous=previous_registration)
             planned[agents_path] = agents_content
         return apply_changes(state, planned, expected_originals)
 
@@ -255,7 +283,7 @@ def uninstall(*, codex_home: Path, state: Path, action: str):
             before = read(path)
             if before is not None:
                 raw = json.loads(before)
-                command = shlex.quote(str(launcher)) + " hook-event"
+                command = hook_command(state)
                 changed = False
                 for event in EVENTS:
                     groups = raw.get("hooks", {}).get(event, [])
@@ -294,14 +322,16 @@ def uninstall(*, codex_home: Path, state: Path, action: str):
                 text = before.decode("utf-8")
                 existing = tomllib.loads(text).get("mcp_servers", {}).get("sessiongraph")
                 if existing is not None:
+                    registration = mcp_registration(state)
                     if (
-                        existing.get("command") != str(launcher)
-                        or existing.get("args") != ["mcp"]
+                        existing.get("command") != registration["command"]
+                        or existing.get("args") != registration["args"]
                         or set(existing) - {"command", "args", "tool_timeout_sec", "enabled"}
                         or existing.get("tool_timeout_sec", 60) != 60
                     ):
                         raise ValueError("custom_mcp_registration")
-                    plan(path, before, _mcp(text, launcher, state / "unused-legacy", remove=True))
+                    plan(path, before, _mcp(text, launcher, state / "unused-legacy", remove=True,
+                                            registration=registration))
             path = codex_home / "AGENTS.md"
             before = read_agents(path)
             if before is not None:
@@ -340,7 +370,7 @@ def apply_changes(state: Path, planned: dict, expected_originals=None):
             atomic_write(path, content)
             changed.append(path)
         launcher = state / "bin/sessiongraph"
-        if launcher in planned:
+        if launcher in planned and os.name != "nt":
             launcher.chmod(0o700)
     except Exception:
         for path in reversed(changed):

@@ -14,6 +14,8 @@ use tokio::{
 };
 
 const MAX_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 static READ_SLOTS: Semaphore = Semaphore::const_new(4);
 static SETTINGS_SLOTS: Semaphore = Semaphore::const_new(1);
 
@@ -26,6 +28,8 @@ pub(crate) enum Operation {
     Memory,
     Evidence,
     SummaryCandidates,
+    ProjectChats,
+    FlowTasks,
 }
 
 fn request(
@@ -56,10 +60,16 @@ fn request(
 }
 
 fn runtime_home() -> Result<PathBuf, String> {
-    Ok(
-        PathBuf::from(std::env::var_os("HOME").ok_or("无法定位用户目录")?)
-            .join("Library/Application Support/local-ai-gateway/sessiongraph"),
-    )
+    #[cfg(windows)]
+    {
+        return Ok(PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("无法定位本地应用目录")?)
+            .join("SessionGraphData"));
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(PathBuf::from(std::env::var_os("HOME").ok_or("无法定位用户目录")?)
+            .join("Library/Application Support/local-ai-gateway/sessiongraph"))
+    }
 }
 
 // Private local credentials: atomic replacement, never Keychain or child-process IPC.
@@ -133,7 +143,15 @@ fn local_command_mode(source: &Path, home: &Path, mode: &str) -> Result<Command,
                 .map_err(|_| "运行配置无效")?;
         PathBuf::from(runtime["python"].as_str().ok_or("未配置 Python 运行时")?)
     } else if mode == "native-settings" {
-        [
+        #[cfg(windows)]
+        let candidates: Vec<PathBuf> = std::env::var_os("SESSIONGRAPH_PYTHON")
+            .map(PathBuf::from).into_iter()
+            .chain(std::env::var_os("PATH").into_iter()
+                .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+                .flat_map(|dir| [dir.join("python.exe"), dir.join("python3.exe")]))
+            .collect();
+        #[cfg(not(windows))]
+        let candidates: Vec<PathBuf> = [
             "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
             "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3",
             "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
@@ -143,7 +161,8 @@ fn local_command_mode(source: &Path, home: &Path, mode: &str) -> Result<Command,
         ]
         .iter()
         .map(PathBuf::from)
-        .find(|p| p.is_file())
+        .collect();
+        candidates.into_iter().find(|p| p.is_file())
         .ok_or("需要先安装 Python 3.11+ 和 mcp 依赖；不会自动下载软件")?
     } else {
         return Err("SessionGraph 尚未安装，请打开项目记忆设置安装".into());
@@ -152,12 +171,17 @@ fn local_command_mode(source: &Path, home: &Path, mode: &str) -> Result<Command,
         return Err("SessionGraph 运行时缺失；未启动任何服务".into());
     }
     let mut command = Command::new(python);
+    #[cfg(windows)]
+    command.args(["-X", "utf8"]).creation_flags(CREATE_NO_WINDOW);
     command
         .args(["-B"])
         .arg(source.join("entrypoint.py"))
         .arg(mode)
         .env("SESSIONGRAPH_RUNTIME_HOME", home)
         .env("PYTHONDONTWRITEBYTECODE", "1");
+    if let Ok(executable) = std::env::current_exe() {
+        command.env("SESSIONGRAPH_APP_EXE", executable);
+    }
     Ok(command)
 }
 
@@ -244,6 +268,55 @@ fn validate_settings(request: &SettingsRequest) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub(crate) async fn edit_task_node(app: tauri::AppHandle, project: String, task: String,
+    action: String, node: Option<String>, label: Option<String>, target: Option<String>) -> Result<Value, String> {
+    let valid_hash = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if !valid_hash(&project, 20) || !valid_hash(&task, 64) || !matches!(action.as_str(), "add" | "edit" | "delete" | "rename" | "merge" | "split")
+        || node.as_ref().is_some_and(|s| !valid_hash(s, 64))
+        || target.as_ref().is_some_and(|s| !valid_hash(s, 64))
+        || label.as_ref().is_some_and(|s| s.chars().count() > 200) {
+        return Err("任务或节点参数无效".into());
+    }
+    let _slot = SETTINGS_SLOTS.try_acquire().map_err(|_| "另一个操作正在处理中，请稍后重试")?;
+    let source = if cfg!(debug_assertions) { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../runtime") }
+        else { app.path().resource_dir().map_err(|_| "无法定位应用资源")?.join("sessiongraph") };
+    read_process(local_command_mode(&source, &runtime_home()?, "native-flow-edit")?,
+        json!({"project":project,"task":task,"action":action,"node":node.unwrap_or_default(),"label":label.unwrap_or_default(),"target":target.unwrap_or_default()}),
+        Duration::from_secs(30), 65536).await
+}
+
+#[tauri::command]
+pub(crate) async fn generate_task_flow(app: tauri::AppHandle, project: String, chat: String) -> Result<Value, String> {
+    if project.len() != 20 || !project.bytes().all(|b| b.is_ascii_hexdigit())
+        || chat.is_empty() || chat.len() > 128 || !chat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err("项目或聊天标识无效".into());
+    }
+    let _slot = SETTINGS_SLOTS.try_acquire().map_err(|_| "另一个操作正在处理中，请稍后重试")?;
+    let source = if cfg!(debug_assertions) {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../runtime")
+    } else {
+        app.path().resource_dir().map_err(|_| "无法定位应用资源")?.join("sessiongraph")
+    };
+    let mut command = local_command_mode(&source, &runtime_home()?, "native-flow")?;
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+    let mut child = command.spawn().map_err(|_| "无法启动任务生成")?;
+    let result = tokio::time::timeout(Duration::from_secs(600), async {
+        let mut input = child.stdin.take().ok_or("无法打开输入")?;
+        input.write_all(json!({"project": project, "chat": chat}).to_string().as_bytes()).await.map_err(|_| "无法提交任务")?;
+        drop(input);
+        let mut body = Vec::new();
+        child.stdout.take().ok_or("无法读取结果")?.take(65537).read_to_end(&mut body).await.map_err(|_| "无法读取结果")?;
+        if body.len() > 65536 { return Err("结果过大".to_string()); }
+        if !child.wait().await.map_err(|_| "等待生成失败")?.success() { return Err("生成进程异常退出".to_string()); }
+        let result: Value = serde_json::from_slice(&body).map_err(|_| "生成结果格式无效")?;
+        if !result.get("ok").is_some_and(Value::is_boolean) { return Err("生成结果格式无效".to_string()); }
+        Ok(result)
+    }).await.unwrap_or_else(|_| Err("生成超时，请稍后重试".to_string()));
+    if result.is_err() { let _ = child.kill().await; let _ = child.wait().await; }
+    result
+}
+
+#[tauri::command]
 pub(crate) async fn manage_session_graph(
     app: tauri::AppHandle,
     mut request: SettingsRequest,
@@ -253,7 +326,7 @@ pub(crate) async fn manage_session_graph(
         .try_acquire()
         .map_err(|_| "设置正在处理中，请稍后重试")?;
     let saving_jev = matches!(request.action, SettingsAction::SaveJev);
-    if saving_jev {
+    if saving_jev && !cfg!(windows) {
         let key = request.api_key.take().ok_or("缺少 Jev 凭据")?;
         let home = runtime_home()?;
         tokio::task::spawn_blocking(move || save_jev_key(&home, key.trim()))

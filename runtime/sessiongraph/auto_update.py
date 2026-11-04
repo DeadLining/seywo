@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
-import fcntl
+from . import file_lock as fcntl
 import hashlib
 import heapq
 import json
@@ -592,10 +592,11 @@ def main():
     )
     parser.add_argument("--transcript", default="")
     args = parser.parse_args()
-    try:
-        os.nice(10)  # Background extraction yields CPU to interactive work.
-    except OSError:
-        pass
+    if hasattr(os, 'nice'):
+        try:
+            os.nice(10)  # Background extraction yields CPU to interactive work.
+        except OSError:
+            pass
     run = run_update(args.config, args.chat, args.event, args.transcript)
     from .continuation import record
     record(args.config, run)

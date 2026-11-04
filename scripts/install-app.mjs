@@ -4,6 +4,15 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 const root=path.resolve(import.meta.dirname,'..')
+if(process.platform==='win32') {
+  const folder=path.join(root,'src-tauri/target/release/bundle/nsis')
+  const installers=fs.existsSync(folder)?fs.readdirSync(folder).filter(name=>name.endsWith('-setup.exe')):[]
+  if(installers.length!==1)throw new Error('Expected exactly one Windows NSIS installer; build and review it first')
+  const installer=path.join(folder,installers[0])
+  execFileSync(installer,[],{stdio:'inherit'})
+  console.log('Desktop app installed. Run scripts/setup-windows.py with --app and --project to register MCP and import local chats.')
+  process.exit(0)
+}
 const built=path.join(root,'src-tauri/target/release/bundle/macos/SessionGraph.app')
 const target='/Applications/SessionGraph.app'
 const state=path.join(os.homedir(),'Library/Application Support/local-ai-gateway/sessiongraph')

@@ -21,17 +21,44 @@ def validate_endpoint(endpoint):
 
 
 def runtime_state():
-    return Path(os.environ.get("SESSIONGRAPH_RUNTIME_HOME", str(Path.home() / "Library/Application Support/local-ai-gateway/sessiongraph")))
+    from .platform_paths import runtime_home
+    return runtime_home()
 
 
 def _name(endpoint):
-    return "provider-" + hashlib.sha256(endpoint.encode()).hexdigest() + ".json"
+    extension = ".dpapi" if os.name == "nt" else ".json"
+    return "provider-" + hashlib.sha256(endpoint.encode()).hexdigest() + extension
+
+
+def _windows_file(state, endpoint):
+    directory = state / "credentials"
+    if directory.is_symlink():
+        raise ValueError("unsafe_credentials")
+    return directory / _name(endpoint)
 
 
 def save_key(state, endpoint, key):
     validate_endpoint(endpoint)
     if not isinstance(key, str) or not key.strip() or len(key) > 2048 or any(ord(c) < 32 for c in key):
         raise ValueError("invalid_api_key")
+    if os.name == "nt":
+        from .windows_secret import protect
+        target = _windows_file(state, endpoint)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise ValueError("unsafe_credentials")
+        payload = json.dumps({"endpoint": endpoint, "api_key": key.strip()}).encode("utf-8")
+        encrypted = protect(payload)
+        temporary = target.with_name("." + next(tempfile._get_candidate_names()) + ".tmp")
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(encrypted)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return
     directory = state / "credentials"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -63,6 +90,17 @@ def save_key(state, endpoint, key):
 
 
 def load_key(state, endpoint):
+    if os.name == "nt":
+        from .windows_secret import unprotect
+        target = _windows_file(state, endpoint)
+        if not target.exists():
+            return None
+        if target.is_symlink() or not target.is_file() or target.stat().st_size > 8192:
+            raise ValueError("unsafe_credentials")
+        data = json.loads(unprotect(target.read_bytes()))
+        if data.get("endpoint") != endpoint:
+            raise ValueError("credential_endpoint_mismatch")
+        return data["api_key"]
     try:
         fd = os.open(state / "credentials", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except FileNotFoundError:

@@ -7,6 +7,7 @@ import { SessionGraphCanvas } from './SessionGraphCanvas'
 import { SessionGraphSettings } from './SessionGraphSettings'
 import { SessionGraphMaintenance } from './SessionGraphMaintenance'
 import { SessionGraphDialog } from './SessionGraphDialog'
+import { ProjectChats } from './ProjectChats'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { SessionGraphManage, SessionGraphModelOption } from '../sessionGraph'
 import { revisionValidityLabel } from '../sessionGraph'
@@ -166,6 +167,7 @@ export function SessionGraphPanel({read=readSessionGraph,models=[],manage}:{read
   const currentProject=catalog?.projects.find(p=>p.id===project),memories=filtered?.nodes.filter(n=>n.type==='memory')||[]
   return <section className="sg-panel" aria-label="项目记忆">
     <header className="sg-header"><div><h2>项目记忆</h2><p>SessionGraph · 跨 chat 的关键事项与原文证据</p></div><div className="sg-actions"><label>项目 <select aria-label="项目" disabled={!catalog} value={project} onChange={e=>setProject(e.target.value)}>{!catalog&&<option value="">等待连接</option>}{catalog?.projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.state==='ready'?'':' · 未就绪'}</option>)}</select></label><button type="button" disabled={loading} onClick={()=>setRefresh(r=>r+1)}>刷新</button><button type="button" disabled={currentProject?.state!=='ready'} aria-haspopup="dialog" aria-expanded={dialog==='maintenance'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('maintenance')}}>存储维护</button><button type="button" aria-haspopup="dialog" aria-expanded={dialog==='settings'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('settings')}}>设置</button></div></header>
+    <ProjectChats project={currentProject?.state==='ready'?project:''} read={read}/>
     <div className="sg-body"><div className="sg-main-layout">
       <section className="sg-canvas" aria-label="图谱与事项列表">{!map?<p className="sg-empty">{loading?'正在载入图谱…':'暂无图谱数据。'}</p>:!memories.length?<p className="sg-empty">{query||chat?'没有匹配的事项。':'暂无关键事项；不会因打开面板而触发抽取。'}</p>:mode==='graph'&&filtered?<SessionGraphCanvas map={filtered} focus={selected?.id||''} locate={locate} onSelect={select}/>:<ul className="sg-list" ref={listRef}>{memories.map(n=><li key={n.id}><button ref={element=>{if(element)listButtons.current.set(n.id,element);else listButtons.current.delete(n.id)}} aria-pressed={selected?.id===n.id} onClick={()=>select(n)}><strong>{n.label}</strong><span>{label(n.object_type || n.kind)} · {label(n.status)}</span><p>{n.content?.slice(0,180)}</p></button></li>)}</ul>}</section>
       <section className="sg-info" aria-label="项目状态与详情">

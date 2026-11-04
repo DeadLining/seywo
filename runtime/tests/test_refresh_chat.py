@@ -1,4 +1,5 @@
 import json
+import os
 import pytest
 from sessiongraph.core import Store, init_project, load_config
 from sessiongraph.continuity import refresh_chat
@@ -35,6 +36,26 @@ def test_refresh_requires_allowlist_and_safe_chat_id(tmp_path):
     with pytest.raises(ValueError, match='allowlist'):
         refresh_chat(store, 'chat-A')
     store.close()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows extended paths')
+def test_refresh_accepts_extended_windows_path_within_allowlist(tmp_path):
+    root = tmp_path / 'project'; root.mkdir()
+    logs = tmp_path / 'logs'; logs.mkdir()
+    source = write_session(logs / 'rollout-chat-A.jsonl', root, 'chat-A', [('user', 'local')])
+    outside = write_session(tmp_path / 'outside.jsonl', root, 'chat-A', [('user', 'outside')])
+    cfg = load_config(init_project(root))
+    cfg['hook']['allowed_transcript_roots'] = [str(logs)]
+    store = Store(cfg)
+    try:
+        result = refresh_chat(store, 'chat-A', '\\\\?\\' + str(source))
+        assert result['added_entries'] == 1
+        assert not result['skipped']
+        rejected = refresh_chat(store, 'chat-A', '\\\\?\\' + str(outside))
+        assert rejected['added_entries'] == 0
+        assert rejected['skipped'][0]['code'] == 'outside_allowlist'
+    finally:
+        store.close()
 
 
 def test_refresh_rejects_other_project_and_symlink_escape(tmp_path):

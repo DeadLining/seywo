@@ -4,7 +4,7 @@ Every writer and acknowledgement uses the same short file lock. Never perform
 database reads, subprocess work, network requests or output while holding it.
 """
 from contextlib import contextmanager
-import fcntl
+from . import file_lock as fcntl
 import json
 import math
 from pathlib import Path
