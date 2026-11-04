@@ -17,11 +17,12 @@ export type Run = {attempt_outcome?:string;backlog_failures?:{job_id:string;erro
 export type UpdateStatus = {continuations?:{chat:string;state:string;due:number;run_id:string;error_code?:string}[];runs:Run[];active_count:number;unreadable_runs?:number}
 export type MemoryDetail = { graph_v2?:{type:string;requested_id?:string;canonical_id?:string;member_ids?:string[];evidence_page?:{offset:number;limit:number;has_more:boolean;next_offset:number|null};assertions:{entry_id:string;quote:string;chat_id:string;original_node_id?:string;source_time?:string;role?:string;assertion:{content:string;status:string}}[]}; memory: {content:string;paths?:string[];source?:{entry_id:string;quote:string;role?:string}}; entries: {id:string;text:string;role?:string;chat_id?:string}[];superseded_by:{id:string;title:string;status:string}[] }
 export type Catalog = {projects:Project[];default_project:string}
-export type ReadOperation = 'projects' | 'work_map' | 'status' | 'memory' | 'evidence' | 'project_chats' | 'flow_tasks'
-export type SessionGraphRead = <T>(operation:ReadOperation, args?:{project?:string;id?:string;offset?:number;query?:string;chat?:string;view?:MapView})=>Promise<T>
+export type ReadOperation = 'projects' | 'work_map' | 'status' | 'memory' | 'evidence' | 'call_logs' | 'project_chats' | 'flow_tasks'
+export type SessionGraphRead = <T>(operation:ReadOperation, args?:{project?:string;id?:string;offset?:number;query?:string;chat?:string;view?:MapView;logModel?:string;logStatus?:string})=>Promise<T>
 export const readSessionGraph:SessionGraphRead = async (operation,args={}) => {
   if (import.meta.env.DEV && !('__TAURI_INTERNALS__' in window)) {
-    const response=await fetch('/__sessiongraph/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,...args})})
+    const {logModel,logStatus,...other}=args
+    const response=await fetch('/__sessiongraph/read',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({operation,...other,...(logModel!==undefined?{log_model:logModel}:{}),...(logStatus!==undefined?{log_status:logStatus}:{})})})
     const result=await response.json()
     if (!response.ok || result.error || result.model_calls!==0) throw new Error('本地只读开发连接不可用')
     return result
@@ -73,10 +74,10 @@ export function graphLayout(nodes:GraphNode[],edges:GraphEdge[]){
 }
 
 export type SessionGraphModelOption={value:string;label:string;upstreamModel?:string}
-export type SessionGraphSettingsAction='status'|'save_model'|'save_provider'|'test_provider'|'install_hooks'|'install_mcp'|'uninstall_hooks'|'uninstall_mcp'|'enable_graph'|'disable_graph'|'save_jev'|'storage_preview'|'storage_compact'|'clean_notices'|'clear_tasks'
+export type SessionGraphSettingsAction='status'|'save_model'|'save_provider'|'test_provider'|'reveal_provider_key'|'install_hooks'|'install_mcp'|'uninstall_hooks'|'uninstall_mcp'|'enable_graph'|'disable_graph'|'save_jev'|'storage_preview'|'storage_compact'|'clean_notices'|'clear_tasks'
 export type SessionGraphSettingsRequest={action:SessionGraphSettingsAction;project?:string;token?:string;run_id?:string;model?:string;api_key?:string;endpoint?:string;api_key_env?:string}
 export type MaintenanceResult={before?:{database_bytes:number;wal_bytes:number;logical_bytes:number;reclaimable_bytes:number};after?:{database_bytes:number;wal_bytes:number;logical_bytes:number;reclaimable_bytes:number};reclaimed_bytes?:number;vacuum_performed?:boolean;vacuum_skipped_reason?:string;integrity_scope?:string[];counts?:Record<string,number>;dismissed_tasks?:number;dismissed_batches?:number;archived_runs?:number;unreadable_runs?:number;removed?:number;remaining?:number;warning?:string;model_calls:number}
-export type SessionGraphSettingsSnapshot={provider_test?:{ok:boolean;elapsed_ms:number;http_status:number|null;model:string};endpoint?:string;api_key_env?:string;hook_event_count?:number;maintenance?:MaintenanceResult;jev_configured?:boolean;judgment_backend?:'selected_model';graph_v2_enabled?:boolean;ok:boolean;model_calls:number;changed_count:number;model:string;runtime_installed:boolean;hook_registered:boolean;hook_events:number;hook_enabled:boolean;mcp_registered:boolean;mcp_guidance_installed:boolean;message:string}
+export type SessionGraphSettingsSnapshot={api_key_configured?:boolean;api_key?:string;provider_test?:{ok:boolean;elapsed_ms:number;http_status:number|null;model:string};endpoint?:string;api_key_env?:string;hook_event_count?:number;maintenance?:MaintenanceResult;jev_configured?:boolean;judgment_backend?:'selected_model';graph_v2_enabled?:boolean;ok:boolean;model_calls:number;changed_count:number;model:string;runtime_installed:boolean;hook_registered:boolean;hook_events:number;hook_enabled:boolean;mcp_registered:boolean;mcp_guidance_installed:boolean;message:string}
 export type SessionGraphManage=(request:SessionGraphSettingsRequest)=>Promise<SessionGraphSettingsSnapshot>
 export const manageSessionGraph:SessionGraphManage=request=>invoke('manage_session_graph',{request})
 export function sessionGraphModelOptions(models:{name?:string;model:string;provider:string;status?:string;protocol?:string}[]):SessionGraphModelOption[]{
@@ -91,3 +92,6 @@ export function sessionGraphModelOptions(models:{name?:string;model:string;provi
   }
   return [...options.values()]
 }
+
+export type ModelCall = {id:string;project:string;model:string;response_model:string;endpoint:string;chat_id:string;run_id:string;job_id:string;attempt_id:string;stage:string;state:string;created_at:number;elapsed_ms:number|null;http_status:number|null;input_tokens:number|null;output_tokens:number|null;provider_request_id:string;part:number|null;retry_count:number|null;error_code:string}
+export type ModelCallPage = {items:ModelCall[];models:string[];offset:number;has_more:boolean;retention_days:number;max_bytes:number;model_calls:0}

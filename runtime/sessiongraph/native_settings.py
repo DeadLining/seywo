@@ -60,6 +60,20 @@ def _project(state, project):
     raise ValueError("unknown_project")
 
 
+def _provider_key(provider, state, codex_home):
+    # Use the same endpoint-bound resolution as model calls, without networking.
+    from .gateway_worker import gateway_credentials
+    try:
+        if provider.get("protocol") != "responses":
+            return ""
+        validate_endpoint(provider.get("endpoint"))
+        with gateway_credentials({"provider": provider}, codex_home / "config.toml", state=state):
+            key = os.environ.get(provider.get("api_key_env", "GRAPH_LLM_API_KEY"), "")
+            return key if isinstance(key, str) and key else ""
+    except (OSError, ValueError, KeyError, TypeError):
+        return ""
+
+
 def _snapshot(state, codex_home, config):
     provider = effective_provider(_json(config).get("provider", {}) if config else {}, state)
     launcher = state / "bin/sessiongraph"
@@ -93,6 +107,7 @@ def _snapshot(state, codex_home, config):
         model=provider.get("model", ""),
         endpoint=provider.get("endpoint", ""),
         api_key_env=provider.get("api_key_env", "GRAPH_LLM_API_KEY"),
+        api_key_configured=bool(_provider_key(provider, state, codex_home)),
         hook_event_count=len(EVENTS),
         runtime_installed=bool(python and source and python.is_file()
                                and (source / "entrypoint.py").is_file()
@@ -122,6 +137,7 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         "save_model",
         "save_provider",
         "test_provider",
+        "reveal_provider_key",
         "enable_graph",
         "disable_graph",
         "install_hooks",
@@ -141,6 +157,13 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
     config = None if removing else _project(state, request.get("project"))
     if action == "status":
         return _snapshot(state, codex_home, config)
+    if action == "reveal_provider_key":
+        provider = effective_provider(_json(config).get("provider", {}) if config else {}, state)
+        key = _provider_key(provider, state, codex_home)
+        snapshot = _snapshot(state, codex_home, config)
+        if not key:
+            return dict(snapshot, ok=False, message="没有可显示的已保存 API KEY。")
+        return dict(snapshot, api_key=key)
     if action == "test_provider":
         from .provider_probe import probe_provider
         model = request.get("model")
@@ -153,7 +176,8 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         snapshot = _snapshot(state, codex_home, config)
         probe = probe_provider(dict(protocol="responses", endpoint=request.get("endpoint"),
                                     model=model.strip(), api_key_env=key_env),
-                               state=state, codex_home=codex_home, api_key=request.get("api_key"))
+                               state=state, codex_home=codex_home, api_key=request.get("api_key"),
+                               project=request.get("project") or "")
         return dict(snapshot, **probe)
     if action == "save_jev":
         from .jev import save_saved_key

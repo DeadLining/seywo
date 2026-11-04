@@ -673,3 +673,49 @@ def test_retired_receipt_fields_rejected(tmp_path,field):
     _,args,pid=setup(tmp_path)
     with pytest.raises(ValueError,match='invalid_request'):
         handle({'action':'status','project':pid,field:'a'*64},**args)
+
+
+def test_provider_key_is_masked_until_explicit_reveal_without_model_or_writes(tmp_path, monkeypatch):
+    from sessiongraph.provider_credentials import save_key
+    config, args, pid = setup(tmp_path)
+    provider = json.loads(config.read_text())["provider"]
+    monkeypatch.delenv(provider.get("api_key_env", "GRAPH_LLM_API_KEY"), raising=False)
+    save_key(args['state'], provider['endpoint'], 'fixture-saved-key')
+    monkeypatch.setattr(sqlite3, 'connect', lambda *a, **k: pytest.fail('DB opened'))
+    monkeypatch.setattr(socket, 'socket', lambda *a, **k: pytest.fail('network'))
+    before = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
+    status = handle({'action': 'status', 'project': pid}, **args)
+    assert status['api_key_configured'] and 'api_key' not in status
+    assert 'fixture-saved-key' not in json.dumps(status)
+    shown = handle({'action': 'reveal_provider_key', 'project': pid}, **args)
+    assert shown['api_key'] == 'fixture-saved-key' and shown['model_calls'] == 0
+    assert before == {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
+    assert provider.get('api_key_env', 'GRAPH_LLM_API_KEY') not in __import__('os').environ
+
+
+def test_provider_key_reveal_uses_global_endpoint_and_requires_no_project(tmp_path, monkeypatch):
+    from sessiongraph.provider_credentials import save_key
+    config, args, pid = setup(tmp_path)
+    provider = json.loads(config.read_text())['provider']
+    monkeypatch.delenv(provider.get('api_key_env', 'GRAPH_LLM_API_KEY'), raising=False)
+    save_key(args['state'], provider['endpoint'], 'fixture-old-key')
+    provider['endpoint'] = 'https://new.test/v1/responses'
+    (args['state'] / 'template.json').write_text(json.dumps({'provider': provider}))
+    missing = handle({'action': 'reveal_provider_key'}, **args)
+    assert not missing['ok'] and 'api_key' not in missing and not missing['api_key_configured']
+    save_key(args['state'], provider['endpoint'], 'fixture-new-key')
+    shown = handle({'action': 'reveal_provider_key'}, **args)
+    assert shown['api_key'] == 'fixture-new-key' and shown['endpoint'] == provider['endpoint']
+    assert 'fixture-old-key' not in json.dumps(shown)
+
+
+def test_provider_key_status_and_reveal_share_runtime_credential_resolution(tmp_path, monkeypatch):
+    config, args, pid = setup(tmp_path)
+    provider = json.loads(config.read_text())['provider']
+    key_env = provider.get('api_key_env', 'GRAPH_LLM_API_KEY')
+    monkeypatch.setenv(key_env, 'fixture-env-key')
+    assert handle({'action': 'status', 'project': pid}, **args)['api_key_configured']
+    assert handle({'action': 'reveal_provider_key', 'project': pid}, **args)['api_key'] == 'fixture-env-key'
+    for field in ['api_key', 'endpoint', 'model']:
+        with pytest.raises(ValueError):
+            handle({'action': 'reveal_provider_key', field: 'unexpected'}, **args)

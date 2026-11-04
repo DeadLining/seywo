@@ -5,6 +5,7 @@ import json
 import os
 import time
 import re
+import uuid
 from pathlib import Path
 from urllib import request, error, parse
 
@@ -39,6 +40,20 @@ ASSISTANT_SIGNALS = re.compile(
     r'目标|需求|问题|原因|发现|方案|建议|决定|确认|结论|完成|成功|失败|报错|错误|修复|测试|验证|结果|'
     r'下一步|风险|限制|产物|安装|配置|修改|更新|阻塞|可行|不可行|待处理|'
     r'\b(?:error|failed|failure|fixed|passed|result|decision|next step|completed|verified)\b', re.I)
+
+
+def _flow_log(config, state, code=''):
+    receipt = config.get('_flow_log_receipt')
+    if not receipt:
+        return
+    receipt.update(state=state, elapsed_ms=round((time.monotonic() - receipt['_started']) * 1000))
+    if code:
+        receipt['error_code'] = code
+    try:
+        from .call_logs import record
+        record(receipt, project=config.get('project_id', ''), secret=config.get('_flow_log_secret', ''))
+    except Exception:
+        pass  # Logging must not stop a model request.
 
 
 def check_response_status(envelope):
@@ -91,16 +106,24 @@ def request_tasks(config, entries, codex_home):
             'max_output_tokens': provider.get('max_output_tokens', 4000)}
     try:
         with gateway_credentials(config, codex_home / 'config.toml'):
-            headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + os.environ[name]}
+            key = os.environ[name]
+            headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key}
             req = request.Request(endpoint, data=json.dumps(body, ensure_ascii=False).encode('utf-8'), headers=headers)
             handlers = [NoRedirect()]
             if parse.urlsplit(endpoint).hostname in {'localhost', '127.0.0.1', '::1'}:
                 handlers.append(request.ProxyHandler({}))
+            config['_flow_log_receipt'] = {'id':uuid.uuid4().hex, 'created_at':time.time(), '_started':time.monotonic(),
+                'model':model, 'endpoint':endpoint, 'stage':'extract', 'chat_id':config.get('_flow_chat_id', '')}
+            config['_flow_log_secret'] = key
+            _flow_log(config, 'started')
             with request.build_opener(*handlers).open(req, timeout=provider.get('timeout_seconds', 90)) as response:
+                config['_flow_log_receipt']['http_status'] = getattr(response, 'status', 200)
                 raw = response.read(2 * 1024 * 1024 + 1)
         if len(raw) > 2 * 1024 * 1024:
             raise ValueError('模型返回内容过大')
         envelope = json.loads(raw)
+        if isinstance(envelope, dict):
+            config['_flow_log_receipt'].update(usage=envelope.get('usage'), response_model=envelope.get('model'))
         check_response_status(envelope)
         texts = [part['text'] for item in envelope.get('output', []) if item.get('type') == 'message'
                  for part in item.get('content', []) if part.get('type') == 'output_text']
@@ -108,9 +131,19 @@ def request_tasks(config, entries, codex_home):
             raise ValueError('模型没有返回结果')
         return json.loads(''.join(texts))
     except error.HTTPError as exc:
+        if config.get('_flow_log_receipt'):
+            config['_flow_log_receipt']['http_status'] = exc.code
+        _flow_log(config, 'transport_failed', 'provider_http_error')
         raise ValueError(f'模型服务返回 HTTP {exc.code}，请检查模型设置') from None
     except error.URLError:
+        _flow_log(config, 'transport_failed', 'provider_connection_error')
         raise ValueError('无法连接模型服务，请检查网络和模型设置') from None
+    except OutputLimit:
+        _flow_log(config, 'response_failed', 'provider_output_limit')
+        raise
+    except Exception:
+        _flow_log(config, 'response_failed', 'provider_response_error')
+        raise
 
 
 def _context(store, chat_id, before_rowid, user_only=False):
@@ -163,6 +196,8 @@ def _extract_fragment(config, entry, context, codex_home, model_request, budget,
     if budget['calls'] >= MAX_CALLS or time.monotonic() >= budget['deadline']:
         raise WorkBudgetReached()
     budget['calls'] += 1
+    config.pop('_flow_log_receipt', None)
+    config.pop('_flow_log_secret', None)
     try:
         batch = context + [entry]
         response = model_request(config, batch, codex_home)
@@ -175,8 +210,10 @@ def _extract_fragment(config, entry, context, codex_home, model_request, budget,
                len(node['label']) > 80 or len(node['quote']) > 200 or len(node['branch_quote']) > 200
                for task in tasks for node in task['nodes']):
             raise OutputLimit('模型输出达到长度上限，结果未完成')
+        _flow_log(config, 'validated')
         return tasks
     except OutputLimit:
+        _flow_log(config, 'response_failed', 'provider_output_limit')
         text = entry['text']
         if depth >= MAX_SPLIT_DEPTH or len(text) < 512:
             raise ValueError('当前片段拆分后仍超过模型输出上限') from None
@@ -187,6 +224,12 @@ def _extract_fragment(config, entry, context, codex_home, model_request, budget,
         right = {**entry, 'text': text[middle - overlap:]}
         return (_extract_fragment(config, left, context, codex_home, model_request, budget, depth + 1)
                 + _extract_fragment(config, right, context, codex_home, model_request, budget, depth + 1))
+    except Exception:
+        if config.get('_flow_log_receipt', {}).get('state') == 'started':
+            _flow_log(config, 'validation_failed', 'flow_validation_failed')
+        raise
+    finally:
+        config.pop('_flow_log_secret', None)
 
 
 def _set_run_state(store, chat_id, target, state):
@@ -230,7 +273,7 @@ def generate(store, chat_id, codex_home=None, model_request=request_tasks):
     has_tasks = store.db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='flow_tasks'").fetchone()
     titles = [row[0] for row in store.db.execute('SELECT title FROM flow_tasks WHERE project_id=? ORDER BY title LIMIT 30',
               (store.config['project_id'],))] if has_tasks else []
-    model_config = {**store.config, '_flow_task_titles': titles}
+    model_config = {**store.config, '_flow_task_titles': titles, '_flow_chat_id': chat_id}
     budget = {'calls': 0, 'deadline': time.monotonic() + MAX_RUN_SECONDS}
     saved = batches = task_count = 0
     try:

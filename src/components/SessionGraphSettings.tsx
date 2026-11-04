@@ -26,6 +26,9 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
   const [model, setModel] = useState('')
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [keyEdited, setKeyEdited] = useState(false)
+  const [showKey, setShowKey] = useState(false)
+  const [revealedKey, setRevealedKey] = useState<string|null>(null)
   const [busy, setBusy] = useState(true)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ok:boolean;message:string} | null>(null)
@@ -47,13 +50,18 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
         ? (snapshot?.endpoint && baseUrl.trim() === baseUrlFromEndpoint(snapshot.endpoint)
           ? snapshot.endpoint : endpointFromBaseUrl(baseUrl))
         : undefined
-      const result = await manage({ action, ...(project && !removing && !globalProvider ? { project } : {}), ...(globalProvider ? { model } : {}), ...(providerRequest ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
+      const result = await manage({ action, ...(project && !removing && (!globalProvider || action === 'test_provider') ? { project } : {}), ...(globalProvider ? { model } : {}), ...(providerRequest ? {endpoint,api_key_env:snapshot?.api_key_env || 'GRAPH_LLM_API_KEY',...(apiKey?{api_key:apiKey}:{})} : {}) })
       if (!active.current) return
       if (!result.ok) throw new Error(result.message || '设置操作失败')
       if (action === 'test_provider') { setTestResult({ok:true,message:result.message}); return }
+      if (action === 'reveal_provider_key') {
+        if (result.endpoint !== snapshot?.endpoint) throw new Error('模型配置已变更，请重新检查。')
+        if (!result.api_key) throw new Error('没有可显示的已保存 API KEY。')
+        setRevealedKey(result.api_key); setShowKey(true); return
+      }
       setSnapshot(result)
       if (!removing) { setModel(result.model); setBaseUrl(baseUrlFromEndpoint(result.endpoint || '')) }
-      setApiKey('')
+      setApiKey(''); setKeyEdited(false); setShowKey(false); setRevealedKey(null)
       setMessage(result.message)
     } catch (e) {
       if (active.current) {
@@ -67,6 +75,8 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
     }
   }
   useEffect(() => { active.current = true; void run('status'); return () => { active.current = false } }, [])
+  const savedKeyAvailable = Boolean(snapshot?.api_key_configured && baseUrl.trim() === baseUrlFromEndpoint(snapshot.endpoint || ''))
+  const displayedKey = keyEdited ? apiKey : savedKeyAvailable ? revealedKey ?? '' : ''
   const exact = models.find(m => m.value === model)
   // Keep an existing raw-ID route unchanged until the user explicitly chooses an alias.
   const legacy = !exact && models.find(m => m.upstreamModel === model)
@@ -83,8 +93,13 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
     </select>
     <button type="button" disabled={busy || !available || !snapshot} onClick={() => void run('save_model')}>保存模型</button>
     </> : <div className="sg-provider-fields">
-      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy} onChange={e=>{setBaseUrl(e.target.value);setTestResult(null)}} />
-      <label htmlFor="sg-api-key">API KEY</label><input id="sg-api-key" type="password" autoComplete="off" placeholder="留空保留现有凭据" value={apiKey} disabled={busy} onChange={e=>{setApiKey(e.target.value);setTestResult(null)}} />
+      <label htmlFor="sg-base-url">BASE URL</label><input id="sg-base-url" value={baseUrl} type="url" disabled={busy} onChange={e=>{setBaseUrl(e.target.value);setShowKey(false);setRevealedKey(null);setTestResult(null)}} />
+      <label htmlFor="sg-api-key">API KEY</label><div className="sg-api-key-field">
+        <input id="sg-api-key" type={showKey?'text':'password'} autoComplete="off" spellCheck={false} placeholder={savedKeyAvailable&&!keyEdited?'••••••••':'请输入 API KEY（留空沿用现有凭据）'} value={displayedKey} disabled={busy}
+          onChange={e=>{setApiKey(e.target.value);setKeyEdited(true);setRevealedKey(null);setTestResult(null)}} />
+        <button type="button" aria-label={showKey?'隐藏 API KEY':'显示 API KEY'} aria-pressed={showKey} disabled={busy||!(apiKey||savedKeyAvailable&&!keyEdited)}
+          onClick={()=>{if(showKey){setShowKey(false);setRevealedKey(null)}else if(keyEdited){setShowKey(true)}else{void run('reveal_provider_key')}}}>{showKey?'隐藏':'显示'}</button>
+      </div>
       <label htmlFor="sg-model-id">MODEL NAME</label><input id="sg-model-id" value={model} disabled={busy} onChange={e=>{setModel(e.target.value);setTestResult(null)}} />
       <div className="sg-provider-actions">
         <button type="button" disabled={busy || !model.trim() || !baseUrl.trim() || !snapshot} onClick={()=>void run('test_provider')}>{testing ? '测试中…' : '测试模型'}</button>

@@ -218,5 +218,10 @@ def test_complete_generation_path_with_simulated_provider(tmp_path, monkeypatch)
         assert generate(store, 'chat-C', home)['saved_nodes'] == 1
         assert generate(store, 'chat-C', home)['batches'] == 0
         assert store.db.execute('SELECT quote FROM flow_nodes').fetchone()[0] == '确定使用时间线'
+        from sessiongraph.call_logs import read as read_logs
+        logs = read_logs(project=cfg['project_id'])
+        assert len(logs['items']) == 1 and logs['items'][0]['state'] == 'validated'
+        assert '确定使用时间线' not in json.dumps(logs, ensure_ascii=False)
+        assert 'synthetic' not in json.dumps(logs, ensure_ascii=False)
     finally:
         store.close()

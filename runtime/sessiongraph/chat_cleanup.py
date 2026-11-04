@@ -193,6 +193,8 @@ def _remove_hot_receipts(config, chats):
 def _remove_request_audits(config, job_ids):
     """Delete only diagnostics whose JSON names an explicitly deleted job."""
     job_ids = set(job_ids)
+    from .call_logs import remove_jobs
+    remove_jobs(config, job_ids)
     removed, errors = 0, 0
     folder = Path(config['database']).parent / 'request-audit'
     if not folder.is_dir():

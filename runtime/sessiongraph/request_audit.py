@@ -105,6 +105,8 @@ def _read_response(extractor, req, handlers, ticket):
     trace = dict(id=identity, path=str(path), model=extractor.model, **CURRENT.get(),
                  max_output_tokens=extractor.max_output, request_bytes=len(req.data))
     if live:
+        from .call_logs import record as record_call
+        record_call(record, project=extractor.config.get("project_id", ""), secret=extractor.key)
         # Keep a bounded "started" receipt even if the process exits before
         # transport returns. The final record replaces it atomically below.
         _atomic(path, scrub(record, extractor.key))
@@ -152,7 +154,7 @@ def _read_response(extractor, req, handlers, ticket):
             choices = envelope.get("choices")
             choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
             record.update(state="received", usage=envelope.get("usage"),
-                          response_id=envelope.get("id"), status=envelope.get("status"),
+                          response_id=envelope.get("id"), response_model=envelope.get("model"), status=envelope.get("status"),
                           finish_reason=choice.get("finish_reason"),
                           incomplete_details=envelope.get("incomplete_details"))
             record["envelope_shape"] = {k:type(v).__name__ for k,v in envelope.items()}
@@ -243,7 +245,10 @@ def _read_response(extractor, req, handlers, ticket):
             # also removes the initial "started" record created above.
             if job_live(extractor.config, job_id) is not False:
                 _atomic(path,scrub(record,extractor.key))
+                record_call(record, project=extractor.config.get("project_id", ""), secret=extractor.key)
             else:
+                from .call_logs import remove_jobs
+                remove_jobs(extractor.config, [job_id])
                 path.unlink(missing_ok=True)
 
 
@@ -276,3 +281,6 @@ def validation_result(extractor, failure=None, *, job_id=None, part=None):
     record["state"]="validation_failed" if failure else "validated"
     if failure:record["failure"]=failure
     _atomic(path,scrub(record,getattr(extractor,"key","")))
+    from .call_logs import record as record_call
+    config = getattr(extractor, "audit_config", None) or getattr(extractor, "config", {})
+    record_call(record, project=config.get("project_id", ""), secret=getattr(extractor,"key",""))

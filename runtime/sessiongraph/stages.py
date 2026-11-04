@@ -77,7 +77,9 @@ def _execute(store, job, part, stage, operation, stats, *, cache, cache_if, clai
     with store.db:
         store.db.execute("UPDATE sg2_attempts SET state='interrupted',finished=? WHERE job=? AND state='running'", (time.time(),job))
         store.db.execute("INSERT INTO sg2_attempts VALUES(?,?,?,?,'running',?,NULL,NULL,NULL,?)", (identity,job,part,stage,time.time(),os.environ.get("SESSIONGRAPH_RUN_ID")))
-    token = CURRENT.set(dict(attempt_id=identity, job_id=job, part=part, stage=stage))
+    chat = store.db.execute("SELECT chat FROM sg2_jobs WHERE id=?", (job,)).fetchone()
+    retries = store.db.execute("SELECT COUNT(*) FROM sg2_attempts WHERE job=? AND part=? AND stage=?", (job,part,stage)).fetchone()[0] - 1
+    token = CURRENT.set(dict(attempt_id=identity, job_id=job, part=part, stage=stage, chat_id=chat[0] if chat else "", retry_count=max(0,retries)))
     before = {k:stats.get(k,0) for k in ('deepseek_calls','jev_calls','judge_calls')}
     try:
         result = operation()

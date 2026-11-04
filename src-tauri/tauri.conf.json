@@ -118,7 +118,8 @@
       "../runtime/sessiongraph/__main__.py": "sessiongraph/sessiongraph/__main__.py",
       "../runtime/hooks/sg_codex_hook.py": "sessiongraph/hooks/sg_codex_hook.py",
       "../runtime/scripts/install_gateway.py": "sessiongraph/scripts/install_gateway.py",
-      "../runtime/scripts/sg_hook_extract.sh": "sessiongraph/scripts/sg_hook_extract.sh"
+      "../runtime/scripts/sg_hook_extract.sh": "sessiongraph/scripts/sg_hook_extract.sh",
+      "../runtime/sessiongraph/call_logs.py": "sessiongraph/sessiongraph/call_logs.py"
     },
     "windows": {
       "nsis": {

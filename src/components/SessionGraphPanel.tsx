@@ -8,6 +8,7 @@ import { SessionGraphSettings } from './SessionGraphSettings'
 import { SessionGraphMaintenance } from './SessionGraphMaintenance'
 import { SessionGraphDialog } from './SessionGraphDialog'
 import { ProjectChats } from './ProjectChats'
+import { SessionGraphCallLogs } from './SessionGraphCallLogs'
 import { Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import type { SessionGraphManage, SessionGraphModelOption } from '../sessionGraph'
 import { revisionValidityLabel } from '../sessionGraph'
@@ -73,7 +74,7 @@ function RunDiagnostics({run:r}:{run:Run}) {
 const label=(s?:string)=>s?(labels[s]||s):'未知'
 
 export function SessionGraphPanel({read=readSessionGraph,models=[],manage}:{read?:SessionGraphRead;models?:SessionGraphModelOption[];manage?:SessionGraphManage}){
-  const [dialog,setDialog]=useState<'settings'|'maintenance'|null>(null)
+  const [dialog,setDialog]=useState<'settings'|'maintenance'|'logs'|null>(null)
   const [preferences]=useState(readPreferences),[catalog,setCatalog]=useState<Catalog|null>(null),[project,setProject]=useState(preferences.project),[refresh,setRefresh]=useState(0)
   const [map,setMap]=useState<WorkMap|null>(null),[status,setStatus]=useState<UpdateStatus|null>(null),[error,setError]=useState(''),[statusError,setStatusError]=useState(''),[loading,setLoading]=useState(false)
   const [query,setQuery]=useState(''),[chat,setChat]=useState(''),[mode,setMode]=useState<'list'|'graph'>('graph'),[view,setView]=useState<MapView>('knowledge'),[selected,setSelected]=useState<GraphNode|null>(null),[detail,setDetail]=useState<MemoryDetail|null>(null),[detailError,setDetailError]=useState(''),[detailLoading,setDetailLoading]=useState(false)
@@ -166,7 +167,7 @@ export function SessionGraphPanel({read=readSessionGraph,models=[],manage}:{read
   }
   const currentProject=catalog?.projects.find(p=>p.id===project),memories=filtered?.nodes.filter(n=>n.type==='memory')||[]
   return <section className="sg-panel" aria-label="项目记忆">
-    <header className="sg-header"><div><h2>项目记忆</h2><p>SessionGraph · 跨 chat 的关键事项与原文证据</p></div><div className="sg-actions"><label>项目 <select aria-label="项目" disabled={!catalog} value={project} onChange={e=>setProject(e.target.value)}>{!catalog&&<option value="">等待连接</option>}{catalog?.projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.state==='ready'?'':' · 未就绪'}</option>)}</select></label><button type="button" disabled={loading} onClick={()=>setRefresh(r=>r+1)}>刷新</button><button type="button" disabled={currentProject?.state!=='ready'} aria-haspopup="dialog" aria-expanded={dialog==='maintenance'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('maintenance')}}>存储维护</button><button type="button" aria-haspopup="dialog" aria-expanded={dialog==='settings'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('settings')}}>设置</button></div></header>
+    <header className="sg-header"><div><h2>项目记忆</h2><p>SessionGraph · 跨 chat 的关键事项与原文证据</p></div><div className="sg-actions"><label>项目 <select aria-label="项目" disabled={!catalog} value={project} onChange={e=>setProject(e.target.value)}>{!catalog&&<option value="">等待连接</option>}{catalog?.projects.map(p=><option key={p.id} value={p.id}>{p.name}{p.state==='ready'?'':' · 未就绪'}</option>)}</select></label><button type="button" disabled={loading} onClick={()=>setRefresh(r=>r+1)}>刷新</button><button type="button" aria-haspopup="dialog" aria-expanded={dialog==='logs'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('logs')}}>调用日志</button><button type="button" disabled={currentProject?.state!=='ready'} aria-haspopup="dialog" aria-expanded={dialog==='maintenance'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('maintenance')}}>存储维护</button><button type="button" aria-haspopup="dialog" aria-expanded={dialog==='settings'} onClick={event=>{event.currentTarget.focus({preventScroll:true});setDialog('settings')}}>设置</button></div></header>
     <ProjectChats project={currentProject?.state==='ready'?project:''} read={read}/>
     <div className="sg-body"><div className="sg-main-layout">
       <section className="sg-canvas" aria-label="图谱与事项列表">{!map?<p className="sg-empty">{loading?'正在载入图谱…':'暂无图谱数据。'}</p>:!memories.length?<p className="sg-empty">{query||chat?'没有匹配的事项。':'暂无关键事项；不会因打开面板而触发抽取。'}</p>:mode==='graph'&&filtered?<SessionGraphCanvas map={filtered} focus={selected?.id||''} locate={locate} onSelect={select}/>:<ul className="sg-list" ref={listRef}>{memories.map(n=><li key={n.id}><button ref={element=>{if(element)listButtons.current.set(n.id,element);else listButtons.current.delete(n.id)}} aria-pressed={selected?.id===n.id} onClick={()=>select(n)}><strong>{n.label}</strong><span>{label(n.object_type || n.kind)} · {label(n.status)}</span><p>{n.content?.slice(0,180)}</p></button></li>)}</ul>}</section>
@@ -213,8 +214,8 @@ export function SessionGraphPanel({read=readSessionGraph,models=[],manage}:{read
         </details>
       </section>
     </div></div>
-    {dialog&&<SessionGraphDialog title={dialog==='settings'?'设置':'存储维护'} onClose={()=>setDialog(null)}>
-      {dialog==='settings'
+    {dialog&&<SessionGraphDialog title={dialog==='settings'?'设置':dialog==='logs'?'调用日志':'存储维护'} onClose={()=>setDialog(null)}>
+      {dialog==='logs'?<SessionGraphCallLogs project={project} projects={catalog?.projects||[]} read={read}/>:dialog==='settings'
         ?<SessionGraphSettings key={project} project={currentProject?.state==='ready'?project:''} models={models} manage={manage}/>
         :currentProject?.state==='ready'&&<SessionGraphMaintenance key={project} project={project} manage={manage} onChanged={()=>setRefresh(r=>r+1)}/>}
     </SessionGraphDialog>}
