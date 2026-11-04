@@ -1,6 +1,6 @@
 """Explicit, local, lossless maintenance. No provider or extraction entry points."""
 from contextlib import contextmanager
-import fcntl
+from . import file_lock as fcntl
 from pathlib import Path
 import time
 

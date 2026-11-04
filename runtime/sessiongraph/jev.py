@@ -55,15 +55,52 @@ def validate_answers(result, questions):
 
 
 def credential_path(home=None):
-    base = Path(home) if home is not None else Path(os.environ.get(
-        "SESSIONGRAPH_RUNTIME_HOME",
-        str(Path.home() / "Library/Application Support/local-ai-gateway/sessiongraph"),
-    ))
-    return base / "credentials/jev.json"
+    from .platform_paths import runtime_home
+    base = Path(home) if home is not None else runtime_home()
+    return base / ("credentials/jev.dpapi" if os.name == "nt" else "credentials/jev.json")
+
+
+def save_saved_key(home, key):
+    if os.name != "nt":
+        raise ValueError("Windows credential save only")
+    if (not isinstance(key, str) or not key.strip() or len(key) > 2048
+            or any(ord(c) < 32 or ord(c) == 127 for c in key)):
+        raise ValueError("invalid_jev_key")
+    from .windows_secret import protect
+    path = credential_path(home)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise ValueError("unsafe_credentials")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"api_key": key.strip()}).encode("utf-8")
+    import tempfile
+    temporary = path.with_name("." + next(tempfile._get_candidate_names()) + ".tmp")
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(protect(payload))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_saved_key(home=None):
     path = credential_path(home)
+    if os.name == "nt":
+        try:
+            if not path.exists():
+                return ""
+            if path.parent.is_symlink() or path.is_symlink() or not path.is_file() or path.stat().st_size > 16384:
+                raise JevUnavailable("jev_credentials_permissions")
+            from .windows_secret import unprotect
+            value = json.loads(unprotect(path.read_bytes()))
+        except (OSError, ValueError):
+            raise JevUnavailable("jev_credentials_invalid") from None
+        key = value.get("api_key") if isinstance(value, dict) else None
+        if (not isinstance(key, str) or not key.strip() or len(key) > 2048
+                or any(ord(c) < 32 or ord(c) == 127 for c in key)):
+            raise JevUnavailable("jev_credentials_invalid")
+        return key.strip()
     try:
         directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:

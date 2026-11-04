@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from .import_diagnostics import classify_exception, source_issue
+from .project_binding import normalized_path
 
 
 def _relocate_known_source(store, missing, roots, chat_id):
@@ -61,15 +62,15 @@ def refresh_chat(store, chat_id, transcript_path=None):
     store._ensure_writable()
     if not isinstance(chat_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', chat_id):
         raise ValueError('invalid chat_id')
-    roots = [Path(p).expanduser().resolve() for p in store.config['hook']['allowed_transcript_roots']]
+    roots = [normalized_path(p) for p in store.config['hook']['allowed_transcript_roots']]
     if not roots:
         raise ValueError('configure transcript allowlist before refreshing')
-    known_sources = {Path(r[0]) for r in store.db.execute(
+    known_sources = {normalized_path(r[0]) for r in store.db.execute(
         'SELECT s.path FROM sessions s JOIN session_chats c ON c.segment_id=s.id WHERE c.chat_id=?', (chat_id,))}
     # Hook fast path avoids scanning and hashing every historical segment.
     # Manual refresh retains full discovery for explicit reconciliation.
     if transcript_path:
-        candidates = {Path(transcript_path).expanduser()}
+        candidates = {normalized_path(transcript_path)}
         discovery = 'hook_path'
     else:
         candidates = set(known_sources)
@@ -84,7 +85,7 @@ def refresh_chat(store, chat_id, transcript_path=None):
         if candidate not in known_sources and candidate.name in relocated_names:
             continue  # A known source owns this relocation, including its failure.
         try:
-            path = candidate.resolve()
+            path = normalized_path(candidate)
             if not any(path.is_relative_to(root) for root in roots):
                 skipped.append(source_issue(candidate, 'outside_allowlist', known=known))
                 continue

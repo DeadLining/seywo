@@ -75,7 +75,7 @@ def _connect_write(state):
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not path.exists():
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
             os.close(fd)
         except FileExistsError:
             pass

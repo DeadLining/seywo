@@ -1,5 +1,6 @@
 """Exercise the real refresh -> worker CLI boundary without provider calls."""
 import json
+import os
 import sys
 import pytest
 from sessiongraph.auto_update import _execute, run_update
@@ -29,6 +30,19 @@ def test_old_path_resolves_after_verified_archive_import_readonly(tmp_path):
         assert resolve_segment(read,'chat-1',str(old))==segment
         assert read.db.total_changes==0
     finally:read.close()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows extended paths')
+def test_windows_extended_path_resolves_only_indexed_chat(tmp_path):
+    root, store, path = make_store(tmp_path, [('user', 'source evidence')])
+    try:
+        normal = resolve_segment(store, 'chat-1', str(path))
+        assert normal is not None
+        assert resolve_segment(store, 'chat-1', '\\\\?\\' + str(path)) == normal
+        assert resolve_segment(store, 'different-chat', '\\\\?\\' + str(path)) is None
+        assert resolve_segment(store, 'chat-1', '\\\\?\\' + str(root / 'other.jsonl')) is None
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize('mode',['changed','missing','outside','ambiguous','foreign','old_recreated'])

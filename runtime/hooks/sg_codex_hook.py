@@ -219,6 +219,13 @@ def main() -> int:
     if (config.parent / "disabled").exists() or load_config(config).get("hook", {}).get("enabled") is False:
         return 0
 
+    # Task flows are generated only by the user's explicit per-chat action.
+    # Lifecycle notifications must not enqueue extraction or cleanup.
+    if event in {'PreCompact', 'PostCompact', 'Stop', 'SessionEnd'}:
+        return 0
+    if event in {'SessionStart', 'UserPromptSubmit'}:
+        return 0
+
     if event in {'SessionStart', 'PostCompact', 'Stop', 'SessionEnd'}:
         from sessiongraph.tier_backfill import start as start_tier_backfill
         try:

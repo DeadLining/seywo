@@ -5,12 +5,11 @@ Only write-side entry points start this runner. Reads merely inspect its queue.
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
+from . import file_lock as fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
-import select
 import sqlite3
 import subprocess
 import sys
@@ -29,7 +28,8 @@ def root(config=None):
     # Isolated library/test use must never write the user's global runtime.
     if config:
         return Path(config['database']).parent / 'hook-state' / 'continuations'
-    return Path(os.environ.get('SESSIONGRAPH_RUNTIME_HOME', str(Path.home() / 'Library/Application Support/local-ai-gateway/sessiongraph'))) / 'continuations'
+    from .platform_paths import runtime_home
+    return runtime_home() / 'continuations'
 
 
 @contextmanager
@@ -422,13 +422,12 @@ def run(folder, project=None):
     with project_lock(folder, project).open('a') as singleton:
         try:fcntl.flock(singleton,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError:return
-        try:os.nice(10)
-        except OSError:pass
-        # macOS kqueue wakes only on an atomic queue write or the next due time.
-        # There is no periodic scan, model call or CPU loop during retry backoff.
-        fd=os.open(folder,os.O_RDONLY)
-        watcher=select.kqueue()
-        watcher.control([select.kevent(fd,filter=select.KQ_FILTER_VNODE,flags=select.KQ_EV_ADD|select.KQ_EV_CLEAR,fflags=select.KQ_NOTE_WRITE)],0,0)
+        if hasattr(os, 'nice'):
+            try:os.nice(10)
+            except OSError:pass
+        # The kernel wakes the runner for a queue write or its next retry deadline.
+        from .queue_watch import QueueWatcher
+        watcher=QueueWatcher(folder)
         try:
             while True:
                 with locked(folder):
@@ -441,12 +440,11 @@ def run(folder, project=None):
                         return
                     delay=max(0,min(v['due'] for v in pending)-time.time())
                 if delay:
-                    watcher.control(None,1,delay)
+                    watcher.wait(delay)
                 else:
                     process_one(folder, project=project)
         finally:
             watcher.close()
-            os.close(fd)
 
 
 def main():

@@ -1,6 +1,7 @@
 """Switch only the shared runtime owner, preserving registration, locks and data."""
 import argparse
 import json
+import os
 from pathlib import Path
 import shlex
 import sys
@@ -18,8 +19,8 @@ if not (a.source / "entrypoint.py").is_file() or not a.python.is_file():
     raise ValueError("missing runtime")
 a.state.mkdir(parents=True, exist_ok=True, mode=0o700)
 with locked(a.state / "install.lock"):
-    changes = {
-        a.state / "runtime.json": json.dumps({"python": str(a.python), "source": str(a.source)}, indent=2) + "\n",
-        a.state / "bin/sessiongraph": "#!/bin/sh\nexec " + shlex.quote(str(a.python)) + " -B " + shlex.quote(str(a.source / "entrypoint.py")) + ' "$@"\n',
-    }
+    changes = {a.state / "runtime.json": json.dumps({"python": str(a.python), "source": str(a.source)}, indent=2) + "\n"}
+    if os.name != "nt":
+        changes[a.state / "bin/sessiongraph"] = ("#!/bin/sh\nexec " + shlex.quote(str(a.python))
+            + " -B " + shlex.quote(str(a.source / "entrypoint.py")) + ' "$@"\n')
     print(json.dumps(apply_changes(a.state, changes), ensure_ascii=False))

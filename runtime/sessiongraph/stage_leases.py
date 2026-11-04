@@ -1,7 +1,7 @@
 """Opt-in stage ownership and short graph-write windows, with no heartbeat loop."""
 from contextlib import contextmanager
 from contextvars import ContextVar
-import fcntl
+from . import file_lock as fcntl
 from functools import wraps
 import hashlib
 import os

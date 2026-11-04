@@ -361,7 +361,7 @@ def main(argv=None) -> int:
                 if not args.apply:
                     result = recover(store, request_id=args.request_id, job_ids=args.job_id)
                 else:
-                    import fcntl
+                    from . import file_lock as fcntl
                     from .stage_leases import quiescent
                     with quiescent(store.config, 'recover-blocked: project batch active; retry after completion'), (Path(store.config["database"]).parent / "graph-v2.lock").open("a") as lock:
                         try:
@@ -370,7 +370,7 @@ def main(argv=None) -> int:
                             raise ValueError("recover-blocked: project batch active; retry after completion") from None
                         result = recover(store, request_id=args.request_id, job_ids=args.job_id, apply=True, launch=not args.no_launch)
             elif args.command == "storage-maintain":
-                import fcntl
+                from . import file_lock as fcntl
                 from .storage import migrate_sources, compact_term_tables, prune_completed_checkpoints, archive_completed_payloads
                 if not args.apply:
                     raise ValueError("storage-maintain requires --apply; take a verified database backup first")

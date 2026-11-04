@@ -13,15 +13,16 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import sys
 import tomllib
 import unicodedata
 from urllib.parse import urlsplit
 
 from .core import digest
-from .gateway_install import apply_changes, install, agents_guidance_installed, uninstall
+from .gateway_install import (apply_changes, install, agents_guidance_installed,
+                              uninstall, mcp_registration, hook_command)
 from .global_hooks import EVENTS, locked
+from .project_binding import normalized_path
 from .provider_credentials import validate_endpoint, save_key
 from .provider_settings import PROVIDER_FIELDS, effective_provider, read_template
 
@@ -76,8 +77,12 @@ def _provider_key(provider, state, codex_home):
 def _snapshot(state, codex_home, config):
     provider = effective_provider(_json(config).get("provider", {}) if config else {}, state)
     launcher = state / "bin/sessiongraph"
+    runtime = _json(state / "runtime.json")
+    python = Path(runtime["python"]) if runtime.get("python") else None
+    source = Path(runtime["source"]) if runtime.get("source") else None
+    command = hook_command(state, python, source) if python and source else ""
+    registration = mcp_registration(state, python, source) if python and source else {}
     hooks = _json(codex_home / "hooks.json").get("hooks", {})
-    command = shlex.quote(str(launcher)) + " hook-event"
     matches = [
         any(
             h.get("type") == "command" and h.get("command") == command
@@ -92,7 +97,6 @@ def _snapshot(state, codex_home, config):
         raise ValueError("configuration_too_large")
     data = tomllib.loads(path.read_text()) if path.exists() else {}
     mcp = data.get("mcp_servers", {}).get("sessiongraph", {})
-    runtime = _json(state / "runtime.json")
     return dict(
         ok=True,
         judgment_backend="selected_model",
@@ -105,12 +109,15 @@ def _snapshot(state, codex_home, config):
         api_key_env=provider.get("api_key_env", "GRAPH_LLM_API_KEY"),
         api_key_configured=bool(_provider_key(provider, state, codex_home)),
         hook_event_count=len(EVENTS),
-        runtime_installed=launcher.is_file() and Path(runtime.get("python", "")).is_file(),
+        runtime_installed=bool(python and source and python.is_file()
+                               and (source / "entrypoint.py").is_file()
+                               and (os.name == "nt" or launcher.is_file())),
         hook_registered=all(matches),
         hook_events=sum(matches),
         hook_enabled=settings.get("enabled") is True,
-        mcp_registered=mcp.get("command") == str(launcher)
-        and mcp.get("args") == ["mcp"]
+        mcp_registered=bool(registration)
+        and mcp.get("command") == registration["command"]
+        and mcp.get("args") == registration["args"]
         and mcp.get("enabled") is not False,
         mcp_guidance_installed=agents_guidance_installed(codex_home / "AGENTS.md"),
         message="",
@@ -137,11 +144,14 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
         "install_mcp",
         "uninstall_hooks",
         "uninstall_mcp",
+        "save_jev",
     }:
         raise ValueError("invalid_action")
     if action not in {"save_model", "save_provider", "test_provider"} and request.get("model") is not None:
         raise ValueError("unexpected_model")
-    if action not in {"save_provider", "test_provider"} and any(request.get(k) is not None for k in ("endpoint", "api_key_env", "api_key")):
+    if action not in {"save_provider", "test_provider"} and any(request.get(k) is not None for k in ("endpoint", "api_key_env")):
+        raise ValueError("unexpected_provider")
+    if action not in {"save_provider", "test_provider", "save_jev"} and request.get("api_key") is not None:
         raise ValueError("unexpected_provider")
     removing = action in {"uninstall_hooks", "uninstall_mcp"}
     config = None if removing else _project(state, request.get("project"))
@@ -169,6 +179,12 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
                                state=state, codex_home=codex_home, api_key=request.get("api_key"),
                                project=request.get("project") or "")
         return dict(snapshot, **probe)
+    if action == "save_jev":
+        from .jev import save_saved_key
+        save_saved_key(state, request.get("api_key"))
+        result = _snapshot(state, codex_home, None)
+        result["message"] = "Jev 密钥已保存在本机。"
+        return result
     if config is None and not removing and action not in {"save_model", "save_provider", "test_provider"}:
         raise ValueError("select_initialized_project")
     if action in {"storage_preview", "storage_compact", "clean_notices", "clear_tasks"}:
@@ -225,7 +241,13 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
     else:
         if sys.version_info < (3, 11) or importlib.util.find_spec("mcp") is None:
             raise ValueError("python_mcp_required")
-        if source.parts[-3:] != ("Contents", "Resources", "sessiongraph"):
+        installed = (source.parts[-3:] == ("Contents", "Resources", "sessiongraph"))
+        if os.name == "nt":
+            app_exe = Path(os.environ.get("SESSIONGRAPH_APP_EXE", ""))
+            installed = bool(app_exe.is_file() and source.name == "sessiongraph" and
+                             normalized_path(app_exe.parent) == normalized_path(source.parent) and
+                             (source / "entrypoint.py").is_file())
+        if not installed:
             raise ValueError("installed_app_required")
         if action == "install_mcp":
             path = codex_home / "config.toml"
@@ -234,8 +256,11 @@ def handle(request, *, state: Path, codex_home: Path, source: Path):
                 if path.exists()
                 else {}
             )
-            if existing.get("command") == str(state / "bin/sessiongraph") and (
-                existing.get("args") != ["mcp"]
+            expected = mcp_registration(state, Path(sys.executable), _installed_runtime_source(state, source))
+            previous = mcp_registration(state) if (state / "runtime.json").is_file() else None
+            if existing.get("command") == expected["command"] and (
+                (existing.get("args") != expected["args"]
+                 and (previous is None or existing.get("args") != previous["args"]))
                 or set(existing) - {"command", "args", "tool_timeout_sec"}
                 or existing.get("tool_timeout_sec", 60) != 60
             ):

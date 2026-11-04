@@ -1,5 +1,7 @@
 import copy
 import json
+import os
+from pathlib import Path
 import socket
 import sqlite3
 import tomllib
@@ -227,6 +229,35 @@ def test_dev_checkout_cannot_retarget_installed_launcher(tmp_path):
     args["source"] = tmp_path / "checkout/vendor/sessiongraph"
     with pytest.raises(ValueError, match="installed_app_required"):
         handle({"action": "install_mcp", "project": pid}, **args)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended paths")
+def test_windows_installed_app_accepts_extended_path_but_rejects_other_directory(tmp_path, monkeypatch):
+    from sessiongraph import native_settings
+
+    _, args, pid = setup(tmp_path)
+    app_dir = tmp_path / "installed"
+    source = app_dir / "sessiongraph"
+    source.mkdir(parents=True)
+    (source / "entrypoint.py").write_text("")
+    app_exe = app_dir / "sessiongraph-app.exe"
+    app_exe.write_text("")
+    calls = []
+    monkeypatch.setenv("SESSIONGRAPH_APP_EXE", str(app_exe))
+    monkeypatch.setattr(native_settings, "install", lambda **kwargs: calls.append(kwargs) or {"changed": []})
+
+    for candidate in (source, Path("\\\\?\\" + str(source))):
+        args["source"] = candidate
+        assert handle({"action": "install_hooks", "project": pid}, **args)["ok"]
+    assert len(calls) == 2
+
+    other_exe = tmp_path / "other" / "sessiongraph-app.exe"
+    other_exe.parent.mkdir()
+    other_exe.write_text("")
+    monkeypatch.setenv("SESSIONGRAPH_APP_EXE", str(other_exe))
+    with pytest.raises(ValueError, match="installed_app_required"):
+        handle({"action": "install_hooks", "project": pid}, **args)
+    assert len(calls) == 2
 
 
 def test_mcp_installs_bounded_agents_guidance_with_backup_and_idempotence(tmp_path):
