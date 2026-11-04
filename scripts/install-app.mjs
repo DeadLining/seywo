@@ -42,11 +42,24 @@ try {
     const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}}
     const deadline=Date.now()+5000
     while(running.some(alive)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100)
-    if(!running.some(alive))try{execFileSync('open',[target])}catch{console.warn('Open /Applications/SessionGraph.app to load the installed UI')}
+    if(running.some(alive))throw new Error('Old app did not exit; restoring previous installation')
+    try{execFileSync('open',[target])}catch{console.warn('Open /Applications/SessionGraph.app to load the installed UI')}
   }
-  console.log(`Installed ${target}; prior bundle: ${replaced?backup:'none'}`)
+  console.log(`Installed ${target}`)
 } catch(error) {
   fs.rmSync(stage,{recursive:true,force:true})
   if(replaced&&fs.existsSync(backup)) {fs.rmSync(target,{recursive:true,force:true});fs.renameSync(backup,target)}
   throw error
 }
+
+// The previous bundle exists only during installation for failure recovery.
+// Successful installs retain no automatic app backups. Cleanup failures are
+// reported without rolling back a successfully installed app.
+try {
+  const folder=path.dirname(target), prefix=`${path.basename(target)}.backup-`
+  for(const entry of fs.readdirSync(folder,{withFileTypes:true})) {
+    const candidate=path.join(folder,entry.name)
+    if(entry.isDirectory()&&entry.name.startsWith(prefix)&&/^\d+$/.test(entry.name.slice(prefix.length)))
+      try{fs.rmSync(candidate,{recursive:true})}catch(error){console.warn(`Backup cleanup failed: ${candidate}: ${error.message}`)}
+  }
+} catch(error) {console.warn(`Backup cleanup failed: ${error.message}`)}
