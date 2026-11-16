@@ -1,0 +1,16 @@
+{
+  "name": "seywo-plugin-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../../seywo/ui/build.mjs",
+    "test": "node --test ../../seywo/ui/panel.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.4"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "jsdom": "^29.1.1"
+  }
+}

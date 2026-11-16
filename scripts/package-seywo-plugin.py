@@ -24,13 +24,17 @@ def build(output):
     files = ['README.md', 'pyproject.toml', 'mcp.json', 'hooks.json',
              'ui/panel.html', 'ui/THIRD_PARTY_NOTICES.txt']
     sources = [plugin / name for name in files]
+    public_contract = REPO / 'docs/seywo-mcp.md'
+    if public_contract.is_file():
+        sources.append(public_contract)
     for folder in roots:
         sources.extend(path for path in (plugin / folder).rglob('*')
                        if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
     for source in sorted(sources):
         if source.is_symlink():
             raise ValueError('Package sources must not be symlinks')
-        destination = package / 'seywo' / source.relative_to(plugin)
+        relative = source.relative_to(plugin) if source.is_relative_to(plugin) else Path('docs') / source.name
+        destination = package / 'seywo' / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
     for name in ('LICENSE', 'LICENSE.md'):

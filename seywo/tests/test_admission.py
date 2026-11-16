@@ -62,8 +62,7 @@ def test_previously_queued_agent_is_terminally_excluded(tmp_path, monkeypatch):
     inbox.record(config, 'human-parent', 'PreCompact', str(path))
     monkeypatch.setattr(maintain, 'read_provider', lambda config: {
         'endpoint': 'http://127.0.0.1:1/responses', 'model': 'fake',
-        'timeout': 5, 'max_output_tokens': 4000})
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: 'test-key')
+        'timeout': 5, 'max_output_tokens': 4000, '_api_key': 'test-key'})
     def forbidden(*args, **kwargs):
         raise AssertionError('agent source must not cause a request or reroute')
     monkeypatch.setattr(maintain.Transport, 'complete', forbidden)
@@ -92,7 +91,6 @@ def test_existing_agent_rows_are_preserved_but_not_published_or_resumed(tmp_path
         assert store.db.execute('SELECT count(*) FROM source_segments').fetchone()[0] == 1
     monkeypatch.setattr(maintain, 'read_provider', lambda config: {
         'endpoint': 'http://127.0.0.1:1/responses', 'model': 'fake',
-        'timeout': 5, 'max_output_tokens': 4000})
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: 'test-key')
+        'timeout': 5, 'max_output_tokens': 4000, '_api_key': 'test-key'})
     report = maintain.run_chat(config, 'physical-child')
     assert report['state'] == 'excluded' and report['calls'] == 0

@@ -199,8 +199,7 @@ def test_invalid_phase_keeps_delta_cursor_then_recovers_without_replaying_publis
             stage = '权限验证' if change and self.repaired else '核对范围'
             return {'output': delta(title, stage, 'new_phase' if change else 'continue'),
                     'error': None, 'usage': {'input_tokens': 100, 'output_tokens': 40}}
-    monkeypatch.setattr(maintain, 'read_provider', lambda config: {'endpoint': 'http://127.0.0.1:1/responses', 'model': 'fixture-model', 'timeout': 1, 'max_output_tokens': 900})
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: 'fixture')
+    monkeypatch.setattr(maintain, 'read_provider', lambda config: {'endpoint': 'http://127.0.0.1:1/responses', 'model': 'fixture-model', 'timeout': 1, 'max_output_tokens': 900, '_api_key': 'fixture'})
     monkeypatch.setattr(maintain, 'Transport', Transport)
     ingress = transcript(tmp_path, 'cursor-chat', [('先核对范围', '进行中'), ('现在验证权限', '收到')])
     inbox.record(config, 'cursor-chat', 'PreCompact', str(ingress))

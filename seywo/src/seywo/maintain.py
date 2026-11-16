@@ -25,7 +25,7 @@ from .codex_transport import CodexTransport
 from .hook import chat_identity, spawn as spawn_worker
 from .narrative import Narrative
 from .provider import Capacity
-from .settings import load_key, read_provider
+from .settings import read_provider
 from .store import Store
 from .transport import Transport
 from .understanding import Limits, Options, Understanding
@@ -99,7 +99,7 @@ def _run_chat(config, chat_id):
             return {"state": "blocked", "error_code": "codex_requires_compact_pipeline", "calls": 0}
         transport = CodexTransport(model=model, timeout=timeout)
     else:
-        key = provider["_api_key"] if "_api_key" in provider else load_key(provider["endpoint"])
+        key = provider.get("_api_key", "")
         if not key:
             return {"state": "blocked", "error_code": "missing_provider_credential", "calls": 0}
         transport = Transport(provider["endpoint"], key, model, timeout=timeout)

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real plugin install + host MCP acceptance, with isolated config and project."""
 import argparse
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -273,7 +274,7 @@ with Store(load_config(Path(sys.argv[2]))) as store:
                 assert status['model_calls'] == 0
                 assert not (installed / '.seywo').exists()
                 assert (workspace / '.seywo/.gitignore').read_text() == '*\n!.gitignore\n'
-                return {'verified_on': '2026-11-13', 'status': 'passed',
+                return {'verified_on': date.today().isoformat(), 'status': 'passed',
                         'host': host['userAgent'], 'marketplace': 'seywo-local',
                         'plugin': 'seywo', 'plugin_hooks': plugin_hooks, 'completed_hooks': completed_hooks, 'runtime_status': running['runtimeStatus'],
                         'tools': sorted(running['tools']), 'tool_count': len(running['tools']),

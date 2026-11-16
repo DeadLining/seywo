@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { JSDOM } from '../../node_modules/jsdom/lib/api.js';
+import { createRequire } from 'node:module';
+const require = createRequire(new URL('../../tools/seywo-ui/package.json', import.meta.url));
+const { JSDOM } = require('jsdom');
 import { mountPanel } from './panel.js';
 const tick = () => new Promise(r => setTimeout(r, 15));
 const narrative = { chat_id: 'chat-a', version: 7, head_version: 7, selected_phase: 'p', node_count: 2, focus: { phase_id: 'p' },
@@ -218,6 +220,14 @@ test('mainline precedes secondary lists and long priority lists fold after three
     assert.match(more.querySelector('summary').textContent, /其余 6 项/);
 });
 
+test('uses one model settings entry instead of a duplicate header control', async () => {
+    const f = fixture();
+    await mountPanel(f.root, f.call, {}, { modelStatus: async () => ({backend: 'codex', configured: true}) });
+    assert.equal(f.root.querySelector('[data-settings-toggle]'), null);
+    assert.equal(f.root.querySelectorAll('[data-settings]').length, 1);
+    assert.equal(f.root.querySelectorAll('[data-settings] summary').length, 1);
+});
+
 test('shows project-local model settings without exposing the saved key', async () => {
     const f = fixture();
     const actions = {
@@ -226,7 +236,7 @@ test('shows project-local model settings without exposing the saved key', async 
         modelTest: async args => { f.testArgs = args; return {ok: true, model_calls: 1}; },
     };
     await mountPanel(f.root, f.call, {chat_id: 'chat-a'}, actions);
-    f.root.querySelector('[data-settings-toggle]').click();
+    f.root.querySelector('[data-settings] summary').click();
     await tick();
     assert.match(f.root.textContent, /模型设置/);
     assert.equal(f.root.querySelector('[data-model-name]').value, 'deepseek-v4-flash-0731');
@@ -244,7 +254,7 @@ test('defaults to Codex model with no endpoint or key fields', async () => {
         modelSave: async args => {saved=args;return {saved:true};},
         modelTest: async () => ({ok:true}),
     });
-    f.root.querySelector('[data-settings-toggle]').click(); await tick();
+    f.root.querySelector('[data-settings] summary').click(); await tick();
     assert.match(f.root.textContent, /使用 Codex 当前配置/);
     assert.equal(f.root.querySelector('[data-model-endpoint]').closest('[data-api-fields]').hidden, true);
     f.root.querySelector('[data-model-save]').click(); await tick();

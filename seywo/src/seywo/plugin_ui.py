@@ -65,9 +65,11 @@ def register_panel(server, resolve_config):
     async def seywo_model_status() -> str:
         """Read the project-local model configuration without calling a model."""
         path = await resolve_config(server.get_context())
+        # The model setting is host-level by default. It must remain readable
+        # before Seywo is initialized because initialization controls storage
+        # and hooks, not access to the Codex login/provider.
         if not path.exists():
-            return serialize({'configured': False, 'endpoint': '', 'model': '',
-                              'credential_configured': False, 'model_calls': 0})
+            return serialize(provider_status())
         return serialize(provider_status(load_config(path)))
 
     @server.tool(annotations=app_only_write, structured_output=False,
@@ -75,12 +77,16 @@ def register_panel(server, resolve_config):
     async def seywo_model_save(endpoint: str = "", model: str = "", api_key: str = "",
                                timeout_seconds: int = 180, max_output_tokens: int = 4000,
                                backend: Literal["codex", "responses"] = "responses") -> str:
-        """Save the provider for this project; the key is never returned or persisted in config.json."""
+        """Select Codex or save a custom provider; keys never enter config.json."""
         path = await resolve_config(server.get_context())
+        if backend == "codex":
+            # Codex is a host-level runtime. Selecting it does not need a
+            # project database and must work before Seywo initialization.
+            if not path.exists():
+                return serialize({"saved": True, "persisted": False, **provider_status()})
+            return serialize(use_codex(load_config(path), model=model))
         if not path.exists():
             raise ValueError('initialization_required')
-        if backend == "codex":
-            return serialize(use_codex(load_config(path), model=model))
         result = save_provider(load_config(path), endpoint=endpoint, model=model, api_key=api_key,
                                timeout_seconds=timeout_seconds, max_output_tokens=max_output_tokens)
         return serialize(result)
@@ -92,9 +98,10 @@ def register_panel(server, resolve_config):
                                backend: Literal["codex", "responses"] | None = None) -> str:
         """Make one explicit connectivity call using the entered or saved provider."""
         path = await resolve_config(server.get_context())
-        if not path.exists():
-            raise ValueError('initialization_required')
-        config = load_config(path)
+        # Codex uses the host login/provider and can be tested before Seywo
+        # creates project-local storage. Custom providers still use saved
+        # project settings when available.
+        config = load_config(path) if path.exists() else {}
         current = provider_status(config)
         selected = backend or ("responses" if endpoint or api_key else current.get("backend"))
         if selected == "codex":

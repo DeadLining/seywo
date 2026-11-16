@@ -35,11 +35,37 @@ def test_model_status_is_app_only_and_does_not_call_model(tmp_path):
     import asyncio
     result = asyncio.run(server.call_tool('seywo_model_status', {}))
     data = json.loads(result[0].text)
-    assert data['configured'] is False
+    assert data['backend'] == 'codex'
+    assert data['credential_required'] is False
     assert data['model_calls'] == 0
     tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
     assert tools['seywo_model_status'].meta['ui']['visibility'] == ['app']
     assert tools['seywo_model_save'].meta['ui']['visibility'] == ['app']
+
+
+def test_uninitialized_project_reports_default_codex_status(tmp_path):
+    import asyncio
+    server = create_plugin_server(tmp_path)
+    result = asyncio.run(server.call_tool('seywo_model_status', {}))
+    data = json.loads(result[0].text)
+    assert data['backend'] == 'codex'
+    assert data['credential_required'] is False
+    assert data['model'] == 'codex-default'
+    assert data['model_calls'] == 0
+    assert not (tmp_path / '.seywo').exists()
+
+
+def test_missing_runtime_in_existing_project_keeps_codex_default(tmp_path):
+    import asyncio
+    initialize(tmp_path)
+    path = tmp_path / '.seywo/config.json'
+    config = json.loads(path.read_text())
+    config.pop('model_runtime', None)
+    path.write_text(json.dumps(config))
+    data = json.loads(asyncio.run(create_plugin_server(tmp_path).call_tool(
+        'seywo_model_status', {}))[0].text)
+    assert data['backend'] == 'codex'
+    assert data['credential_required'] is False
 
 
 def test_explicit_model_test_makes_one_call_without_persisting_key(tmp_path, monkeypatch):
@@ -82,6 +108,31 @@ def test_plugin_default_uses_codex_without_api_key_and_can_switch_back(tmp_path)
     assert read_provider(load_config(tmp_path / '.seywo/config.json'))['backend'] == 'codex'
 
 
+def test_uninitialized_project_can_test_and_select_codex_without_writes(tmp_path, monkeypatch):
+    import asyncio
+    from seywo import plugin_ui
+
+    calls = []
+
+    class FakeTransport:
+        def __init__(self, *, model, timeout):
+            calls.append((model, timeout))
+
+        def probe(self):
+            return {'output': {'ok': True}, 'finish': 'complete', 'error': None,
+                    'usage': {'input_tokens': 1, 'output_tokens': 1}, 'seconds': 0.01}
+
+    monkeypatch.setattr(plugin_ui, 'CodexTransport', FakeTransport)
+    server = create_plugin_server(tmp_path)
+    tested = json.loads(asyncio.run(server.call_tool('seywo_model_test', {}))[0].text)
+    selected = json.loads(asyncio.run(server.call_tool('seywo_model_save', {'backend': 'codex'}))[0].text)
+    assert tested['ok'] and tested['model_calls'] == 1
+    assert selected['saved'] and selected['persisted'] is False
+    assert selected['backend'] == 'codex'
+    assert calls == [('codex-default', 60)]
+    assert not (tmp_path / '.seywo').exists()
+
+
 def test_changed_endpoint_never_reuses_old_credential(tmp_path, monkeypatch):
     import asyncio
     from seywo import plugin_ui
@@ -96,26 +147,14 @@ def test_changed_endpoint_never_reuses_old_credential(tmp_path, monkeypatch):
         asyncio.run(server.call_tool('seywo_model_test', {'endpoint': 'https://other.test/v1', 'model': 'test'}))
 
 
-def test_plugin_codex_never_reads_standalone_template(tmp_path, monkeypatch):
+def test_plugin_codex_uses_project_local_runtime(tmp_path):
     from seywo.config import enable_plugin_hook
-    app = tmp_path / 'old-app'
-    app.mkdir()
-    (app / 'template.json').write_text('invalid JSON')
-    monkeypatch.setenv('SEYWO_APP_STATE', str(app))
     root = tmp_path / 'plugin-project'
     initialize(root)
     path = root / '.seywo/config.json'
     enable_plugin_hook(path)
     assert read_provider(load_config(path))['backend'] == 'codex'
 
-
-def test_standalone_saved_settings_remain_compatible(tmp_path, monkeypatch):
-    app = tmp_path / 'old-app'
-    app.mkdir()
-    (app / 'template.json').write_text(json.dumps({'provider': {
-        'endpoint': 'https://old.test/v1/responses', 'model': 'old-model'}}))
-    monkeypatch.setenv('SEYWO_APP_STATE', str(app))
-    assert read_provider()['model'] == 'old-model'
 
 
 def test_settings_preserve_other_changes_with_stale_config(tmp_path):

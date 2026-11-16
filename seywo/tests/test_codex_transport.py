@@ -77,7 +77,6 @@ def test_maintainer_routes_compact_through_codex_without_provider_credentials(tm
     fake = CompactTransport()
     fake.model = 'codex-default'
     monkeypatch.setattr(maintain, 'CodexTransport', lambda **kwargs: fake)
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: pytest.fail('API credentials must not be loaded'))
     chat = 'native-compact-fixture'
     inbox.record(config, chat, 'PreCompact', str(make_source(tmp_path, chat)))
     report = maintain.run_chat(config, chat)

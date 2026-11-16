@@ -58,9 +58,8 @@ def test_compact_route_calls_model_once_for_one_multi_turn_compact(tmp_path, mon
     monkeypatch.setattr(maintain, "Transport", lambda *args, **kwargs: transport)
     monkeypatch.setattr(maintain, "read_provider", lambda config=None: {
         "endpoint": "http://127.0.0.1:1/responses", "model": "compact-test-model",
-        "timeout": 5, "max_output_tokens": 1200,
+        "timeout": 5, "max_output_tokens": 1200, "_api_key": "key",
     })
-    monkeypatch.setattr(maintain, "load_key", lambda endpoint: "key")
 
     chat_id = "compact-chat"
     source = make_source(root, chat_id)
@@ -93,9 +92,8 @@ def test_compact_failure_keeps_cursor_before_and_records_failure(tmp_path, monke
     monkeypatch.setattr(maintain, "Transport", lambda *args, **kwargs: transport)
     monkeypatch.setattr(maintain, "read_provider", lambda config=None: {
         "endpoint": "http://127.0.0.1:1/responses", "model": "compact-test-model",
-        "timeout": 5, "max_output_tokens": 1200,
+        "timeout": 5, "max_output_tokens": 1200, "_api_key": "key",
     })
-    monkeypatch.setattr(maintain, "load_key", lambda endpoint: "key")
     chat_id = "compact-failed"
     inbox.record(config, chat_id, "PreCompact", str(make_source(root, chat_id)))
     report = maintain.run_chat(config, chat_id)
@@ -141,9 +139,8 @@ def test_oversized_compact_batches_reuse_the_in_memory_catalog(tmp_path, monkeyp
     monkeypatch.setattr(maintain, "Transport", lambda *args, **kwargs: transport)
     monkeypatch.setattr(maintain, "read_provider", lambda config=None: {
         "endpoint": "http://127.0.0.1:1/responses", "model": "compact-test-model",
-        "timeout": 5, "max_output_tokens": 1200,
+        "timeout": 5, "max_output_tokens": 1200, "_api_key": "key",
     })
-    monkeypatch.setattr(maintain, "load_key", lambda endpoint: "key")
     chat_id = "compact-batched"
     source = root / "many-turns.jsonl"
     records = [{"type": "session_meta", "payload": {"id": chat_id, "cwd": str(root)}}]
@@ -186,8 +183,7 @@ def test_current_only_publication_and_model_identity_receipt(tmp_path, monkeypat
     monkeypatch.setattr(maintain, 'Transport', lambda *a, **kw: fake)
     monkeypatch.setattr(maintain, 'read_provider', lambda config=None: {
         'endpoint': 'http://127.0.0.1:1/responses', 'model': fake.model,
-        'timeout': 5, 'max_output_tokens': 1200})
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: 'fixture')
+        'timeout': 5, 'max_output_tokens': 1200, '_api_key': 'fixture'})
     source = make_source(root, 'identity-chat')
     inbox.record(config, 'identity-chat', 'PreCompact', str(source))
     report = maintain.run_chat(config, 'identity-chat')

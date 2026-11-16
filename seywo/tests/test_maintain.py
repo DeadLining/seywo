@@ -40,8 +40,7 @@ def env(tmp_path, monkeypatch):
     path.write_text(json.dumps(data))
     monkeypatch.setattr(maintain, "read_provider", lambda config=None: {
         "endpoint": "http://127.0.0.1:1/openai/v1/responses", "model": "fake",
-        "timeout": 5, "max_output_tokens": 4000})
-    monkeypatch.setattr(maintain, "load_key", lambda endpoint: "key")
+        "timeout": 5, "max_output_tokens": 4000, "_api_key": "key"})
     monkeypatch.setattr(maintain, "Transport", FakeTransport)
     return load_config(path), tmp_path
 
@@ -495,7 +494,9 @@ def test_waiting_context_does_not_spin_without_spending_calls(env, tmp_path, mon
 
 def test_missing_credential_blocks_without_losing_record(env, tmp_path, monkeypatch):
     config, _ = env
-    monkeypatch.setattr(maintain, "load_key", lambda endpoint: "")
+    monkeypatch.setattr(maintain, "read_provider", lambda config=None: {
+        "endpoint": "http://127.0.0.1:1/openai/v1/responses", "model": "fake",
+        "timeout": 5, "max_output_tokens": 4000, "_api_key": ""})
     path = source(tmp_path, "chat-1", [("一", "二")])
     inbox.record(config, "chat-1", "PreCompact", str(path))
     assert maintain.run_chat(config, "chat-1")["error_code"] == "missing_provider_credential"

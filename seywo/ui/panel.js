@@ -7,7 +7,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         n.textContent = text; if (cls)
         n.className = cls; return n; };
     const button = (text, fn, cls = '') => { const b = el('button', text, cls); b.type = 'button'; b.onclick = fn; return b; };
-    root.innerHTML = '<header class="header"><div class="brand"><span class="mark">S</span><div><h1>Seywo</h1><p data-project>项目记忆</p></div></div><div class="header-actions"><button data-settings-toggle aria-label="模型设置" title="模型设置">设置</button><button data-refresh aria-label="刷新记录" title="刷新记录"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg></button></div></header><div class="selector"><label for="chat">对话</label><select id="chat" data-chat><option value="">选择一个 Chat</option></select></div><button data-more-chats class="more" hidden>更多对话</button><div data-notice role="status"></div><details data-settings hidden><summary>模型设置</summary><div data-settings-body></div></details><main data-content></main><aside data-drawer hidden aria-label="节点来源"><button data-close aria-label="关闭来源">×</button><div data-detail></div></aside><footer>本地记录 · 按需读取原文</footer>';
+    root.innerHTML = '<header class="header"><div class="brand"><span class="mark">S</span><div><h1>Seywo</h1><p data-project>项目记忆</p></div></div><div class="header-actions"><button data-refresh aria-label="刷新记录" title="刷新记录"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg></button></div></header><div class="selector"><label for="chat">对话</label><select id="chat" data-chat><option value="">选择一个 Chat</option></select></div><button data-more-chats class="more" hidden>更多对话</button><div data-notice role="status"></div><details data-settings><summary>模型设置</summary><div data-settings-body></div></details><main data-content></main><aside data-drawer hidden aria-label="节点来源"><button data-close aria-label="关闭来源">×</button><div data-detail></div></aside><footer>本地记录 · 按需读取原文</footer>';
     const content = root.querySelector('[data-content]'), notice = root.querySelector('[data-notice]');
     const drawer = root.querySelector('[data-drawer]'), detail = root.querySelector('[data-detail]');
     const settings = root.querySelector('[data-settings]'), settingsBody = root.querySelector('[data-settings-body]');
@@ -51,7 +51,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                 const result = kind === 'test' ? await actions.modelTest?.(args) : await actions.modelSave?.(args);
                 if (!result) throw Error('unavailable');
                 if (kind === 'test') status.textContent = result.ok ? '连接成功，本次仅调用 1 次模型。' : '连接失败，请检查模型配置或 Codex 登录状态。';
-                else { status.textContent = '已保存，后续 Compact 将使用该配置。'; key.value = ''; key.placeholder = '已保存，留空沿用'; }
+                else { status.textContent = result.persisted === false ? '已使用 Codex 当前配置，无需写入项目。' : '已保存，后续 Compact 将使用该配置。'; key.value = ''; key.placeholder = '已保存，留空沿用'; }
             } catch { status.textContent = '模型设置暂时不可用，请稍后重试。'; }
             finally { test.disabled = save.disabled = source.disabled = false; }
         };
@@ -398,9 +398,8 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         await bootstrap();
     }
     root.querySelector('[data-refresh]').onclick = bootstrap;
-    root.querySelector('[data-settings-toggle]').onclick = () => { settings.hidden = false; settings.open = !settings.open; if (settings.open) void loadSettings(); };
     settings.ontoggle = () => { if (settings.open) void loadSettings(); };
-    if (!actions.modelStatus) root.querySelector('[data-settings-toggle]').hidden = true;
+    if (!actions.modelStatus) settings.hidden = true;
     await open(initial);
     return { refresh: bootstrap, selectChat, open, state };
 }

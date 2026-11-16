@@ -1,8 +1,8 @@
-"""Project-local provider settings for the standalone and plugin runtimes.
+"""Project-local provider settings for the Seywo Codex plugin.
 
 The plugin must be relocatable: provider metadata and credentials live under the
-selected project's ignored ``.seywo`` directory. No SessionGraph application
-state or environment credential is required.
+selected project's ignored ``.seywo`` directory. No standalone application
+state or environment credential is read.
 """
 
 import hashlib
@@ -128,14 +128,15 @@ def _write_config(config: dict, data: dict) -> None:
 
 def read_provider(config=None) -> dict:
     """Read the project-local provider and attach its key for the worker only."""
-    runtime = (config or {}).get("model_runtime") or {}
+    if not isinstance(config, dict):
+        raise ValueError("project_config_required")
+    runtime = config.get("model_runtime") or {"backend": "codex"}
     if runtime.get("backend") == "codex":
         from .codex_transport import DEFAULT_MODEL
         return {"backend": "codex", "model": runtime.get("model") or DEFAULT_MODEL,
                 "timeout": 420, "max_output_tokens": 768}
     if not runtime:
-        from .legacy_settings import provider
-        return provider(config)
+        raise ValueError("provider_not_configured")
     if runtime.get("backend") != "responses":
         raise ValueError("unsupported_model_backend")
     local = (config or {}).get("provider") or {}
@@ -151,19 +152,21 @@ def read_provider(config=None) -> dict:
         "timeout": int(local.get("timeout_seconds") or DEFAULT_TIMEOUT),
         "max_output_tokens": int(local.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
     }
-    if config is not None:
-        result["_api_key"] = _read_credential(config, endpoint)
+    result["_api_key"] = _read_credential(config, endpoint)
     return result
 
 
-def load_key(endpoint: str) -> str:
-    """Standalone compatibility only; plugin paths use explicit project keys."""
-    from .legacy_settings import load_key as legacy_key
-    return legacy_key(endpoint)
 
+def provider_status(config: dict | None = None) -> dict:
+    """Report the effective provider without requiring project initialization.
 
-def provider_status(config: dict) -> dict:
-    runtime = config.get("model_runtime") or {}
+    Codex is Seywo's default runtime. A project config only overrides that
+    default when it explicitly selects another backend, so the panel can show
+    the host's current Codex availability before ``.seywo`` exists and older
+    projects remain compatible.
+    """
+    config = config if isinstance(config, dict) else {}
+    runtime = config.get("model_runtime") or {"backend": "codex"}
     if runtime.get("backend") == "codex":
         from .codex_transport import codex_command, DEFAULT_MODEL
         return {"configured": bool(codex_command()), "backend": "codex", "endpoint": "",

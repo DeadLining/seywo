@@ -19,8 +19,7 @@ def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(maintain, 'Transport', lambda *a, **kw: transport)
     monkeypatch.setattr(maintain, 'read_provider', lambda config=None: {
         'endpoint': 'http://127.0.0.1:1/responses', 'model': transport.model,
-        'timeout': 5, 'max_output_tokens': 1200})
-    monkeypatch.setattr(maintain, 'load_key', lambda endpoint: 'fixture')
+        'timeout': 5, 'max_output_tokens': 1200, '_api_key': 'fixture'})
     return config, transport
 
 

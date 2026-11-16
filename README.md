@@ -13,7 +13,7 @@ codex plugin add seywo@seywo-local
 
 在 Codex App 中，也可以通过“添加 → 添加插件市场”添加本仓库；稀疏路径使用 `.`。
 
-Seywo 插件自带本地内核、MCP、面板和 Compact Hook，默认复用用户自己的 Codex 登录、provider 和模型，不需要独立 Seywo 应用或额外 API Key。macOS/Linux 需要 Python 3.11+ 或 `uv`。首次启用项目时会在项目目录创建 `.seywo/`，该目录默认被 Git 忽略。
+Seywo 插件自带本地内核、MCP、面板和 Compact Hook，默认复用用户自己的 Codex 登录、provider 和模型，不需要独立应用或额外 API Key。macOS/Linux 需要 Python 3.11+ 或 `uv`。首次启用项目时会在项目目录创建 `.seywo/`，该目录默认被 Git 忽略。
 
 详细安装、项目绑定、Hook 信任、模型和存储边界见 [`seywo/docs/PLUGIN.md`](seywo/docs/PLUGIN.md)。
 
@@ -21,14 +21,17 @@ Seywo 插件自带本地内核、MCP、面板和 Compact Hook，默认复用用�
 
 - `.agents/plugins/marketplace.json`：Codex 插件市场清单
 - `seywo/`：Seywo 插件本体、本地运行时、MCP、Hook、面板和测试
-- `runtime/`、`src/`、`src-tauri/`：桌面端集成与兼容运行代码
+- `tools/seywo-ui/`：插件面板的开发预览和 UI 测试工具
+- `scripts/`：插件打包、安装验收和生命周期验证脚本
 - `docs/`：设计、契约和验收记录
+
+仓库不再包含旧的独立桌面 App、Tauri 工程或 SessionGraph 兼容运行时。插件的发布包由 `scripts/package-seywo-plugin.py` 生成；项目运行数据、Chat 索引、模型凭据和本地验收产物不属于仓库发布内容。
 
 ## 开发和验证
 
 ```bash
 python3 -m pytest -q -c seywo/pyproject.toml seywo/tests
-npm test
+python3 -m compileall -q seywo/src
+npm test --prefix tools/seywo-ui
+npm run build --prefix tools/seywo-ui
 ```
-
-插件的发布包由 `scripts/package-seywo-plugin.py` 生成。项目运行数据、Chat 索引、模型凭据和本地验收产物不属于仓库发布内容。

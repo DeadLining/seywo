@@ -1,7 +1,7 @@
 import { App } from '@modelcontextprotocol/ext-apps/app-with-deps';
 import { mountPanel } from './panel.js';
 const root = document.querySelector('#app');
-const app = new App({ name: 'Seywo', version: '0.3.0' }, {});
+const app = new App({ name: 'Seywo', version: '0.4.0' }, {});
 let initial = {}, controller;
 app.ontoolresult = params => { initial = params.structuredContent || {}; if (controller)
     controller.open(initial); };

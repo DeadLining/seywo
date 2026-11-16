@@ -127,7 +127,7 @@ def test_compatible_cached_plugin_locates_exact_codex_home(tmp_path, monkeypatch
     from seywo.plugin_context import catalog_home
     monkeypatch.delenv('CODEX_HOME', raising=False)
     monkeypatch.delenv('PLUGIN_DATA', raising=False)
-    root = tmp_path / '.codex/plugins/cache/seywo-local/seywo/0.3.0'
+    root = tmp_path / '.codex/plugins/cache/seywo-local/seywo/0.4.0'
     root.mkdir(parents=True)
     monkeypatch.setenv('PLUGIN_ROOT', str(root))
     assert catalog_home() == tmp_path / '.codex'
