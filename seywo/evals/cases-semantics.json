@@ -1,0 +1,128 @@
+[
+  {
+    "id": "explicit_repeated_branch_return",
+    "checks": [
+      "主线为账单审阅；重试调查作为未解决支线",
+      "显式两次进入与返回；按来源时间记录",
+      "最后用户已把对话切回主线，焦点主线；未解决支线不能关闭"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "这轮主线是账单审阅。先进入重试调查这条支线。"
+      },
+      {
+        "role": "assistant",
+        "text": "重试原因还没查明，调查被阻塞。"
+      },
+      {
+        "role": "user",
+        "text": "现在回到账单主线继续核对，重试调查挂起，问题没有解决。"
+      },
+      {
+        "role": "user",
+        "text": "现在再进重试支线复核。原因仍未知，不能关闭问题。"
+      },
+      {
+        "role": "user",
+        "text": "现在回到账单主线继续审阅，重试支线仍未解决，继续挂起。"
+      }
+    ]
+  },
+  {
+    "id": "reference_other_object",
+    "checks": [
+      "主线备份验收与邮件退信调查分开",
+      "未决属于邮件投递，不能凭代词制造备份失败",
+      "最后已回备份主线，邮件支线等待且不关闭"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "主线是备份验收。现在先进入邮件退信调查这条支线。"
+      },
+      {
+        "role": "assistant",
+        "text": "邮件投递失败原因还没查明，调查被阻塞。"
+      },
+      {
+        "role": "user",
+        "text": "现在回备份验收主线。邮件投递排查挂起，它还没解决，别关闭。"
+      }
+    ]
+  },
+  {
+    "id": "reference_english",
+    "checks": [
+      "Current mainline is usage report; webhook investigation remains open",
+      "Do not invent an unresolved usage-report failure",
+      "Return is current, not incident resolution"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "The mainline is the usage report. Enter the webhook investigation for now."
+      },
+      {
+        "role": "assistant",
+        "text": "The webhook failure cause is unknown; that investigation is blocked."
+      },
+      {
+        "role": "user",
+        "text": "Return to the usage report now. Suspend the webhook investigation; its problem is still unresolved."
+      }
+    ]
+  },
+  {
+    "id": "future_return_is_plan",
+    "checks": [
+      "当前焦点仍在调查支线",
+      "复核后再回来是未来计划，不能产生已发生return",
+      "调查仍未解决；下一步仅为下一步事项"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "本轮主线是完成访问报告。"
+      },
+      {
+        "role": "user",
+        "text": "现在进入登录故障支线排查。"
+      },
+      {
+        "role": "assistant",
+        "text": "登录故障原因未知，当前还在排查。"
+      },
+      {
+        "role": "user",
+        "text": "继续在登录故障支线复核。等复核完再回报告主线，现在还没返回。"
+      }
+    ]
+  },
+  {
+    "id": "resolved_one_issue",
+    "checks": [
+      "明确已解决的Webhook调查可以关闭，不得保持为未解决",
+      "税额疑问仍未核对，必须保留未决",
+      "回到账单主线，解决Webhook不等于整体任务完成"
+    ],
+    "messages": [
+      {
+        "role": "user",
+        "text": "本轮主线是账单审阅。先进入Webhook故障调查。"
+      },
+      {
+        "role": "assistant",
+        "text": "Webhook原因未知，尚未解决。"
+      },
+      {
+        "role": "user",
+        "text": "我已核对：Webhook故障验证通过，关闭这条调查。"
+      },
+      {
+        "role": "user",
+        "text": "现在回到账单主线。税额疑问仍未核对，保留这个未决问题。"
+      }
+    ]
+  }
+]

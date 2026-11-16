@@ -28,3 +28,9 @@ credentials/
 *.db-shm
 *.tsbuildinfo
 docs/evidence/*.png
+
+# Generated project-local MCP paths
+.codex/config.toml
+.seywo/
+.codex/
+tools/seywo-ui/node_modules/

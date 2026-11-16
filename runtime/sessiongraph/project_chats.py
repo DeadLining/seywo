@@ -2,10 +2,34 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from pathlib import Path
 
 from .project_binding import inside_project, normalized_path
+
+
+_ATTACHMENT_TITLE = re.compile(r"^#{1,6}\s+Files mentioned by the user\s*:", re.I)
+_REQUEST_HEADING = re.compile(r"(?:^|\s)#{1,6}\s+My request\s*:", re.I)
+_AMBIENT_PREFIX = re.compile(r"^<in-app-browser-context\b[^>]*>.*?</in-app-browser-context>\s*", re.S)
+
+
+def display_chat_title(title: str | None) -> str:
+    """Project metadata for display only; never rewrite the Codex index or evidence."""
+    text = (title or '').strip()
+    text, ambient_count = _AMBIENT_PREFIX.subn('', text)
+    text = text.strip()
+    if ambient_count:
+        text = re.sub(r'^#{1,6}\s+My request\s*:', '', text, count=1, flags=re.I).strip()
+    if _ATTACHMENT_TITLE.match(text):
+        request = _REQUEST_HEADING.search(text)
+        if request is None:
+            return '附件对话'
+        text = text[request.end():].strip()
+        if not text:
+            return '附件对话'
+    text = ' '.join(text.split())
+    return text or '未命名聊天'
 
 
 def list_project_chats(config: dict, codex_home: Path | None = None) -> list[dict]:
@@ -31,5 +55,5 @@ def list_project_chats(config: dict, codex_home: Path | None = None) -> list[dic
                 continue
         except (OSError, TypeError, ValueError):
             continue
-        results.append({'id': chat_id, 'title': title or '未命名聊天', 'updated_at': updated})
+        results.append({'id': chat_id, 'title': display_chat_title(title), 'updated_at': updated})
     return results

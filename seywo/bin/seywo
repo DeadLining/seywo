@@ -1,0 +1,6 @@
+#!/bin/sh
+# Repository entrypoint, usable from an absolute MCP registration.
+HERE=$(cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHON=${SEYWO_PYTHON:-python3}
+PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 \
+  exec "$PYTHON" -B -m seywo "$@"

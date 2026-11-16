@@ -19,11 +19,8 @@ export class RenderErrorBoundary extends Component<Props, State> {
     if (!this.state.error) return this.props.children
     return <section role="alert" style={{ padding: 24, fontSize: 14 }}>
       <h2>{this.props.name}暂时无法显示</h2>
-      <p>界面渲染发生错误。可以重试加载；此操作不会触发模型抽取。</p>
+      <p>页面暂时无法显示，请重试。此操作不会触发模型抽取。</p>
       <button type="button" onClick={() => this.setState({ error: null })}>重试显示</button>
-      <details style={{ marginTop: 12 }}><summary>错误详情</summary>
-        <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{this.state.error.message}</pre>
-      </details>
     </section>
   }
 }

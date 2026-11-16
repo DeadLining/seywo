@@ -23,13 +23,16 @@ static SETTINGS_SLOTS: Semaphore = Semaphore::const_new(1);
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Operation {
     Projects,
+    SeywoProjects,
     WorkMap,
     Status,
     Memory,
     Evidence,
     SummaryCandidates,
     ProjectChats,
+    SeywoProjectChats,
     FlowTasks,
+    SeywoNarrative,
     CallLogs,
 }
 
@@ -39,7 +42,7 @@ fn request(
     id: Option<&str>,
     offset: Option<u64>,
 ) -> Result<Value, String> {
-    if (!matches!(operation, Operation::Projects | Operation::CallLogs) || project.is_some())
+    if (!matches!(operation, Operation::Projects | Operation::SeywoProjects | Operation::CallLogs) || project.is_some())
         && !project.is_some_and(|p| p.len() == 20 && p.bytes().all(|c| c.is_ascii_hexdigit()))
     {
         return Err("缺少有效的项目标识".into());
@@ -122,7 +125,7 @@ fn save_jev_key(home: &Path, key: &str) -> Result<(), String> {
         }
         result
     };
-    save().map_err(|_| "保存 Jev 密钥失败，请检查 SessionGraph 本地配置目录权限".into())
+    save().map_err(|_| "保存 Jev 密钥失败，请检查 Seywo 本地配置目录权限".into())
 }
 
 fn local_command(source: &Path, home: &Path) -> Result<Command, String> {
@@ -166,10 +169,10 @@ fn local_command_mode(source: &Path, home: &Path, mode: &str) -> Result<Command,
         candidates.into_iter().find(|p| p.is_file())
         .ok_or("需要先安装 Python 3.11+ 和 mcp 依赖；不会自动下载软件")?
     } else {
-        return Err("SessionGraph 尚未安装，请打开项目记忆设置安装".into());
+        return Err("Seywo 尚未安装，请打开设置完成安装".into());
     };
     if !python.is_absolute() || !python.is_file() || !source.join("entrypoint.py").is_file() {
-        return Err("SessionGraph 运行时缺失；未启动任何服务".into());
+        return Err("Seywo 运行组件缺失，请重新安装后重试".into());
     }
     let mut command = Command::new(python);
     #[cfg(windows)]
@@ -357,7 +360,7 @@ pub(crate) async fn manage_session_graph(
     .await.map_err(|error| settings_process_error(compacting, error))?;
     if saving_jev {
         result["message"] =
-            serde_json::json!("Jev 密钥已保存，后台将直接使用；仅保存在本机 SessionGraph 私有配置中。");
+            serde_json::json!("Jev 密钥已保存，后台将直接使用；仅保存在本机 Seywo 私有配置中。");
     }
     Ok(result)
 }
@@ -389,7 +392,7 @@ fn read_phase_diagnostic(bytes: &[u8]) -> Option<&'static str> {
 
 fn settings_process_error(compacting: bool, error: String) -> String {
     if compacting && error.contains("超时") {
-        "SessionGraph 存储维护超时；未完成的事务已回滚，已提交的载荷压缩仍保留。请刷新存储状态后重试。".into()
+        "Seywo 存储维护超时；未完成的事务已回滚，已提交的载荷压缩仍保留。请刷新存储状态后重试。".into()
     } else {
         error
     }
@@ -438,7 +441,7 @@ async fn read_process_with_probe(
         .kill_on_drop(true);
     let mut child = command
         .spawn()
-        .map_err(|_| "无法启动 SessionGraph 本地读取进程")?;
+        .map_err(|_| "无法启动 Seywo 本地读取进程")?;
     let stderr = child.stderr.take().ok_or("读取诊断通道不可用")?;
     let diagnostics = tokio::spawn(async move {
         let mut bytes = Vec::new();
@@ -462,7 +465,7 @@ async fn read_process_with_probe(
             .await
             .map_err(|_| "读取响应失败")?;
         if body.len() > max_bytes {
-            return Err("SessionGraph 响应超过读取上限；未截断证据".to_string());
+            return Err("Seywo 响应超过读取上限；未截断证据".to_string());
         }
         let status = child.wait().await.map_err(|_| "等待读取进程失败")?;
         if !status.success() {
@@ -470,20 +473,20 @@ async fn read_process_with_probe(
             let code = failure.as_ref().and_then(|v| v.get("error")).and_then(Value::as_str);
             return Err(match code {
                 Some("material_revision_changed") => "材料版本变化，请刷新后重试",
-                Some("local_read_locked") => "SessionGraph 数据库正在被占用，请稍后刷新",
-                Some("local_read_timeout") => "SessionGraph 本地读取超时；已停止读取进程",
-                _ => "SessionGraph 本地读取失败，请检查所选项目的配置和数据库",
+                Some("local_read_locked") => "Seywo 数据库正在被占用，请稍后刷新",
+                Some("local_read_timeout") => "Seywo 本地读取超时；已停止读取进程",
+                _ => "Seywo 本地读取失败，请检查所选项目的配置和数据库",
             }.into());
         }
         let data: Value =
-            serde_json::from_slice(&body).map_err(|_| "SessionGraph 返回的 JSON 无效")?;
+            serde_json::from_slice(&body).map_err(|_| "Seywo 返回的 JSON 无效")?;
         if !(if allow_probe { valid_probe_response(&data) } else { valid_response(&data) }) {
-            return Err("SessionGraph 响应不符合本地接口契约".into());
+            return Err("Seywo 响应不符合本地接口契约".into());
         }
         Ok(data)
     })
     .await
-    .unwrap_or_else(|_| Err("SessionGraph 本地读取超时；已停止读取进程".into()));
+    .unwrap_or_else(|_| Err("Seywo 本地读取超时；已停止读取进程".into()));
     if result.is_err() {
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -544,7 +547,7 @@ pub(crate) async fn read_session_graph(
     }
     let _slot = READ_SLOTS
         .try_acquire()
-        .map_err(|_| "SessionGraph 读取繁忙，请稍后刷新")?;
+        .map_err(|_| "Seywo 读取繁忙，请稍后刷新")?;
     let source = if cfg!(debug_assertions) {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../runtime")
     } else {
@@ -777,7 +780,7 @@ mod tests {
 
     #[test]
     fn maintenance_timeout_is_not_mislabeled_as_a_read_failure() {
-        let message = "SessionGraph 本地读取超时；已停止读取进程".to_string();
+        let message = "Seywo 本地读取超时；已停止读取进程".to_string();
         assert_eq!(settings_process_error(false, message.clone()), message);
         let compact = settings_process_error(true, message);
         assert!(compact.contains("存储维护超时"));

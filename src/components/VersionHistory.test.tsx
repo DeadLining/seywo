@@ -10,7 +10,7 @@ it('shows the package version and opens the changelog', () => {
 
   fireEvent.click(screen.getByRole('button', { name: '更新日志' }))
 
-  expect(screen.getByRole('dialog', { name: 'SessionGraph 版本更新日志' })).toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'Seywo 版本更新日志' })).toBeInTheDocument()
   expect(screen.getByText(`当前版本 ${APP_VERSION}`)).toBeInTheDocument()
   expect(screen.getByText(CHANGELOG[0].items[0])).toBeInTheDocument()
   expect(screen.getByRole('button', { name: '关闭更新日志' })).toHaveFocus()

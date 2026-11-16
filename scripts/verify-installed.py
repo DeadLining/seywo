@@ -12,7 +12,7 @@ PROJECT = Path("/Users/shengzhoukong/Documents/果蝇")
 PID = "a217c2bc1da5c4913760"
 STATE = Path.home() / "Library/Application Support/local-ai-gateway/sessiongraph"
 LAUNCHER = STATE / "bin/sessiongraph"
-APP = Path("/Applications/SessionGraph.app/Contents/Resources/sessiongraph")
+APP = Path("/Applications/Seywo.app/Contents/Resources/sessiongraph")
 
 
 def read(operation, **kwargs):

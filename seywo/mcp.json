@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "seywo": {
+      "command": "sh",
+      "args": [
+        "./bin/seywo-runtime",
+        "--mcp"
+      ],
+      "cwd": ".",
+      "startup_timeout_sec": 240
+    }
+  }
+}

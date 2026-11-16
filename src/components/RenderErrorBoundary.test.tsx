@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { RenderErrorBoundary } from './RenderErrorBoundary'
 
 afterEach(() => vi.restoreAllMocks())
-it('isolates a broken panel, shows its error and recovers on explicit retry', () => {
+it('isolates a broken panel without exposing the raw error and recovers on explicit retry', () => {
   const log = vi.spyOn(console, 'error').mockImplementation(() => {})
   let broken = true
   function Panel() {
@@ -11,7 +11,8 @@ it('isolates a broken panel, shows its error and recovers on explicit retry', ()
     return <p>图谱已恢复</p>
   }
   render(<><nav>其他功能导航</nav><RenderErrorBoundary name="项目记忆"><Panel /></RenderErrorBoundary></>)
-  expect(screen.getByRole('alert')).toHaveTextContent('Missing task statistic')
+  expect(screen.getByRole('alert')).toHaveTextContent('页面暂时无法显示，请重试')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Missing task statistic')
   expect(screen.getByText('其他功能导航')).toBeInTheDocument()
   expect(log).toHaveBeenCalled()
   broken = false

@@ -1,6 +1,5 @@
 import { createRoot } from 'react-dom/client'
 import { TaskWorkspace } from './components/TaskWorkspace'
 import { RenderErrorBoundary } from './components/RenderErrorBoundary'
-import { VersionHistory } from './components/VersionHistory'
 import './shell.css'
-createRoot(document.getElementById('root')!).render(<main className="app-shell"><header className="app-header"><img src="/icon.png" alt=""/><h1>SessionGraph</h1><VersionHistory /></header><RenderErrorBoundary name="SessionGraph"><TaskWorkspace /></RenderErrorBoundary></main>)
+createRoot(document.getElementById('root')!).render(<main className="app-shell"><RenderErrorBoundary name="Seywo"><TaskWorkspace /></RenderErrorBoundary></main>)

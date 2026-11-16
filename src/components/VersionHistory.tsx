@@ -50,7 +50,7 @@ export function VersionHistory() {
       >
         <header>
           <div>
-            <h2 id="sessiongraph-changelog-title">SessionGraph 版本更新日志</h2>
+            <h2 id="sessiongraph-changelog-title">Seywo 版本更新日志</h2>
             <p>当前版本 {APP_VERSION}</p>
           </div>
           <button ref={closeRef} type="button" className="app-changelog-close" aria-label="关闭更新日志" onClick={() => setOpen(false)}>

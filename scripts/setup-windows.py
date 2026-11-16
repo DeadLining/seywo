@@ -51,7 +51,7 @@ def main() -> int:
     if not sys.flags.utf8_mode:
         return subprocess.call([sys.executable, "-X", "utf8", __file__, *sys.argv[1:]])
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--app", required=True, type=Path, help="installed SessionGraph.exe or its folder")
+    parser.add_argument("--app", required=True, type=Path, help="installed Seywo.exe or its folder")
     parser.add_argument("--project", required=True, type=Path, help="project to index and show")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--import-existing", action="store_true", help="index existing project chats locally")

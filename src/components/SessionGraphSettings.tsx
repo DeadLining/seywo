@@ -129,7 +129,7 @@ export function SessionGraphSettings({ project, models, manage = manageSessionGr
       <p>安装后需 Codex 信任；卸载不删记忆。</p>
     </div>
     <div className="sg-install-row">
-      <strong>SessionGraph MCP <small>Codex 全局</small></strong>
+      <strong>Seywo MCP <small>Codex 全局</small></strong>
       <span>{snapshot ? (snapshot.mcp_registered ? (snapshot.mcp_guidance_installed ? '已安装 · 服务与使用指引就绪' : '服务已注册 · 使用指引未安装') : '服务未注册或存在自定义配置') : '尚未读取注册配置'}</span>
       <div className="sg-settings-actions">
         <button type="button" disabled={busy || !project || !snapshot} onClick={() => void run('install_mcp')}>安装 MCP</button>

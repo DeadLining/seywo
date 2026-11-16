@@ -1,0 +1,25 @@
+{
+  "name": "seywo",
+  "version": "0.4.0",
+  "description": "Source-backed project memory, chat narratives and cross-chat search. Local STDIO runtime; no model calls for retrieval.",
+  "interface": {
+    "displayName": "Seywo",
+    "shortDescription": "项目记忆、对话主线、自动 Compact",
+    "longDescription": "在当前项目查看对话主线、当前重点和支线，按需定位原文证据；自带 Compact Hook 和本地内核，通过 Codex 已有模型自动整理，无需独立应用。",
+    "developerName": "Seywo",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "打开当前项目的 Seywo 面板",
+      "检索项目历史并核对原文",
+      "查看当前 Chat 的主线和待办"
+    ],
+    "brandColor": "#0D9488"
+  },
+  "hooks": "./hooks.json",
+  "mcpServers": "./mcp.json",
+  "skills": "./skills"
+}

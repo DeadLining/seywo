@@ -17,7 +17,7 @@ export type Run = {attempt_outcome?:string;backlog_failures?:{job_id:string;erro
 export type UpdateStatus = {continuations?:{chat:string;state:string;due:number;run_id:string;error_code?:string}[];runs:Run[];active_count:number;unreadable_runs?:number}
 export type MemoryDetail = { graph_v2?:{type:string;requested_id?:string;canonical_id?:string;member_ids?:string[];evidence_page?:{offset:number;limit:number;has_more:boolean;next_offset:number|null};assertions:{entry_id:string;quote:string;chat_id:string;original_node_id?:string;source_time?:string;role?:string;assertion:{content:string;status:string}}[]}; memory: {content:string;paths?:string[];source?:{entry_id:string;quote:string;role?:string}}; entries: {id:string;text:string;role?:string;chat_id?:string}[];superseded_by:{id:string;title:string;status:string}[] }
 export type Catalog = {projects:Project[];default_project:string}
-export type ReadOperation = 'projects' | 'work_map' | 'status' | 'memory' | 'evidence' | 'call_logs' | 'project_chats' | 'flow_tasks'
+export type ReadOperation = 'seywo_projects' | 'seywo_project_chats' | 'seywo_narrative' | 'projects' | 'work_map' | 'status' | 'memory' | 'evidence' | 'call_logs' | 'project_chats' | 'flow_tasks'
 export type SessionGraphRead = <T>(operation:ReadOperation, args?:{project?:string;id?:string;offset?:number;query?:string;chat?:string;view?:MapView;logModel?:string;logStatus?:string})=>Promise<T>
 export const readSessionGraph:SessionGraphRead = async (operation,args={}) => {
   if (import.meta.env.DEV && !('__TAURI_INTERNALS__' in window)) {

@@ -13,8 +13,8 @@ if(process.platform==='win32') {
   console.log('Desktop app installed. Run scripts/setup-windows.py with --app and --project to register MCP and import local chats.')
   process.exit(0)
 }
-const built=path.join(root,'src-tauri/target/release/bundle/macos/SessionGraph.app')
-const target='/Applications/SessionGraph.app'
+const built=path.join(root,'src-tauri/target/release/bundle/macos/Seywo.app')
+const target='/Applications/Seywo.app'
 const state=path.join(os.homedir(),'Library/Application Support/local-ai-gateway/sessiongraph')
 const python=process.env.SESSIONGRAPH_PYTHON||'/Library/Frameworks/Python.framework/Versions/3.12/bin/python3'
 execFileSync(python,['-B','-c','import sys,mcp; assert sys.version_info >= (3,11)'])
@@ -46,13 +46,13 @@ try {
     fs.cpSync(source,temp,{recursive:true});fs.renameSync(temp,runtime)
   }
   execFileSync(python,['-B',`${root}/scripts/switch-runtime.py`,'--state',state,'--source',runtime,'--python',python],{stdio:'inherit'})
-  for(const pid of running)try{process.kill(pid,'SIGTERM')}catch(error){if(error.code!=='ESRCH')console.warn('Close and reopen SessionGraph to load the installed UI')}
+  for(const pid of running)try{process.kill(pid,'SIGTERM')}catch(error){if(error.code!=='ESRCH')console.warn('Close and reopen Seywo to load the installed UI')}
   if(running.length){
     const alive=pid=>{try{process.kill(pid,0);return true}catch{return false}}
     const deadline=Date.now()+5000
     while(running.some(alive)&&Date.now()<deadline)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,100)
     if(running.some(alive))throw new Error('Old app did not exit; restoring previous installation')
-    try{execFileSync('open',[target])}catch{console.warn('Open /Applications/SessionGraph.app to load the installed UI')}
+    try{execFileSync('open',[target])}catch{console.warn('Open /Applications/Seywo.app to load the installed UI')}
   }
   console.log(`Installed ${target}`)
 } catch(error) {

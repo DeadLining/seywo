@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import select  # noqa: F401 - re-exported for platform probes
 import sqlite3
 import subprocess
 import sys
