@@ -48,6 +48,9 @@ def main(argv=None):
     sub.add_parser("hook", help="stdin Codex hook payload (no config discovery)")
     init = sub.add_parser("init")
     init.add_argument("root", type=Path, nargs="?", default=Path.cwd())
+    batch = sub.add_parser("init-batch", help="preview and confirm initialization of explicit project roots")
+    batch.add_argument("roots", type=Path, nargs="+", help="existing absolute project directories; no scanning")
+    batch.add_argument("--dry-run", action="store_true", help="print the plan without prompting or writing")
     imp = sub.add_parser("import")
     imp.add_argument("source", type=Path)
     imp.add_argument("--chat", required=True)
@@ -134,6 +137,9 @@ def main(argv=None):
     serve.add_argument("--port", type=int, default=0)
     args = parser.parse_args(argv)
     try:
+        if args.command == "init-batch":
+            from .batch_init import run
+            return run(args.roots, dry_run=args.dry_run)
         if args.command == "narrative" and args.narrative_command == "serve":
             from .reader import make_server
             server = make_server(args.config, args.chat, port=args.port)

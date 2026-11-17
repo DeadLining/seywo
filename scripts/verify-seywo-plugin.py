@@ -40,6 +40,27 @@ def verify(repository=REPOSITORY):
         assert installed != repository / 'seywo'
         assert Path(transport['cwd']) == installed
         assert not (installed / '.seywo').exists()
+        # Exercise the distributed CLI, using only explicit disposable roots.
+        batch_roots = [base / 'batch first project', base / 'batch second project']
+        for root in batch_roots:
+            root.mkdir()
+        batch_command = ['sh', str(installed / 'bin/seywo'), 'init-batch', *map(str, batch_roots)]
+        def batch_cli(*extra, answer=''):
+            result = subprocess.run([*batch_command, *extra], input=answer, env=env,
+                                    capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            return result.stdout
+        preview = batch_cli('--dry-run')
+        assert all(str(root / '.seywo/config.json') in preview for root in batch_roots)
+        assert all(not (root / '.seywo').exists() for root in batch_roots)
+        batch_cli(answer='no\n')
+        assert all(not (root / '.seywo').exists() for root in batch_roots)
+        batch_cli(answer='yes\n')
+        batch_configs = [(root / '.seywo/config.json').read_bytes() for root in batch_roots]
+        assert all(json.loads(config)['hook']['enabled'] for config in batch_configs)
+        batch_cli()
+        assert all((root / '.seywo/config.json').read_bytes() == config
+                   for root, config in zip(batch_roots, batch_configs))
         with (base / 'host.stderr').open('wb') as error_log:
             process = subprocess.Popen(['codex', 'app-server', '--stdio', '--enable', 'hooks'], env=env, cwd=workspace,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error_log)
@@ -132,14 +153,22 @@ def verify(repository=REPOSITORY):
                     result = raw_tool(name, **arguments)
                     return json.loads(result['content'][0]['text'])
 
-                unbound_open = raw_tool('seywo_open')
-                assert unbound_open['structuredContent']['state'] == 'initialization_required'
-                assert unbound_open['structuredContent']['project_root'] == str(workspace)
                 selected = tool('seywo_select_project', project_root=str(workspace))
                 assert not selected['initialized']
                 assert not (workspace / '.seywo').exists(), 'selection initialized data'
                 uninitialized_open = raw_tool('seywo_open')
-                assert uninitialized_open['structuredContent']['state'] == 'initialization_required'
+                opened_info = uninitialized_open['structuredContent']
+                assert opened_info['initialized'] is True
+                assert opened_info['project_root'] == str(workspace)
+                assert opened_info['current_chat_id'] == thread and opened_info['chat_id'] is None
+                config_path = workspace / '.seywo/config.json'
+                initial_config = config_path.read_bytes()
+                assert json.loads(initial_config)['hook']['enabled'] is True
+                reopened = raw_tool('seywo_open')['structuredContent']
+                assert not reopened.get('initialized')
+                assert config_path.read_bytes() == initial_config
+                empty_status = tool('seywo_status')
+                assert empty_status['model_calls'] == 0
                 first = tool('seywo_initialize_project')
                 second = tool('seywo_initialize_project')
                 assert first['project_id'] == second['project_id']
@@ -282,11 +311,13 @@ with Store(load_config(Path(sys.argv[2]))) as store:
                         'open_response_bytes': len(json.dumps(opened).encode()),
                         'fixture_diff_counts': changes['counts'],
                         'checks': ['actual_cli_install', 'resolved_cached_entrypoint',
+                                   'installed_batch_preview_no_write', 'installed_batch_cancel_no_write',
+                                   'installed_batch_confirm_two_roots', 'installed_batch_repeat_skip',
                                    'host_mcp_connected', 'host_plugin_hooks_inventory', 'no_write_startup', 'no_write_selection',
                                    'idempotent_explicit_setup', 'project_local_model_status_and_save', 'default_gitignore',
                                    'installed_package_import', 'host_search_and_expand',
                                    'installation_directory_untouched', 'host_app_metadata', 'host_thread_entrypoint',
-                                   'temporary_host_catalog_fixture', 'host_automatic_project_binding', 'host_automatic_chat_default', 'uninitialized_native_open',
+                                   'temporary_host_catalog_fixture', 'host_automatic_project_binding', 'host_automatic_chat_default', 'first_open_auto_initialization', 'repeat_open_preserves_config',
                                    'host_app_only_visibility', 'host_app_resource_read',
                                    'self_contained_installed_ui', 'tiny_render_result',
                                    'unpublished_chat_empty_state', 'host_panel_mainline_without_records', 'host_panel_narrative',

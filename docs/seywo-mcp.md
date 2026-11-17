@@ -27,7 +27,11 @@ codex plugin marketplace add https://github.com/DeadLining/seywo.git
 codex plugin add seywo@seywo-local
 ```
 
-安装或更新后重新连接 Codex MCP。首次使用时在当前 Chat 中调用 `seywo_initialize_project`，再打开 Seywo 面板。插件优先使用宿主提供的当前项目和 Chat；只有宿主没有提供唯一项目时，才使用 `seywo_select_project` 作为显式回退。
+安装或更新后重新连接 Codex MCP。插件全局安装一次后，每个项目首次打开 Seywo 面板时自动按需初始化，无需输入“启用 Seywo”。`seywo_open` 只初始化当前 Chat 明确绑定的项目根目录，创建 `.seywo/.gitignore`、配置和空索引数据库并启用项目 Hook；已有配置、project_id、数据库与 provider/model 设置保持不变。初始化不导入历史、不调用模型、不扫描磁盘或读取其他项目。项目不明确时显示项目选择器，`seywo_select_project` 仍只绑定而不写入；选择后面板自动打开并初始化。失败显示原因并提供重试，成功继续加载当前 Chat；尚未导入的 Chat 保持空状态。`seywo_initialize_project` 保留原有调用参数，供显式初始化使用。
+
+## 显式批量初始化
+
+CLI 提供 `seywo init-batch /absolute/project-a /absolute/project-b`（仓库内也可使用 `seywo/bin/seywo`）。先输出逐项目待创建、待修改文件和目录清单，再输入 `yes` 确认；`--dry-run` 只预览。只接受明确列出的现有绝对目录，不默认使用当前目录，不递归扫描或从父目录推断项目。已有 `.seywo/config.json` 的项目跳过，重复路径去重，单项错误不阻断其余项目。确认后重新检查配置和文件计划；未确认、EOF 或确认时取消不会写入项目。该入口复用项目初始化和 Hook 默认配置，不导入历史、不调用模型，也不增加或改变 MCP 工具。
 
 ## 独立运行时
 
@@ -41,4 +45,4 @@ seywo/bin/seywo --config "/absolute/project/.seywo/config.json" mcp
 
 ## 数据边界
 
-项目数据位于项目目录的 `.seywo/`，其中包含配置、索引、来源安全投影、叙事版本和可选工作记忆；目录默认使用 Git 忽略。MCP 读取不会创建项目、导入 Chat、升级数据库或重建索引。Compact 和 Hook 由插件本地内核负责，MCP 只按需读取已经保存的结果。
+项目数据位于项目目录的 `.seywo/`，其中包含配置、索引、来源安全投影、叙事版本和可选工作记忆；目录默认使用 Git 忽略。MCP 检索和面板数据读取不会创建项目、导入 Chat、升级数据库或重建索引。首次打开面板的 `seywo_open` 是按需初始化入口，不导入历史或调用模型；已有完整项目继续只读打开。Compact 和 Hook 由插件本地内核负责，MCP 只按需读取已经保存的结果。

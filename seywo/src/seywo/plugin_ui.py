@@ -1,11 +1,12 @@
 """MCP App resource and app-only read tools for the installed plugin."""
 import asyncio
+import sqlite3
 from pathlib import Path
 from typing import Literal
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from .config import load_config
+from .config import initialize, load_config
 from .panel import Panel
 from .plugin_binding import ProjectRequired
 from .plugin_context import current_chat
@@ -27,33 +28,48 @@ def register_panel(server, resolve_config):
     def seywo_panel_resource() -> str:
         return (Path(__file__).resolve().parents[2] / 'ui' / 'panel.html').read_text(encoding='utf-8')
 
-    @server.tool(title='Seywo', annotations=readonly,
+    @server.tool(title='Seywo',
+                 annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False),
                  meta={'ui': {'resourceUri': RESOURCE_URI, 'visibility': ['model', 'app']},
                        'openai/outputTemplate': RESOURCE_URI,
                        'openai/ui': {'entrypoints': [{'type': 'thread'}]},
-                       'openai/toolInvocation/invoking': '正在打开 Seywo',
+                       'openai/toolInvocation/invoking': '正在打开项目记忆',
                        'openai/toolInvocation/invoked': 'Seywo 已就绪'})
     async def seywo_open(chat_id: str | None = None) -> CallToolResult:
         """Open the Seywo panel for this project. Pass an imported chat_id only when known.
 
         Without chat_id, default to the exact host thread only if it is already an admitted Chat.
-        Read-only; no import, setup or model calls. Detailed data is loaded by the app.
+        First open initializes only the bound project and enables its Hook. Existing settings
+        are reused. No chat import or model calls. Detailed data is loaded by the app.
         """
+        path = None
         try:
             path = await resolve_config(server.get_context())
+            config = load_config(path) if path.exists() else None
+            initialized = config is None or not Path(config['_database']).exists()
+            if initialized:
+                # New configurations enable the bundled Hook atomically. A retry
+                # after a database creation failure reuses the existing identity.
+                initialize(path.parent.parent, plugin_hook=True)
+            store = Store(load_config(path), read_only=True)
         except ProjectRequired:
             info = {'state': 'project_required', 'project_root': None, 'chat_id': None, 'model_calls': 0}
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # Return a renderable error, including the filesystem/validation cause,
+            # so the panel can retry through the same binding checks. No traceback.
+            info = {'state': 'initialization_failed',
+                    'project_root': str(path.parent.parent) if path is not None else None,
+                    'chat_id': None, 'model_calls': 0, 'retryable': True,
+                    'error': str(exc)}
         else:
-            if not path.exists():
-                info = {'state': 'initialization_required', 'project_root': str(path.parent.parent),
-                        'chat_id': None, 'model_calls': 0}
-            else:
-                with Store(load_config(path), read_only=True) as store:
-                    if chat_id is not None:
-                        store.require_human_chat(chat_id)
-                    identity, default = current_chat(store, server.get_context())
-                    info = {'project_root': store.config['project_root'], 'chat_id': chat_id or default,
-                            'current_chat_id': identity, 'model_calls': 0}
+            with store:
+                if chat_id is not None:
+                    store.require_human_chat(chat_id)
+                identity, default = current_chat(store, server.get_context())
+                info = {'project_root': store.config['project_root'], 'chat_id': chat_id or default,
+                        'current_chat_id': identity, 'model_calls': 0}
+                if initialized:
+                    info['initialized'] = True
         return CallToolResult(content=[TextContent(type='text', text='Seywo：查看项目对话与主线。')],
                               structuredContent=info)
 

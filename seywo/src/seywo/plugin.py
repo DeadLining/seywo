@@ -2,7 +2,7 @@
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from .config import enable_plugin_hook, initialize, load_config, state_dir
+from .config import enable_plugin_hook, initialize, load_config, project_directory, state_dir
 from .mcp_server import create_server
 from .plugin_binding import ProjectRequired
 from .plugin_context import host_workspace
@@ -10,7 +10,7 @@ from .retrieval import serialize
 
 
 def _config_path(root):
-    root = root.expanduser().resolve(strict=True)
+    root = project_directory(root, strict=True)
     if not root.is_dir():
         raise ValueError('Seywo requires a project directory')
     path = state_dir(root) / 'config.json'
@@ -33,28 +33,36 @@ def workspace_from_roots(roots):
 
 def create_plugin_server(project_root: Path | None = None):
     selected = _config_path(project_root) if project_root is not None else None
+    host_selected = False
 
     async def resolve(context):
-        nonlocal selected
+        nonlocal selected, host_selected
         workspace = host_workspace(context)
         if workspace is not None:
             candidate = _config_path(workspace)
             if selected is not None and candidate != selected:
                 raise ProjectRequired('host workspace changed; reconnect Seywo')
+            host_selected = host_selected or selected is None
             selected = candidate
-        if selected is not None:
+            return selected
+        # A cached catalog lookup cannot bind a different/unknown request.
+        # Explicit selection and a host workspace root remain valid bindings.
+        if selected is not None and not host_selected:
             return selected
         from mcp.types import ErrorData
         from mcp.shared.exceptions import McpError
         try:
             result = await context.session.list_roots()
         except McpError as exc:
-            if isinstance(exc.error, ErrorData) and exc.error.code == -32601:
+            if isinstance(exc.error, ErrorData) and exc.error.code in (-32601, -32600):
                 raise ProjectRequired('workspace is not bound') from exc
             raise
         if len(result.roots) != 1:
             raise ProjectRequired('workspace is not bound; use seywo_select_project with the current project absolute path')
-        selected = _config_path(workspace_from_roots(result.roots))
+        candidate = _config_path(workspace_from_roots(result.roots))
+        if selected is not None and candidate != selected:
+            raise ProjectRequired('host workspace changed; reconnect Seywo')
+        selected = candidate
         return selected
 
     server = create_server(config_resolver=resolve)
@@ -71,7 +79,7 @@ def create_plugin_server(project_root: Path | None = None):
         No discovery, import, initialization or model calls. Binding cannot change
         to another project during this process; reconnect to select another workspace.
         """
-        nonlocal selected
+        nonlocal selected, host_selected
         root = Path(project_root).expanduser()
         if not root.is_absolute():
             raise ValueError('project_root must be an absolute path')
@@ -79,6 +87,7 @@ def create_plugin_server(project_root: Path | None = None):
         if selected is not None and candidate != selected:
             raise ValueError('Seywo is already bound to another project; reconnect before switching')
         selected = candidate
+        host_selected = False
         return serialize({'project_root': str(selected.parent.parent), 'initialized': selected.exists(),
                           'model_calls': 0})
 

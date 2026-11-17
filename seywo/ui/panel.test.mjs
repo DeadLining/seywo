@@ -152,10 +152,7 @@ test('native entrypoint can bind an existing project without automatic initializ
     assert.equal(selected,'/work/产品');
     assert.match(f.root.textContent,/选择一个 Chat/);
     assert.equal(f.calls.filter(c=>c.view==='narrative').length,0);
-    const g=fixture();
-    await mountPanel(g.root,g.call,{state:'initialization_required',project_root:'/work/new'});
-    assert.match(g.root.textContent,/尚未启用 Seywo/);
-    assert.equal(g.calls.length,0);
+
 });
 test('refresh cancels an old Chat page without leaving pagination disabled', async () => {
     const f=fixture();let finish;
@@ -260,4 +257,82 @@ test('defaults to Codex model with no endpoint or key fields', async () => {
     f.root.querySelector('[data-model-save]').click(); await tick();
     assert.equal(saved.backend, 'codex');
     assert.equal(saved.api_key, '');
+});
+
+
+test('first panel open initializes automatically then reloads the current Chat', async () => {
+    const f=fixture(); const calls=[];
+    const controller=await mountPanel(f.root,f.call,{state:'initialization_required',project_root:'/work/new'}, {
+        initializeProject:async()=>{calls.push('initialize'); assert.match(f.root.textContent,/正在初始化项目记忆/); return {};},
+        openCurrent:async()=>{calls.push('open'); return {chat_id:'chat-a',initialized:true};}
+    });
+    assert.deepEqual(calls,['initialize','open']);
+    assert.equal(controller.state.chat,'chat-a');
+    assert.match(f.root.textContent,/对话主线/);
+    assert.doesNotMatch(f.root.textContent,/请在对话中要求启用/);
+});
+
+test('initialization error shows its cause and retry reopens and loads the current Chat', async () => {
+    const f=fixture(); let opens=0;
+    await mountPanel(f.root,f.call,{state:'initialization_failed',error:'无法写入索引数据库：权限不足',retryable:true}, {
+        openCurrent:async()=>{opens++;return {chat_id:'chat-a',initialized:true};}
+    });
+    assert.match(f.root.textContent,/权限不足/);
+    assert.equal(f.calls.length,0);
+    f.root.querySelector('[data-retry]').click();await tick();
+    assert.equal(opens,1);
+    assert.match(f.root.textContent,/对话主线/);
+});
+
+test('selected uninitialized project opens automatically; unbound panel never initializes', async () => {
+    const f=fixture(); let opens=0; let initialized=0;
+    await mountPanel(f.root,f.call,{state:'project_required'}, {
+        selectProject:async path=>({initialized:false,project_root:path}),
+        initializeProject:async()=>{initialized++;},
+        openCurrent:async()=>{opens++;return {chat_id:'chat-a',initialized:true};}
+    });
+    assert.equal(opens,0); assert.equal(initialized,0); assert.equal(f.calls.length,0);
+    f.root.querySelector('[data-project-path]').value='/work/new';
+    f.root.querySelector('[data-bind-project]').click(); await tick();
+    assert.equal(opens,1); assert.match(f.root.textContent,/对话主线/);
+});
+
+test('an initialized panel loads directly without calling initialization', async () => {
+    const f=fixture();let initializations=0;
+    await mountPanel(f.root,f.call,{chat_id:'chat-a'}, {
+        initializeProject:async()=>{initializations++;}
+    });
+    assert.equal(initializations,0);
+    assert.match(f.root.textContent,/对话主线/);
+});
+
+test('initialization transport failures retain the real cause safely and allow retry', async () => {
+    const f=fixture();let opens=0;
+    const call=async args=>args.view==='chats' ? {project_root:'/work/new',results:[],current_chat_id:'new-chat',retrieval:{has_more:false}} : f.call(args);
+    await mountPanel(f.root,call,{state:'initialization_required'}, {
+        initializeProject:async()=>{const error=new Error('panel_read_failed');error.initializationCause='权限不足 <img src=x onerror=alert(1)>';throw error;},
+        openCurrent:async()=>{opens++;return {current_chat_id:'new-chat',initialized:true};}
+    });
+    assert.match(f.root.textContent,/权限不足/);
+    assert.equal(f.root.querySelector('img'),null);
+    assert.equal(f.calls.length,0);
+    f.root.querySelector('[data-retry]').click();await tick();
+    assert.equal(opens,1);
+    assert.match(f.root.textContent,/项目记忆已启用/);
+    assert.match(f.root.textContent,/当前对话尚未收录/);
+});
+
+test('a delayed initialization cannot replace a newer project picker', async () => {
+    const f=fixture();let finish;let delay=false;let opens=0;
+    const controller=await mountPanel(f.root,f.call,{chat_id:'chat-a'}, {
+        initializeProject:async()=>{if(delay)await new Promise(resolve=>{finish=resolve;});},
+        openCurrent:async()=>{opens++;return {chat_id:'chat-a',initialized:true};}
+    });
+    delay=true;
+    const old=controller.open({state:'initialization_required'});
+    await controller.open({state:'project_required'});
+    finish();await old;
+    assert.equal(opens,0);
+    assert.ok(f.root.querySelector('[data-project-path]'));
+    assert.doesNotMatch(f.root.textContent,/项目记忆已启用/);
 });

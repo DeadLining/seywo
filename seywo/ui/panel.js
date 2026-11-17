@@ -1,4 +1,4 @@
-/** Read-only UI controller. Transport is supplied by the MCP Apps entrypoint. */
+/** Project panel controller. Transport is supplied by the MCP Apps entrypoint. */
 export async function mountPanel(root, call, initial = {}, actions = {}) {
     const doc = root.ownerDocument;
     const state = { chat: initial.chat_id || '', chats: [], version: null, phase: null, branch: null, offset: 0, epoch: 0, chatEpoch: 0, bootstrapEpoch: 0, data: null, project: '', chatPage: null, recordsOpen: false };
@@ -362,9 +362,23 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                 error(bootstrap);
         }
     }
-    function initializationRequired(project){
-        root.querySelector('[data-project]').textContent=project?.split('/').filter(Boolean).at(-1)||'项目记忆';
-        empty('该项目尚未启用 Seywo','请在对话中要求启用 Seywo，完成后点击刷新。此面板不会自动创建项目数据。');
+    function initializationError(info) {
+        root.querySelector('[data-project]').textContent=info.project_root?.split('/').filter(Boolean).at(-1)||'项目记忆';
+        empty('项目记忆暂时无法启用', info.error || '无法初始化当前项目，请重试。');
+        const retry=button('重试',()=>reopen());retry.dataset.retry='';content.append(retry);
+    }
+    async function reopen(initialize=false) {
+        const token=++state.bootstrapEpoch;
+        clearNotice();empty('正在初始化项目记忆');
+        try {
+            if(initialize)await actions.initializeProject();
+            if(token!==state.bootstrapEpoch)return;
+            const info=await actions.openCurrent();
+            if(token!==state.bootstrapEpoch)return;
+            await open(info);
+        } catch (error) {
+            if(token===state.bootstrapEpoch)initializationError({error:error.initializationCause || '无法连接到项目初始化服务，请重试。'});
+        }
     }
     function projectPicker(){
         empty('暂时无法定位当前对话','重新读取当前对话的项目信息后，会自动显示主线。');
@@ -384,7 +398,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             try{
                 const result=await actions.selectProject(input.value.trim());
                 if(token!==state.bootstrapEpoch)return;
-                if(result.initialized)await bootstrap();else initializationRequired(result.project_root);
+                if(actions.openCurrent)await reopen();else if(result.initialized)await bootstrap();else await reopen(true);
             }catch{if(token===state.bootstrapEpoch)error(()=>{submit.disabled=false;input.focus();});}
             finally{submit.disabled=false;}
         };
@@ -394,10 +408,13 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         state.chat=info.chat_id||'';state.version=null;drawer.hidden=true;
         content.removeAttribute('aria-busy');clearNotice();
         if(info.state==='project_required'){projectPicker();return;}
-        if(info.state==='initialization_required'){initializationRequired(info.project_root);return;}
+        if(info.state==='initialization_failed'){initializationError(info);return;}
+        if(info.state==='initialization_required'){await reopen(true);return;}
+        const token=state.bootstrapEpoch+1;
         await bootstrap();
+        if(info.initialized && token===state.bootstrapEpoch){notice.replaceChildren(el('p','项目记忆已启用'));}
     }
-    root.querySelector('[data-refresh]').onclick = bootstrap;
+    root.querySelector('[data-refresh]').onclick = actions.openCurrent ? ()=>reopen() : bootstrap;
     settings.ontoggle = () => { if (settings.open) void loadSettings(); };
     if (!actions.modelStatus) settings.hidden = true;
     await open(initial);

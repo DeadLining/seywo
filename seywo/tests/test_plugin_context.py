@@ -131,3 +131,65 @@ def test_compatible_cached_plugin_locates_exact_codex_home(tmp_path, monkeypatch
     root.mkdir(parents=True)
     monkeypatch.setenv('PLUGIN_ROOT', str(root))
     assert catalog_home() == tmp_path / '.codex'
+
+
+def test_real_stdio_first_open_initializes_only_each_exact_bound_project(tmp_path):
+    import asyncio
+    import json
+    import os
+    from pathlib import Path
+    import sys
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from seywo.config import load_config
+
+    home = tmp_path / 'codex'
+    home.mkdir()
+    roots = [tmp_path / 'first project', tmp_path / 'second project']
+    identities = [CHAT, '00000000-0000-0000-0000-000000000002']
+    for root in roots:
+        root.mkdir()
+    with sqlite3.connect(home / 'state_5.sqlite') as db:
+        db.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,cwd TEXT)')
+        db.executemany('INSERT INTO threads VALUES (?,?)', zip(identities, map(str, roots)))
+    catalog_before = (home / 'state_5.sqlite').read_bytes()
+    plugin = Path(__file__).resolve().parents[1]
+    params = StdioServerParameters(command=sys.executable, args=[str(plugin / 'bin/seywo-plugin')],
+                                  cwd=plugin, env={**os.environ, 'CODEX_HOME': str(home)})
+
+    async def check():
+        for index, (root, thread) in enumerate(zip(roots, identities)):
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    assert not (root / '.seywo').exists()
+                    # Unknown thread cannot use cwd or another catalog row.
+                    unknown = await session.call_tool('seywo_open', {}, meta={'thread_id': '00000000-0000-0000-0000-000000000099'})
+                    assert not unknown.isError, unknown
+                    assert unknown.structuredContent['state'] == 'project_required'
+                    assert not (root / '.seywo').exists()
+                    result = await session.call_tool('seywo_open', {}, meta={'thread_id': thread, 'threadId': thread})
+                    assert not result.isError
+                    assert result.structuredContent['initialized'] is True
+                    assert result.structuredContent['project_root'] == str(root)
+                    assert result.structuredContent['current_chat_id'] == thread
+                    assert result.structuredContent['chat_id'] is None
+                    config = root / '.seywo/config.json'
+                    before = config.read_bytes()
+                    assert load_config(config)['hook']['enabled'] is True
+                    again = await session.call_tool('seywo_open', {}, meta={'thread_id': thread})
+                    assert not again.structuredContent.get('initialized')
+                    assert config.read_bytes() == before
+                    page = await session.call_tool('seywo_panel_data', {'view': 'chats'}, meta={'thread_id': thread})
+                    data = json.loads(page.content[0].text)
+                    assert data['results'] == []
+                    assert data['current_chat_id'] == thread
+                    assert data['default_chat_id'] is None
+                    # A cached host binding is not evidence for an unknown request.
+                    unknown = await session.call_tool('seywo_open', {}, meta={'thread_id': '00000000-0000-0000-0000-000000000099'})
+                    assert not unknown.isError, unknown
+                    assert unknown.structuredContent['state'] == 'project_required'
+                    if index == 0:
+                        assert not (roots[1] / '.seywo').exists()
+    asyncio.run(check())
+    assert (home / 'state_5.sqlite').read_bytes() == catalog_before

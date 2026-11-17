@@ -166,3 +166,54 @@ def test_plugin_setup_enables_its_bundled_compact_hook_on_existing_project(tmp_p
     assert saved['hook']['enabled'] is True
     assert saved['hook']['pipeline'] == 'seywo-compact-v1'
     assert saved['model_runtime'] == {'backend': 'codex'}
+
+
+@pytest.mark.parametrize('kind', ['root', 'state', 'config', 'dangling_config', 'database'])
+def test_open_rejects_symlinks_without_writing_targets(tmp_path, kind):
+    root = tmp_path / 'project'
+    outside = tmp_path / 'outside'
+    root.mkdir()
+    outside.mkdir()
+    if kind == 'root':
+        root.rmdir()
+        root.symlink_to(outside, target_is_directory=True)
+    elif kind == 'state':
+        (root / '.seywo').symlink_to(outside, target_is_directory=True)
+    else:
+        state = root / '.seywo'
+        state.mkdir()
+        target = outside / 'target'
+        if kind != 'dangling_config':
+            target.write_text('preserve me')
+        (state / ('index.sqlite3' if kind == 'database' else 'config.json')).symlink_to(target)
+    before = {p: p.read_bytes() for p in outside.iterdir()}
+    try:
+        server = create_plugin_server(root)
+    except ValueError as exc:
+        assert 'symlink' in str(exc)
+    else:
+        async def check():
+            result = await server.call_tool('seywo_open', {})
+            assert result.structuredContent['state'] == 'initialization_failed'
+            assert 'symlink' in result.structuredContent['error']
+        asyncio.run(check())
+    assert {p: p.read_bytes() for p in outside.iterdir()} == before
+    if kind != 'root':
+        assert not (root / '.seywo/config.json').is_file() or kind == 'config'
+
+
+def test_initialize_rejects_project_and_dangling_config_symlinks(tmp_path):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    link = tmp_path / 'link'
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match='symlink'):
+        initialize(link)
+    assert list(outside.iterdir()) == []
+    state = tmp_path / '.seywo'
+    state.mkdir()
+    (state / 'config.json').symlink_to(outside / 'missing.json')
+    with pytest.raises(ValueError, match='symlink'):
+        initialize(tmp_path)
+    assert (state / 'config.json').is_symlink()
+    assert list(outside.iterdir()) == []

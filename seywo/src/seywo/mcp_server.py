@@ -30,7 +30,8 @@ def create_server(config_path: Path | None = None, *, config_resolver=None):
             pass
     binding = f"\nBound project: {path.parent.parent}" if path is not None else (
         "\nPlugin mode: use the host workspace root, never the plugin installation directory. "
-        "An empty project requires explicit seywo_initialize_project before retrieval."
+        "First seywo_open initializes an empty bound project without importing history or calling a model. "
+        "Retrieval remains read-only."
     )
     server = FastMCP("Seywo", instructions=INSTRUCTIONS + binding)
 
