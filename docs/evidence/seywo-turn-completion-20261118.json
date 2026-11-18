@@ -1,0 +1,48 @@
+{
+  "date": "2026-11-18",
+  "python_tests": {
+    "passed": 838
+  },
+  "ui_tests": {
+    "passed": 56
+  },
+  "isolated_host_acceptance": "passed",
+  "installed_acceptance": true,
+  "installed_hooks": [
+    {
+      "event": "preCompact",
+      "trust": "trusted"
+    },
+    {
+      "event": "postCompact",
+      "trust": "trusted"
+    },
+    {
+      "event": "sessionStart",
+      "trust": "trusted"
+    },
+    {
+      "event": "userPromptSubmit",
+      "trust": "trusted"
+    },
+    {
+      "event": "stop",
+      "trust": "untrusted"
+    }
+  ],
+  "live_recovery": {
+    "state": "done",
+    "base_version": 86,
+    "published_version": 87,
+    "turn_count": 2,
+    "segment_count": 2,
+    "model_calls": 1,
+    "error_code": null
+  },
+  "live_state": {
+    "state": "partial",
+    "error_code": "awaiting_turn_complete",
+    "published_version": 87
+  },
+  "limitation": "New Stop Hook is untrusted in the user host; automatic completion requires user trust and hook reload. Current turn remains open during this response."
+}

@@ -164,8 +164,8 @@ class CodexTransport:
             return failed('codex_execution_failed')
 
     def complete_compact(self, *, model, instructions, payload, max_output_tokens=768):
-        from .compact_model import SCHEMA
-        return self._execute(instructions, payload, SCHEMA, model=model)
+        from .compact_model import schema_for
+        return self._execute(instructions, payload, schema_for(payload), model=model)
 
     def probe(self):
         schema = {'type': 'object', 'properties': {'ok': {'type': 'boolean'}},

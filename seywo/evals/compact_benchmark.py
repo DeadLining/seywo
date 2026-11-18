@@ -1,9 +1,10 @@
-"""Reproducible paired Compact/delta benchmark using app-saved provider settings.
+"""Reproducible Compact benchmark using project-saved provider settings.
 
 Synthetic fixtures only. Never imports the user's chat history or modifies their
 project database. The recorded tokens are provider usage including prompt/schema.
 """
 import argparse
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -14,9 +15,10 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from seywo import inbox, maintain  # noqa: E402
 from seywo.config import initialize, load_config  # noqa: E402
-from seywo.settings import read_provider  # noqa: E402
+from seywo.settings import read_provider, save_provider  # noqa: E402
 from seywo.store import Store  # noqa: E402
 from seywo.transport import Transport  # noqa: E402
+from seywo.codex_transport import CodexTransport  # noqa: E402
 
 TOOL_MARKER = "BENCH_TOOL_BODY_EXCLUDED_9b47e"
 CASES = [
@@ -61,6 +63,64 @@ CASES = [
 ]
 
 
+# These cases check the semantic state and movement, not merely branch count.
+REPEATED = [
+    ("这轮主线是账单审阅。先进入重试调查这条支线。", "重试原因还没查明，调查被阻塞。"),
+    ("现在回到账单主线继续核对，重试调查挂起，问题没有解决。", "回到账单审阅，重试仍未解决。"),
+    ("现在再进重试支线复核。原因仍未知，不能关闭问题。", "重新进入同一调查，原因待查。"),
+    ("现在回到账单主线继续审阅，重试支线仍未解决，继续挂起。", "回到账单主线，调查保持挂起。"),
+]
+CASES += [
+    {"id": "repeated-return", "checks": {"phases": 1, "max_items": 3, "movement": ["enter", "return", "enter", "return"], "branch_state": "waiting", "mainline": True, "one_branch": True, "billing_placement": True}, "windows": [REPEATED]},
+    {"id": "repeated-stop-in-branch", "checks": {"phases": 1, "max_items": 3, "movement": ["enter", "return", "enter"], "branch_state": "active", "branch_focus": True, "one_branch": True, "billing_placement": True}, "windows": [REPEATED[:3]]},
+    {"id": "future-return-is-not-return", "checks": {"phases": 1, "max_items": 4, "movement": ["enter"], "branch_state": "active", "branch_focus": True, "one_branch": True, "billing_placement": True}, "windows": [[REPEATED[0], ("仍在重试支线排查。明天查完后才回到账单主线，现在不要切回去。", "继续调查，回主线只是后续计划。")]]},
+    {"id": "resolve-only-webhook", "checks": {"phases": 1, "one_branch": True, "mainline": True, "billing_placement": True, "isolated_resolution": True}, "windows": [[
+        ("主线是账单审阅。先进入 Webhook 调查支线。", "Webhook 原因未知，调查待完成。"),
+        ("Webhook 已核对并验证通过，关闭该调查。回到账单主线，税额尚未核对，账单审阅仍未完成。", "Webhook 调查已完成；税额待核对，继续账单审阅。"),
+    ]]},
+    {"id": "reenter-across-compacts", "checks": {"phases": 1, "max_items": 3, "movement": ["enter", "return", "enter"], "branch_state": "active", "branch_focus": True, "one_branch": True, "billing_placement": True, "stable_branch": True}, "windows": [REPEATED[:2], [REPEATED[2]]]},
+    {"id": "english-repeated-return", "checks": {"phases": 1, "max_items": 3, "movement": ["enter", "return", "enter", "return"], "branch_state": "waiting", "mainline": True, "one_branch": True}, "windows": [[
+        ("Main objective: review invoices. First enter a side investigation into failed retries.", "Retry cause is still unknown; investigation is blocked."),
+        ("Return to invoice review now. Leave the retry investigation unresolved and parked.", "Back on invoice review; retries remain unresolved."),
+        ("Re-enter the same retry investigation. The cause is still unknown, do not close it.", "Investigating retries again; unresolved."),
+        ("Return to invoice review again. Keep retries unresolved and parked.", "Reviewing invoices; retry investigation remains parked."),
+    ]]},
+]
+
+
+LONG_MIXED = []
+for n in range(50):
+    if n == 0:
+        pair = ("主线是账单审阅。税额、金额与条目都尚未全部核对完。", "开始账单审阅，主目标保持未完成。")
+    elif n == 5:
+        pair = ("现在进入 Webhook 重试调查支线。原因未知。", "进入重试调查，仍待查。")
+    elif n == 12 or n == 40:
+        pair = ("现在回到账单审阅主线，Webhook 重试问题仍未解决，挂起调查。", "回到账单审阅，Webhook 调查挂起。")
+    elif n == 30:
+        pair = ("再次进入同一个 Webhook 重试调查支线。原因仍未知，不能关闭。", "重入原调查，问题未解决。")
+    elif 5 < n < 12 or 30 < n < 40:
+        pair = (f"第{n}轮，继续当前 Webhook 重试调查，没有新结论。", "仍在同一个调查支线，保持未解决。")
+    else:
+        pair = (f"第{n}轮，继续账单审阅，不改变主目标，尚未完成。", "继续核对账单，仍未全部核对完成。")
+    LONG_MIXED.append(pair)
+CASES.append({"id": "long-50-mixed", "checks": {"phases": 1, "max_items": 4,
+    "movement": ["enter", "return", "enter", "return"], "branch_state": "waiting",
+    "mainline": True, "one_branch": True, "billing_placement": True}, "windows": [LONG_MIXED]})
+
+
+# Independent review: ordinary child faults must not invent side-line navigation.
+CASES.append({'id': 'peer-similar-upload-faults',
+ 'checks': {'phases': 1,
+            'mainline': True,
+            'branches_exact': 0,
+            'movement': [],
+            'similar_faults': True,
+            'max_items': 4},
+ 'windows': [[['主线目标是完成媒体上传稳定性验收，目前尚未完成。有两个独立故障必须分别跟踪：原图上传超时、缩略图上传超时，两个都未解决。',
+               '已分别记录原图上传超时与缩略图上传超时，继续媒体上传稳定性验收。'],
+              ['原图上传超时已定位为代理超时，调高限制后复测通过，只关闭原图上传超时这一项。缩略图上传超时原因未知，仍未解决。', '原图上传超时已解决；缩略图上传超时继续待查，不合并这两个故障。'],
+              ['继续主线验收：缩略图上传超时仍是阻塞项，尚不能宣布稳定性验收完成。', '继续媒体上传稳定性验收；保留缩略图上传超时为未解决事项，原图故障保持已关闭。']]]})
+
 def encode(data):
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -82,6 +142,14 @@ def run_case(case, pipeline, provider, repetition):
                            "elapsed_seconds": round(time.monotonic() - tick, 4)})
             return result
 
+    class MeteredCodex(CodexTransport):
+        def _execute(self, instructions, payload, schema, *, model=None):
+            tick = time.monotonic()
+            result = super()._execute(instructions, payload, schema, model=model)
+            traces.append({"request": {"model": model, "instructions": instructions, "payload": payload, "schema": schema},
+                           "result": result, "elapsed_seconds": round(time.monotonic() - tick, 4)})
+            return result
+
     root = Path(tempfile.mkdtemp(prefix="seywo-paired-metrics-")) / "project"
     initialize(root)
     config_path = root / ".seywo/config.json"
@@ -89,13 +157,23 @@ def run_case(case, pipeline, provider, repetition):
     config_data["hook"] = {"enabled": True, "pipeline": pipeline, "model": provider["model"]}
     config_path.write_text(encode(config_data))
     config = load_config(config_path)
+    if provider.get("backend") != "codex":
+        save_provider(config, endpoint=provider["endpoint"], model=provider["model"],
+                      api_key=provider.get("_api_key", ""), timeout_seconds=provider["timeout"],
+                      max_output_tokens=provider["max_output_tokens"])
+        config = load_config(config_path)
+    elif provider["model"] != "codex-default":
+        config_data["model_runtime"] = {"backend": "codex", "model": provider["model"]}
+        config_path.write_text(encode(config_data))
+        config = load_config(config_path)
     chat = "benchmark-chat"
     source = root / "source.jsonl"
     records = [{"type": "session_meta", "payload": {"id": chat, "cwd": str(root)}}]
     windows = []
     start = time.monotonic()
-    previous_transport = maintain.Transport
-    maintain.Transport = Metered
+    previous_transport, previous_codex = maintain.Transport, maintain.CodexTransport
+    maintain.Transport, maintain.CodexTransport = Metered, MeteredCodex
+    documents = []
     try:
         for wi, turns in enumerate(case["windows"]):
             for ti, (user, assistant) in enumerate(turns):
@@ -112,6 +190,9 @@ def run_case(case, pipeline, provider, repetition):
             inbox.record(config, chat, "PreCompact", str(source))
             report = maintain.run_chat(config, chat)
             windows.append(report)
+            with Store(config, read_only=True) as snapshot:
+                latest = snapshot.db.execute("SELECT body_json FROM narrative_versions WHERE chat_id=? ORDER BY version DESC LIMIT 1", (chat,)).fetchone()
+                documents.append(json.loads(latest[0]) if latest else None)
             if report.get("state") != "done":
                 break
         with Store(config, read_only=True) as store:
@@ -125,9 +206,9 @@ def run_case(case, pipeline, provider, repetition):
         evidence, valid_refs, stored_tools = [], 0, 0
         windows.append({"state": "exception", "error_code": f"{type(exc).__name__}:{str(exc)[:160]}"})
     finally:
-        maintain.Transport = previous_transport
+        maintain.Transport, maintain.CodexTransport = previous_transport, previous_codex
 
-    usage_known = all(t["result"].get("usage") is not None for t in traces)
+    usage_known = bool(traces) and all(t["result"].get("usage") is not None for t in traces)
     tool_clean = all(TOOL_MARKER not in encode(t["request"]) for t in traces)
     result = {"case": case["id"], "pipeline": pipeline, "repetition": repetition,
               "turns": sum(map(len, case["windows"])), "compact_count": len(case["windows"]),
@@ -139,7 +220,7 @@ def run_case(case, pipeline, provider, repetition):
               "evidence_refs": len(evidence), "valid_evidence_refs": valid_refs,
               "tool_body_excluded": tool_clean, "stored_tool_records": stored_tools,
               "state": windows[-1].get("state"), "error_code": windows[-1].get("error_code"),
-              "windows": windows, "document": body, "traces": traces}
+              "windows": windows, "document": body, "documents": documents, "traces": traces}
     checks = {"pipeline_completed": result["state"] == "done", "tool_filter": tool_clean,
               "evidence_identity": valid_refs == len(evidence),
               "short_titles": all(0 < len(title) <= 40 for title in result["titles"])}
@@ -154,6 +235,39 @@ def run_case(case, pipeline, provider, repetition):
         checks["focus_mainline"] = (body.get("overview", {}).get("focus") or {}).get("branch_id") is None
     if expected.get("unresolved_empty"):
         checks["resolved_no_stale_unresolved"] = not body.get("overview", {}).get("unresolved", [])
+    if "branches_exact" in expected:
+        checks["exact_branch_count"] = len(body["branches"]) == expected["branches_exact"]
+    if expected.get("similar_faults"):
+        originals = [i for i in body["items"] if "原图" in i["title"] and not i.get("hidden")]
+        thumbnails = [i for i in body["items"] if "缩略图" in i["title"] and not i.get("hidden")]
+        goals = [i for i in body["items"] if i["type"] == "goal" and not i.get("hidden")]
+        checks["distinct_fault_statuses"] = len(originals) == 1 and originals[0]["status"] == "resolved" and len(thumbnails) == 1 and thumbnails[0]["status"] == "open" and originals[0]["id"] != thumbnails[0]["id"]
+        checks["acceptance_goal_still_open"] = len(goals) == 1 and goals[0]["status"] == "open"
+        current_ids = body.get("overview", {}).get("open_question_ids", []) + body.get("overview", {}).get("next_step_ids", [])
+        checks["only_open_fault_is_current"] = bool(thumbnails) and thumbnails[0]["id"] in current_ids and all(i["id"] not in current_ids for i in originals)
+    if "movement" in expected:
+        checks["exact_movement"] = [t["kind"] for t in body.get("transitions", [])] == expected["movement"]
+    if expected.get("one_branch"):
+        checks["one_stable_branch"] = len(body["branches"]) == 1
+    if "branch_state" in expected:
+        checks["branch_state"] = len(body["branches"]) == 1 and body["branches"][0]["state"] == expected["branch_state"]
+    if expected.get("branch_focus"):
+        checks["focus_branch"] = len(body["branches"]) == 1 and (body.get("overview", {}).get("focus") or {}).get("branch_id") == body["branches"][0]["id"]
+    if expected.get("billing_placement"):
+        goals = [i for i in body["items"] if i["type"] == "goal" and "账单" in i["title"] and not i.get("hidden")]
+        checks["main_goal_preserved"] = len(goals) == 1 and goals[0].get("status") == "open"
+        places = {p["item_id"]: p for p in body.get("placements", [])}
+        checks["main_goal_placement"] = bool(goals) and places.get(goals[0]["id"], {}).get("branch_id", "missing") is None
+    if expected.get("stable_branch"):
+        checks["cross_compact_branch_identity"] = len(documents) == 2 and all(d and len(d["branches"]) == 1 for d in documents) and documents[0]["branches"][0]["id"] == documents[1]["branches"][0]["id"]
+    if expected.get("isolated_resolution"):
+        webhooks = [i for i in body["items"] if "webhook" in i["title"].lower() and not i.get("hidden")]
+        taxes = [i for i in body["items"] if "税" in i["title"] and not i.get("hidden")]
+        checks["only_webhook_closed"] = bool(webhooks) and all(i.get("status") == "resolved" for i in webhooks) and bool(taxes) and all(i.get("status") == "open" for i in taxes)
+        checks["resolved_branch"] = len(body["branches"]) == 1 and body["branches"][0]["state"] == "resolved"
+        checks["tax_current_webhook_not_current"] = any("税" in s for s in body.get("overview", {}).get("unresolved", [])) and not any("webhook" in s.lower() for s in body.get("overview", {}).get("unresolved", []))
+    checks["call_accounting"] = len(traces) == sum(window.get("calls", 0) for window in windows)
+    checks["usage_measured"] = usage_known or not any(window.get("calls", 0) for window in windows)
     result["checks"] = checks
     return result
 
@@ -162,13 +276,18 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repetitions", type=int, default=1)
+    parser.add_argument("--config", type=Path, default=Path.cwd() / ".seywo/config.json")
+    parser.add_argument("--pipeline", choices=("seywo-compact-v1", "seywo-delta-v1"), action="append")
+    parser.add_argument("--case", action="append", dest="case_ids")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    provider = read_provider()
+    provider = read_provider(load_config(args.config))
+    pipelines = args.pipeline or ["seywo-compact-v1"]
+    cases = [case for case in CASES if not args.case_ids or case["id"] in args.case_ids]
     rows = []
     for repetition in range(args.repetitions):
-        for case in CASES:
-            for pipeline in ("seywo-compact-v1", "seywo-delta-v1"):
+        for case in cases:
+            for pipeline in pipelines:
                 row = run_case(case, pipeline, provider, repetition)
                 name = f"{case['id']}-{pipeline}-{repetition}.json"
                 (args.output / name).write_text(json.dumps(row, ensure_ascii=False, indent=2))
@@ -177,14 +296,14 @@ def main():
                 print(encode(compact), flush=True)
                 (args.output / "progress.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     summaries = {}
-    for pipeline in ("seywo-compact-v1", "seywo-delta-v1"):
+    for pipeline in pipelines:
         group = [r for r in rows if r["pipeline"] == pipeline]
         summaries[pipeline] = {"runs": len(group), "completed": sum(r["state"] == "done" for r in group),
             "all_fixture_checks_passed": sum(all(r["checks"].values()) for r in group),
             **{key: sum(r[key] or 0 for r in group) for key in ("calls", "input_tokens", "output_tokens", "items")}}
-    report = {"date": "2026-11-12", "model": provider["model"], "endpoint": provider["endpoint"],
-              "fixtures_sha256": hashlib.sha256(encode(CASES).encode()).hexdigest(),
-              "fixtures": CASES, "repetitions": args.repetitions, "summaries": summaries, "runs": rows,
+    report = {"date": date.today().isoformat(), "model": provider["model"], "backend": provider.get("backend", "responses"), "endpoint": provider.get("endpoint", ""),
+              "fixtures_sha256": hashlib.sha256(encode(cases).encode()).hexdigest(),
+              "fixtures": cases, "repetitions": args.repetitions, "summaries": summaries, "runs": rows,
               "limits": ["Synthetic fixtures, not natural-history semantic acceptance", "Provider token usage; no hardware energy measurements", "Title/evidence and explicit structural checks are not a semantic recall oracle"]}
     (args.output / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(encode(summaries), flush=True)

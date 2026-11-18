@@ -4,6 +4,7 @@ from seywo.archive import open_source
 
 import io
 import json
+import os
 from pathlib import Path
 
 
@@ -60,6 +61,23 @@ def run(monkeypatch, payload):
     assert hook.main() == 0
     assert out.getvalue() == ""
     return spawned
+
+
+def test_spawn_worker_exports_installed_package_path(tmp_path, monkeypatch):
+    config, _, _ = project(tmp_path)
+    captured = {}
+
+    def capture(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(hook.subprocess, "Popen", capture)
+    assert hook.spawn(Path(config["_path"]), "chat-1")
+
+    package_src = str(Path(hook.__file__).resolve().parent.parent)
+    env = captured["kwargs"]["env"]
+    assert package_src in env["PYTHONPATH"].split(os.pathsep)
+    assert captured["args"][0][0:4] == [hook.sys.executable, "-B", "-m", "seywo.maintain"]
 
 
 def test_precompact_records_snapshot_and_spawns_worker(tmp_path, monkeypatch):
@@ -206,3 +224,10 @@ def test_hook_falls_back_to_payload_when_identity_is_unreadable(monkeypatch, tmp
     source.write_text("not json\n")
     run(monkeypatch, payload)
     assert [i["chat_id"] for i in inbox.pending(config)] == ["payload-chat"]
+
+
+def test_stop_without_an_unfinished_compact_never_captures_or_starts_model_work(tmp_path, monkeypatch):
+    config, _, payload = project(tmp_path, event='Stop')
+    assert run(monkeypatch, payload) == []
+    assert not inbox.pending(config, 'chat-1')
+    assert not (inbox.root(config) / 'live').exists()

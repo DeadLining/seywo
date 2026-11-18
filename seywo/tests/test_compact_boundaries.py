@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from seywo import inbox, maintain
+from seywo.store import Store
 from seywo.config import initialize, load_config
 from test_compact_maintain import CompactTransport
 from test_s2 import message
@@ -101,6 +102,8 @@ def test_closed_prefix_commits_while_the_last_turn_stays_pending(tmp_path, monke
         {'type': 'turn_context', 'payload': {'turn_id': 't2'}}, message('再检查检索')])
     report = run(config, write_source(tmp_path, rows))
     assert report['calls'] == 1
+    from seywo import maintenance_status
+    assert maintenance_status.read(config, 'live-chat')['waiting_for_turn']
     assert len(fake.payloads[0]['turns']) == 1
     assert fake.payloads[0]['turns'][0]['assistant'] == 'Hook已验证'
     assert run(config, tmp_path / 'live.jsonl')['calls'] == 0
@@ -214,3 +217,56 @@ def test_lifecycle_projection_upgrade_reuses_unchanged_body_payloads(tmp_path, m
         after = {r['event_id']: r['payload_id'] for r in store.db.execute(
             "SELECT event_id,payload_id FROM current_sources WHERE kind='message'")}
         assert after == body_payloads
+
+
+def test_stop_resumes_open_compact_turn_once_without_reimporting_old_sources(tmp_path, monkeypatch):
+    import io
+    from seywo import hook, maintenance_status
+    config, transport = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    source = write_source(tmp_path, rows)
+    inbox.record(config, 'live-chat', 'PreCompact', str(source))
+    maintain.run_chat(config, 'live-chat')
+    assert transport.calls == 0
+    rows.extend([message('Hook 已就绪', 'assistant'),
+                 {'type':'event_msg','payload':{'type':'task_complete','turn_id':'t1'}}])
+    write_source(tmp_path, rows)
+    spawned = []
+    monkeypatch.setattr(hook, 'spawn', lambda *args: spawned.append(args) or True)
+    payload = dict(hook_event_name='Stop', session_id='live-chat', cwd=str(tmp_path), transcript_path=str(source))
+    monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
+    assert hook.main() == 0
+    assert len(spawned) == 1
+    result = maintain.run_chat(config, 'live-chat')
+    assert result['state'] == 'done' and transport.calls == 1
+    assert maintenance_status.read(config, 'live-chat')['state'] == 'done'
+    records = [json.loads(p.read_text()) for p in (inbox.root(config)/'pending').glob('*.json')]
+    assert all(r['state'] == 'done' for r in records)
+    with Store(config, read_only=True) as store:
+        versions = store.db.execute('SELECT count(*) FROM compact_batches').fetchone()[0]
+        sources = store.db.execute('SELECT count(*) FROM source_snapshots').fetchone()[0]
+    monkeypatch.setattr('sys.stdin', io.StringIO(json.dumps(payload)))
+    assert hook.main() == 0
+    assert len(spawned) == 1
+    maintain.run_chat(config, 'live-chat')
+    assert transport.calls == 1
+    with Store(config, read_only=True) as store:
+        assert store.db.execute('SELECT count(*) FROM compact_batches').fetchone()[0] == versions
+        assert store.db.execute('SELECT count(*) FROM source_snapshots').fetchone()[0] == sources
+
+
+def test_retry_waiting_turn_captures_completion_instead_of_replaying_frozen_snapshot(tmp_path, monkeypatch):
+    from seywo import maintenance_control, hook, maintenance_status
+    config, transport = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    source = write_source(tmp_path, rows)
+    inbox.record(config, 'live-chat', 'PreCompact', str(source))
+    maintain.run_chat(config, 'live-chat')
+    rows.extend([message('完成检查', 'assistant'),
+                 {'type':'event_msg','payload':{'type':'task_complete','turn_id':'t1'}}])
+    write_source(tmp_path, rows)
+    monkeypatch.setattr(hook, 'spawn', lambda *args: True)
+    assert maintenance_control.retry(config, 'live-chat')['accepted']
+    assert maintain.run_chat(config, 'live-chat')['state'] == 'done'
+    assert transport.calls == 1
+    assert maintenance_status.read(config, 'live-chat')['state'] == 'done'

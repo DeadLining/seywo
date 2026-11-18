@@ -1,16 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 const require = createRequire(new URL('../../tools/seywo-ui/package.json', import.meta.url));
 const { JSDOM } = require('jsdom');
 import { mountPanel } from './panel.js';
+const shellSource = readFileSync(fileURLToPath(new URL('./shell.html', import.meta.url)), 'utf8');
+const bundledSource = readFileSync(fileURLToPath(new URL('./panel.html', import.meta.url)), 'utf8');
 const tick = () => new Promise(r => setTimeout(r, 15));
 const narrative = { chat_id: 'chat-a', version: 7, head_version: 7, selected_phase: 'p', node_count: 2, focus: { phase_id: 'p' },
     phases: [{ id: 'p', title: '开发插件', node_count: 2 }], branches: [{ id: 'b', phase_id: 'p', title: '检查界面', state: 'active' }],
     goals: [{ id: 'g', object_id: 'obj-g', title: '完成插件安装', evidence_count: 1 }], open_questions: [], next_steps: [], results: [{ id: 'n', object_id: 'obj-n', title: '完成插件安装', status: 'resolved', evidence_count: 1 }],
     retrieval: { has_more: false } };
 function fixture() {
-    const dom = new JSDOM('<main id="root"></main>', { url: 'https://seywo.test' });
+    const dom = new JSDOM('<main id="root"></main>', { url: 'https://seywo.test', pretendToBeVisual: true });
     const calls = [];
     const call = async (args) => {
         calls.push(args);
@@ -49,7 +53,7 @@ test('requires explicit Chat selection, then shows focused narrative and evidenc
 test('opens the current mainline without version or stage history requests', async () => {
     const f = fixture();
     await mountPanel(f.root, f.call, { chat_id: 'chat-a' });
-    assert.deepEqual(f.calls.map(c => c.view), ['chats', 'mainline']);
+    assert.deepEqual(f.calls.map(c => c.view), ['chats', 'maintenance', 'mainline']);
     assert.match(f.root.textContent, /当前目标/);
     assert.match(f.root.textContent, /对话主线/);
     assert.doesNotMatch(f.root.textContent, /Compact|阶段记录|查看版本|个节点/);
@@ -59,6 +63,9 @@ test('opens the current mainline without version or stage history requests', asy
     assert.equal(f.calls.at(-1).view, 'narrative');
     assert.equal(f.calls.at(-1).version, 7);
     assert.match(f.root.textContent, /阶段明细/);
+    assert.equal(f.root.querySelector('[data-records]').closest('.mainline-column') !== null, true);
+    for (const source of [shellSource, bundledSource])
+        assert.match(source, /\.records\{[^}]*max-height:320px/);
     f.root.querySelector('[data-branch]').click();
     await tick();
     assert.equal(f.calls.at(-1).branch_id, 'b');
@@ -203,12 +210,14 @@ test('keeps questions and next steps visible while stage details stay unloaded',
     assert.equal(f.root.querySelector('[data-records]').hidden, true);
 });
 
-test('mainline precedes secondary lists and long priority lists fold after three titles', async () => {
+test('keeps the conversation spine as the primary column and folds long priority lists', async () => {
     const f = fixture();
     const steps = Array.from({length: 9}, (_, i) => ({id: `s${i}`, object_id: `obj-${i}`, title: `后续事项${i}`}));
     await mountPanel(f.root, async args => args.view === 'mainline' ? {...narrative, next_steps: steps} : f.call(args), {chat_id: 'chat-a'});
-    const sections = [...f.root.querySelector('[data-content]').children];
-    assert.ok(sections.findIndex(n => n.classList.contains('mainline')) < sections.findIndex(n => n.classList.contains('next-steps')));
+    const content = f.root.querySelector('[data-content]');
+    assert.ok(content.querySelector('.mainline-column .mainline'));
+    assert.ok(content.querySelector('.side-column .next-steps'));
+    assert.ok(content.querySelector('.mainline-column').compareDocumentPosition(content.querySelector('.side-column')) & f.dom.window.Node.DOCUMENT_POSITION_FOLLOWING);
     const next = f.root.querySelector('.next-steps');
     assert.equal(next.querySelectorAll(':scope > [data-node]').length, 3);
     const more = next.querySelector('details');
@@ -217,12 +226,110 @@ test('mainline precedes secondary lists and long priority lists fold after three
     assert.match(more.querySelector('summary').textContent, /其余 6 项/);
 });
 
+test('uses the current Chat by default and keeps the alternate Chat picker secondary', async () => {
+    const f = fixture();
+    await mountPanel(f.root, async args => args.view === 'chats'
+      ? { ...await f.call(args), current_chat_id: 'chat-a', default_chat_id: 'chat-a' }
+      : f.call(args));
+    const switcher = f.root.querySelector('[data-chat-switcher]');
+    assert.equal(switcher.open, false);
+    assert.equal(f.root.querySelector('[data-chat]').value, 'chat-a');
+    assert.match(switcher.textContent, /查看其他对话/);
+});
+
+test('places the conversation spine first and keeps goal and unresolved work in the side column', async () => {
+    const f = fixture();
+    await mountPanel(f.root, async args => args.view === 'mainline'
+      ? { ...narrative, open_questions: [{ id: 'q', object_id: 'obj-q', title: '模型语义核验', status: 'open' }] }
+      : f.call(args), { chat_id: 'chat-a' });
+    const content = f.root.querySelector('[data-content]');
+    assert.ok(content.querySelector('.goals.focus-primary'));
+    assert.ok(content.querySelector('.mainline'));
+    assert.ok(content.querySelector('.open-questions'));
+    assert.equal(content.querySelector('.mainline-column .mainline') !== null, true);
+    assert.equal(content.querySelector('.side-column .goals') !== null, true);
+    assert.equal(content.querySelector('.side-column .open-questions') !== null, true);
+    assert.match(content.querySelector('.goals .group-meta').textContent, /Focus/);
+    assert.match(content.querySelector('.open-questions .group-meta').textContent, /1 项/);
+});
+
+test('moves the priority column above the conversation spine on narrow screens', () => {
+    for (const source of [shellSource, bundledSource]) {
+        const narrow = source.slice(source.indexOf('@media(max-width:760px)'));
+        assert.notEqual(narrow, source);
+        assert.match(narrow, /\.side-column\{[^}]*order:1/);
+        assert.match(narrow, /\.mainline-column\{[^}]*order:2/);
+    }
+});
+
+test('keeps the maintenance notice on one line on narrow screens', () => {
+    for (const source of [shellSource, bundledSource]) {
+        const narrow = source.slice(source.indexOf('@media(max-width:760px)'));
+        assert.match(narrow, /\.workspace>\.maintenance \.maintenance-copy\{[^}]*white-space:nowrap/);
+        assert.match(narrow, /\.workspace>\.maintenance \.maintenance-copy small\{display:inline/);
+    }
+});
+
+test('keeps the three priority modules visually distinct on narrow screens', () => {
+    for (const source of [shellSource, bundledSource]) {
+        const narrow = source.slice(source.indexOf('@media(max-width:760px)'));
+        assert.match(narrow, /\.side-column \.open-questions\{[^}]*border-top:1px solid var\(--line\)/);
+        assert.match(narrow, /\.side-column \.open-questions \.group-label\{[^}]*color:#b06b32/);
+        assert.match(narrow, /\.side-column \.next-steps\{[^}]*border-top:1px solid var\(--line\)/);
+        assert.match(narrow, /\.side-column \.next-steps \.focus-node\{[^}]*background:var\(--accent\)/);
+    }
+});
+
+test('keeps empty goal and question modules visible instead of removing them', async () => {
+    const f = fixture();
+    await mountPanel(f.root, async args => args.view === 'mainline'
+        ? { ...narrative, goals: [], open_questions: [], next_steps: [{ id: 's', object_id: 'obj-s', title: '重开面板确认新版布局' }] }
+        : f.call(args), { chat_id: 'chat-a' });
+    assert.ok(f.root.querySelector('.goals'));
+    assert.ok(f.root.querySelector('.open-questions'));
+    assert.match(f.root.querySelector('.goals').textContent, /当前阶段暂无未完成目标/);
+    assert.match(f.root.querySelector('.open-questions').textContent, /暂无待解决事项/);
+    assert.match(f.root.querySelector('.next-steps').textContent, /重开面板确认新版布局/);
+});
+
+test('renders the compact reference hierarchy and current phase affordances', async () => {
+    const f = fixture();
+    await mountPanel(f.root, f.call, { chat_id: 'chat-a' });
+    assert.ok(f.root.querySelector('.workspace'));
+    assert.ok(f.root.querySelector('.workspace [data-maintenance]'));
+    assert.ok(f.root.querySelector('.workspace [data-content]'));
+    assert.equal(f.root.querySelector('.mainline .branch-list').open, true);
+    assert.match(f.root.querySelector('.branch-list summary').textContent, /收起 1 条支线/);
+    assert.match(f.root.querySelector('.mainline .focus-tag').textContent, /当前阶段/);
+    assert.match(f.root.querySelector('.mainline-head').textContent, /共 1 个阶段 · 1 条支线/);
+    assert.ok(f.root.querySelector('.goals .section-icon svg'));
+});
+
+test('hides completed maintenance while retaining interrupted status', async () => {
+    const f = fixture();
+    await mountPanel(f.root, async args => args.view === 'maintenance'
+      ? maintenance('done', args.chat_id) : f.call(args), { chat_id: 'chat-a' });
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
+    const g = fixture();
+    await mountPanel(g.root, async args => args.view === 'maintenance'
+      ? maintenance('interrupted', args.chat_id, { message: '需要重试' }) : g.call(args), { chat_id: 'chat-a' });
+    assert.equal(g.root.querySelector('[data-maintenance]').hidden, false);
+    assert.match(g.root.querySelector('[data-maintenance]').textContent, /整理已中断/);
+});
+
 test('uses one model settings entry instead of a duplicate header control', async () => {
     const f = fixture();
     await mountPanel(f.root, f.call, {}, { modelStatus: async () => ({backend: 'codex', configured: true}) });
     assert.equal(f.root.querySelector('[data-settings-toggle]'), null);
     assert.equal(f.root.querySelectorAll('[data-settings]').length, 1);
     assert.equal(f.root.querySelectorAll('[data-settings] summary').length, 1);
+    const toolbar = f.root.querySelector('.header .header-actions');
+    assert.ok(toolbar.querySelector('[data-chat-switcher]'));
+    assert.ok(toolbar.querySelector('[data-settings]'));
+    assert.equal(f.root.querySelector(':scope > [data-settings]'), null);
+    assert.equal(f.root.querySelector(':scope > [data-chat-switcher]'), null);
+    assert.equal(toolbar.querySelector('[data-settings]').getAttribute('name'),
+        toolbar.querySelector('[data-chat-switcher]').getAttribute('name'));
 });
 
 test('shows project-local model settings without exposing the saved key', async () => {
@@ -335,4 +442,404 @@ test('a delayed initialization cannot replace a newer project picker', async () 
     assert.equal(opens,0);
     assert.ok(f.root.querySelector('[data-project-path]'));
     assert.doesNotMatch(f.root.textContent,/项目记忆已启用/);
+});
+
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const maintenance = (state, chat_id = 'chat-a', extra = {}) => ({
+    chat_id, state, title: '', message: '', retryable: ['failed', 'partial', 'interrupted', 'blocked'].includes(state),
+    updated_at: null, last_success_at: null, stale_view: false, model_calls: 0, ...extra,
+});
+
+test('failed maintenance preserves mainline and retries once while submitting', async () => {
+    const f = fixture(); let finish; const retries = [];
+    await mountPanel(f.root, args => args.view === 'maintenance'
+        ? maintenance('failed', args.chat_id, {stale_view: true, message: '本次整理未完成'}) : f.call(args), {chat_id: 'chat-a'}, {
+        maintenanceRetry: chat => { retries.push(chat); return new Promise(resolve => {finish = resolve;}); },
+    });
+    const status = f.root.querySelector('[data-maintenance]');
+    assert.equal(status.getAttribute('role'), 'status');
+    assert.match(status.textContent, /整理失败/);
+    assert.match(status.textContent, /整理成功后会更新主线。/);
+    const line = f.root.querySelector('.mainline');
+    const retry = status.querySelector('[data-maintenance-retry]');
+    retry.click(); retry.click();
+    assert.equal(status.querySelector('[data-maintenance-retry]').disabled, true);
+    assert.deepEqual(retries, ['chat-a']);
+    finish({accepted: true, maintenance: maintenance('queued')}); await flush();
+    assert.match(status.textContent, /等待整理/);
+    assert.equal(f.root.querySelector('.mainline'), line);
+    assert.match(f.root.querySelector('[data-content]').textContent, /完成插件安装/);
+});
+
+test('polls active maintenance then reloads mainline once on done without changing Chat', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); const reads = []; let phase = 'running'; let mainlines = 0;
+    const ctrl = await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {reads.push(args); return maintenance(phase, args.chat_id);}
+        if (args.view === 'mainline') mainlines++;
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    assert.equal(reads.length, 1); assert.equal(mainlines, 1);
+    phase = 'done'; t.mock.timers.tick(4000); await flush();
+    assert.equal(reads.length, 2); assert.equal(mainlines, 2);
+    assert.equal(ctrl.state.chat, 'chat-a');
+    assert.equal(f.root.querySelector('[data-chat]').value, 'chat-a');
+    t.mock.timers.tick(300000); await flush();
+    assert.equal(reads.length, 2); assert.equal(mainlines, 2);
+});
+
+test('late maintenance reads and retry results cannot label a different selected Chat', async () => {
+    const f = fixture(); let oldRead; let oldRetry; let delay = false;
+    const ctrl = await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {
+            if (args.chat_id === 'chat-a' && delay) return new Promise(resolve => {oldRead = resolve;});
+            return maintenance('failed', args.chat_id, {title: `整理 ${args.chat_id}`});
+        }
+        return f.call(args);
+    }, {chat_id: 'chat-a'}, {
+        maintenanceRetry: () => new Promise(resolve => {oldRetry = resolve;}),
+    });
+    f.root.querySelector('[data-maintenance-retry]').click();
+    await ctrl.selectChat('chat-b');
+    oldRetry({accepted: true, maintenance: maintenance('running', 'chat-a', {title: '旧重试'})}); await flush();
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /chat-b/);
+    assert.doesNotMatch(f.root.querySelector('[data-maintenance]').textContent, /旧重试/);
+    delay = true; const pending = ctrl.selectChat('chat-a'); await flush();
+    await ctrl.selectChat('chat-b');
+    oldRead(maintenance('done', 'chat-a', {title: '过期状态'})); await pending;
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /chat-b/);
+    assert.doesNotMatch(f.root.textContent, /过期状态/);
+});
+
+test('loads and retries maintenance for unimported exact host Chat from bootstrap', async () => {
+    const f = fixture(); const reads = []; const retries = [];
+    const ctrl = await mountPanel(f.root, async args => {
+        if (args.view === 'chats') return {...await f.call(args), current_chat_id: 'host-unimported'};
+        if (args.view === 'maintenance') {reads.push(args); return maintenance('partial', args.chat_id);}
+        return f.call(args);
+    }, {}, {maintenanceRetry: async chat => {retries.push(chat); return {accepted: false, maintenance: maintenance('blocked', chat)};}});
+    assert.equal(ctrl.state.chat, '');
+    assert.match(f.root.textContent, /当前对话尚未收录/);
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /部分完成/);
+    assert.deepEqual(reads, [{view: 'maintenance', chat_id: 'host-unimported'}]);
+    assert.equal(f.calls.some(c => c.view === 'mainline'), false);
+    f.root.querySelector('[data-maintenance-retry]').click(); await flush();
+    assert.deepEqual(retries, ['host-unimported']);
+    await ctrl.selectChat('chat-a');
+    assert.equal(reads.at(-1).chat_id, 'chat-a');
+});
+
+test('unsupported maintenance reads and failed retry stay safe and preserve content', async () => {
+    const f = fixture(); let reads = 0; let supported = false;
+    await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {
+            reads++;
+            if (!supported) throw Error('Traceback /private API_KEY');
+            return maintenance('failed');
+        }
+        return f.call(args);
+    }, {chat_id: 'chat-a'}, {maintenanceRetry: async () => {throw Error('Traceback /secret API_KEY');}});
+    const line = f.root.querySelector('.mainline');
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /暂时无法读取整理状态/);
+    supported = true;
+    f.root.querySelector('[data-maintenance-refresh]').click(); await flush();
+    assert.equal(reads, 2);
+    f.root.querySelector('[data-maintenance-retry]').click(); await flush();
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /未能提交重试/);
+    assert.ok(f.root.querySelector('[data-maintenance-retry]'));
+    assert.doesNotMatch(f.root.textContent, /Traceback|private|secret|API_KEY/);
+    assert.equal(f.root.querySelector('.mainline'), line);
+});
+
+test('polling pauses while hidden, ignores hidden responses, and expires after five minutes', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let hidden = false; let reads = 0; let finish; let delay = false;
+    Object.defineProperty(f.dom.window.document, 'hidden', {get: () => hidden});
+    const ctrl = await mountPanel(f.root, args => {
+        if (args.view !== 'maintenance') return f.call(args);
+        reads++;
+        if (delay) return new Promise(resolve => {finish = resolve;});
+        return maintenance('running');
+    }, {chat_id: 'chat-a'});
+    delay = true; t.mock.timers.tick(4000); await flush(); assert.equal(reads, 2);
+    hidden = true; f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+    finish(maintenance('failed', 'chat-a', {title: '隐藏响应'})); await flush();
+    assert.doesNotMatch(f.root.textContent, /隐藏响应/);
+    t.mock.timers.tick(20000); await flush(); assert.equal(reads, 2);
+    delay = false; hidden = false; f.dom.window.document.dispatchEvent(new f.dom.window.Event('visibilitychange'));
+    t.mock.timers.tick(4000); await flush(); assert.equal(reads, 3);
+    t.mock.timers.tick(300000); await flush();
+    assert.equal(reads, 3);
+    await ctrl.refresh(); assert.equal(reads, 4);
+    t.mock.timers.tick(4000); await flush(); assert.equal(reads, 5);
+});
+
+
+test('reopening and rebinding discard pending maintenance and cancel old polling', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let finish; let delay = false; let reads = 0;
+    const ctrl = await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {
+            reads++;
+            if (delay) return new Promise(resolve => {finish = resolve;});
+            return maintenance('running', args.chat_id);
+        }
+        return f.call(args);
+    }, {chat_id: 'chat-a'}, {selectProject: async () => ({initialized: true})});
+    delay = true; t.mock.timers.tick(4000); await flush();
+    await ctrl.open({state: 'project_required'});
+    finish(maintenance('failed', 'chat-a', {title: '旧项目失败'})); await flush();
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
+    assert.doesNotMatch(f.root.textContent, /旧项目失败/);
+    t.mock.timers.tick(4000); await flush(); assert.equal(reads, 2);
+    delay = false;
+    f.root.querySelector('[data-project-path]').value = '/work/new';
+    f.root.querySelector('[data-bind-project]').click(); await flush();
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
+    assert.equal(reads, 2);
+    await ctrl.open({chat_id: 'chat-b'});
+    assert.equal(reads, 3);
+    assert.equal(ctrl.state.chat, 'chat-b');
+});
+
+test('active to partial retains published mainline and stops polling', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let status = 'running'; let reads = 0; let mainlines = 0;
+    await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {reads++; return maintenance(status);}
+        if (args.view === 'mainline') mainlines++;
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    const line = f.root.querySelector('.mainline');
+    status = 'partial'; t.mock.timers.tick(4000); await flush();
+    assert.equal(f.root.querySelector('.mainline'), line);
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /部分完成.*整理成功后会更新主线。/s);
+    t.mock.timers.tick(20000); await flush();
+    assert.equal(reads, 2); assert.equal(mainlines, 1);
+});
+
+test('unimported Chat completion loads its new mainline without repeated refreshes', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let imported = false; let chatReads = 0; let statusReads = 0;
+    const ctrl = await mountPanel(f.root, async args => {
+        if (args.view === 'chats') {
+            chatReads++;
+            return {...await f.call(args), current_chat_id: 'host-new', default_chat_id: imported ? 'host-new' : null};
+        }
+        if (args.view === 'maintenance') {statusReads++; return maintenance(imported ? 'done' : 'running', args.chat_id);}
+        return f.call(args);
+    });
+    imported = true; t.mock.timers.tick(4000); await flush();
+    assert.equal(ctrl.state.chat, 'host-new');
+    assert.match(f.root.querySelector('[data-content]').textContent, /对话主线/);
+    assert.equal(chatReads, 2);
+    t.mock.timers.tick(20000); await flush();
+    assert.equal(chatReads, 2); assert.equal(statusReads, 3);
+});
+
+test('mismatched maintenance Chat IDs show safe refresh notice rather than wrong status', async () => {
+    const f = fixture();
+    await mountPanel(f.root, args => args.view === 'maintenance'
+        ? maintenance('failed', 'chat-other', {title: '其他对话状态'}) : f.call(args), {chat_id: 'chat-a'});
+    assert.doesNotMatch(f.root.textContent, /其他对话状态/);
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /暂时无法读取整理状态/);
+    assert.ok(f.root.querySelector('[data-maintenance-refresh]'));
+    assert.match(f.root.querySelector('[data-content]').textContent, /对话主线/);
+});
+
+
+test('completion refresh failure keeps the published mainline available', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let done = false;
+    await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return maintenance(done ? 'done' : 'running');
+        if (args.view === 'mainline' && done) throw Error('private backend details');
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    const line = f.root.querySelector('.mainline');
+    done = true; t.mock.timers.tick(4000); await flush();
+    assert.equal(f.root.querySelector('.mainline'), line);
+    assert.equal(f.root.querySelector('[data-content]').hasAttribute('aria-busy'), false);
+    assert.doesNotMatch(f.root.textContent, /private backend details/);
+    assert.match(f.root.querySelector('[data-notice]').textContent, /暂时无法读取/);
+});
+
+
+for (const version of [0, 7]) {
+    test(`maintenance copy stays accurate before and after parallel mainline version ${version}`, async () => {
+        const f = fixture(); let finishMainline;
+        const pending = mountPanel(f.root, args => {
+            if (args.view === 'maintenance') return maintenance('failed', args.chat_id, {stale_view: true});
+            if (args.view === 'mainline') return new Promise(resolve => {finishMainline = resolve;});
+            return f.call(args);
+        }, {chat_id: 'chat-a'});
+        await flush();
+        const status = f.root.querySelector('[data-maintenance]');
+        assert.match(status.textContent, /整理成功后会更新主线。/);
+        assert.doesNotMatch(status.textContent, /已有主线|上次成功/);
+        finishMainline({...narrative, version}); await pending;
+        assert.match(status.textContent, /整理成功后会更新主线。/);
+        assert.doesNotMatch(status.textContent, /已有主线|上次成功/);
+        if (version) assert.ok(f.root.querySelector('.mainline'));
+        else assert.match(f.root.querySelector('[data-content]').textContent, /还没有发布主线/);
+    });
+}
+
+test('late maintenance copy leaves a parallel mainline reading error visible', async () => {
+    const f = fixture(); let finishStatus;
+    const pending = mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return new Promise(resolve => {finishStatus = resolve;});
+        if (args.view === 'mainline') throw Error('private error');
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    await flush();
+    const notice = f.root.querySelector('[data-notice]');
+    assert.match(notice.textContent, /暂时无法读取/);
+    finishStatus(maintenance('failed', 'chat-a', {stale_view: true})); await pending;
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /整理成功后会更新主线。/);
+    assert.match(notice.textContent, /暂时无法读取/);
+    assert.ok(notice.querySelector('[data-retry]'));
+    assert.doesNotMatch(f.root.textContent, /已有主线|private error/);
+});
+
+
+for (const publishedVersion of [8, null, undefined, 7, 6]) {
+    test(`initial done reconciles published version ${publishedVersion} after parallel reads once`, async t => {
+        t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+        const f = fixture(); let finishStatus; let mainlines = 0;
+        const pending = mountPanel(f.root, args => {
+            if (args.view === 'maintenance') return new Promise(resolve => {finishStatus = resolve;});
+            if (args.view === 'mainline') {
+                mainlines++;
+                return {...narrative, version: mainlines === 1 ? 7 : 8};
+            }
+            return f.call(args);
+        }, {chat_id: 'chat-a'});
+        await flush();
+        // Rendering remains independent of the delayed maintenance response.
+        assert.match(f.root.querySelector('[data-content]').textContent, /对话主线/);
+        assert.equal(mainlines, 1);
+        finishStatus(maintenance('done', 'chat-a', {published_version: publishedVersion}));
+        const ctrl = await pending;
+        const needsReload = publishedVersion == null || publishedVersion > 7;
+        assert.equal(mainlines, needsReload ? 2 : 1);
+        assert.equal(ctrl.state.version, needsReload ? 8 : 7);
+        assert.equal(ctrl.state.chat, 'chat-a');
+        t.mock.timers.tick(300000); await flush();
+        assert.equal(mainlines, needsReload ? 2 : 1);
+    });
+}
+
+test('initial done waits for a delayed mainline before comparing published versions', async () => {
+    const f = fixture(); let finishMainline; let reads = 0;
+    const pending = mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return maintenance('done', args.chat_id, {published_version: 8});
+        if (args.view === 'mainline') {
+            reads++;
+            if (reads === 1) return new Promise(resolve => {finishMainline = resolve;});
+            return {...narrative, version: 8};
+        }
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    await flush(); assert.equal(reads, 1);
+    finishMainline({...narrative, version: 7});
+    const ctrl = await pending;
+    assert.equal(reads, 2); assert.equal(ctrl.state.version, 8);
+});
+
+test('initial done reconciliation preserves the existing mainline if its reload fails', async () => {
+    const f = fixture(); let finishStatus; let reads = 0;
+    const pending = mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return new Promise(resolve => {finishStatus = resolve;});
+        if (args.view === 'mainline' && ++reads > 1) throw Error('private backend failure');
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    await flush();
+    const line = f.root.querySelector('.mainline');
+    finishStatus(maintenance('done', 'chat-a', {published_version: 8})); await pending;
+    assert.equal(reads, 2);
+    assert.equal(f.root.querySelector('.mainline'), line);
+    assert.match(f.root.querySelector('[data-notice]').textContent, /暂时无法读取/);
+    assert.doesNotMatch(f.root.textContent, /private backend failure/);
+});
+
+test('active to done during initial loading does not cause a duplicate completion reload', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let finishMainline; let reads = 0; let done = false;
+    const pending = mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return maintenance(done ? 'done' : 'running', args.chat_id);
+        if (args.view === 'mainline') {
+            reads++;
+            if (reads === 1) return new Promise(resolve => {finishMainline = resolve;});
+            return {...narrative, version: 8};
+        }
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    await flush();
+    done = true; t.mock.timers.tick(4000); await flush();
+    assert.equal(reads, 2);
+    finishMainline({...narrative, version: 7});
+    const ctrl = await pending;
+    assert.equal(reads, 2); assert.equal(ctrl.state.version, 8);
+});
+
+test('chat switch during initial reads cannot reconcile the old done status into the new Chat', async () => {
+    const f = fixture(); let finishOld; let delay = false; const reads = [];
+    const ctrl = await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') {
+            if (delay && args.chat_id === 'chat-a') return new Promise(resolve => {finishOld = resolve;});
+            return maintenance('failed', args.chat_id);
+        }
+        if (args.view === 'mainline') reads.push(args.chat_id);
+        return f.call(args);
+    }, {chat_id: 'chat-a'});
+    delay = true;
+    const oldSelection = ctrl.selectChat('chat-a'); await flush();
+    await ctrl.selectChat('chat-b');
+    finishOld(maintenance('done', 'chat-a', {published_version: 8})); await oldSelection;
+    assert.equal(ctrl.state.chat, 'chat-b');
+    assert.deepEqual(reads, ['chat-a', 'chat-a', 'chat-b']);
+    assert.equal(f.root.querySelector('[data-maintenance]').dataset.state, 'failed');
+});
+
+test('empty mainline shows phase failure and an actionable retry regardless of read order', async () => {
+    for (const statusFirst of [true, false]) {
+        const f = fixture(); let finishStatus, finishMainline; const retries = [];
+        const mounting = mountPanel(f.root, args => {
+            if (args.view === 'maintenance') return new Promise(resolve => {finishStatus = resolve;});
+            if (args.view === 'mainline') return new Promise(resolve => {finishMainline = resolve;});
+            return f.call(args);
+        }, {chat_id: 'chat-a'}, {maintenanceRetry: async chat => {
+            retries.push(chat); return {accepted: true, maintenance: maintenance('queued', chat)};
+        }});
+        await flush();
+        const failed = maintenance('failed', 'chat-a', {message: '新阶段缺少本段用户目标的有效定位，模型修正后仍未通过校验。可以重试整理。'});
+        if (statusFirst) { finishStatus(failed); await flush(); finishMainline({chat_id: 'chat-a', version: 0}); }
+        else { finishMainline({chat_id: 'chat-a', version: 0}); await flush(); finishStatus(failed); }
+        await mounting;
+        assert.match(f.root.querySelector('[data-content]').textContent, /主线整理失败/);
+        assert.match(f.root.querySelector('[data-maintenance]').textContent, /本段用户目标/);
+        f.root.querySelector('[data-maintenance-retry]').click(); await flush();
+        assert.deepEqual(retries, ['chat-a']);
+        assert.match(f.root.querySelector('[data-maintenance]').textContent, /等待整理/);
+        assert.doesNotMatch(f.root.querySelector('[data-content]').textContent, /主线整理失败/);
+    }
+});
+
+test('waiting for a compact turn remains retryable and polls through publication', async t => {
+    t.mock.timers.enable({apis: ['setTimeout', 'Date']});
+    const f = fixture(); let completed = false; let mainlines = 0;
+    await mountPanel(f.root, args => {
+        if (args.view === 'maintenance') return maintenance(completed ? 'done' : 'partial', args.chat_id,
+            {waiting_for_turn: !completed, retryable: !completed, message: completed ? '' : '等待本轮对话结束后继续整理。'});
+        if (args.view === 'mainline') mainlines++;
+        return f.call(args);
+    }, {chat_id: 'chat-a'}, {maintenanceRetry: async () => ({accepted:true,maintenance:maintenance('queued')})});
+    assert.ok(f.root.querySelector('[data-maintenance-retry]'));
+    assert.notEqual(f.root.querySelector('.maintenance-mark').textContent, '✓');
+    completed = true;
+    t.mock.timers.tick(4000); await flush();
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
+    assert.equal(mainlines, 2);
 });

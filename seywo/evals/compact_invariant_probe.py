@@ -1,5 +1,6 @@
 """Adversarial, model-free probes of Compact correctness; writes evidence only."""
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 import sqlite3
@@ -9,7 +10,7 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from seywo import compact_schema  # noqa: E402
 from seywo.compact_model import request_payload, validate  # noqa: E402
-from seywo.compact_pipeline import apply_compact, _turn_packets  # noqa: E402
+from seywo.compact_pipeline import apply_compact, _turn_packets, _batch_turns, _payload_turns  # noqa: E402
 from seywo.narrative import Narrative, empty  # noqa: E402
 from seywo.config import initialize, load_config  # noqa: E402
 from seywo.store import Store, encode  # noqa: E402
@@ -79,12 +80,14 @@ def run():
     except ValueError as exc:
         check('resolve_must_close_item', True, 'resolve cannot leave open=true', str(exc))
 
-    marker = '关键约束：禁止发送生产数据'
+    marker = '月结口径改为自然月'
     long_user = '开头说明。' * 250 + marker + '结尾说明。' * 250
-    payload = request_payload([dict(index=0, user=long_user, assistant='收到')], {}, [])
-    check('middle_constraint_reaches_model', marker in json.dumps(payload, ensure_ascii=False),
-          'semantically critical middle sentence is in input or explicit incomplete-coverage fallback',
-          dict(original_chars=len(long_user), model_user_chars=len(payload['turns'][0]['user']), marker_present=marker in payload['turns'][0]['user']))
+    native = dict(turn_id='long', user=long_user, assistant='', sources=[source(20, long_user)])
+    payloads = [request_payload(_payload_turns(batch), {}, []) for batch in _batch_turns([native])]
+    offered = ''.join(turn['user'] for payload in payloads for turn in payload['turns'])
+    check('middle_constraint_reaches_model', offered == long_user,
+          'every character reaches model input exactly once, including neutral middle requirements',
+          dict(original_chars=len(long_user), model_user_chars=len(offered), marker_present=marker in offered))
 
     packets = _turn_packets([source(0, '修复导出'), source(1, '正在逐个检查文件和执行测试', role='assistant', channel='commentary')])
     check('only_final_assistant_answer_in_input', not any(p['assistant'] for p in packets),
@@ -145,7 +148,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     results = run()
-    report = dict(date='2026-11-12', probe_count=len(results), passed=sum(r['passed'] for r in results), probes=results)
+    report = dict(date=date.today().isoformat(), probe_count=len(results), passed=sum(r['passed'] for r in results), probes=results)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2))
     print(json.dumps(report, ensure_ascii=False, indent=2))

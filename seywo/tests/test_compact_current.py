@@ -136,7 +136,7 @@ def test_relevance_selection_reserves_the_current_goal():
     assert len(catalog) <= 12
 
 
-def test_focus_segment_selects_current_line_and_manual_focus_has_precedence():
+def test_chronological_actions_select_current_line_and_manual_focus_has_precedence():
     semantic = {
         'segments': [{'title': '主线', 'turn_indexes': [0], 'action': 'continue'},
                      {'title': '排查支线', 'turn_indexes': [1], 'action': 'branch'}],
@@ -149,7 +149,7 @@ def test_focus_segment_selects_current_line_and_manual_focus_has_precedence():
              turn('t2', '排查支线', '', source(2, 'user', '排查支线', turn='t2'))]
     doc, _, _ = apply_compact(empty(), semantic, turns, [], 'focus')
     assert len(doc['branches']) == 1
-    assert doc['overview']['focus']['branch_id'] is None
+    assert doc['overview']['focus']['branch_id'] == doc['branches'][0]['id']
     prior = history()
     focused = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
         'changes': [], 'focus_segment': 0,
@@ -177,3 +177,88 @@ def test_title_update_preserves_independently_locked_manual_content():
         locks=[{'entity': 'item', 'id': 'old', 'field': 'content', 'value': '人工补充的准确说明'}])
     assert result['items'][0]['title'] == 'Hook 已确认'
     assert result['items'][0]['content'] == '人工补充的准确说明'
+
+
+def select(doc, selection, *, locks=()):
+    semantic = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
+                'changes': [], 'current': selection}
+    return apply_compact(doc, semantic,
+        [turn('t', '继续当前重点。', '', source(1, 'user', '继续当前重点。'))],
+        [{'index': n, **v} for n, v in enumerate(doc['items'])], 'priority-projection', locks=locks)[0]
+
+
+def question_history(count=1):
+    doc = history()
+    for n in range(count):
+        identity = f'question-{n}'
+        doc['items'].append({**doc['items'][1], 'id': identity, 'title': f'待查问题{n}', 'type': 'question'})
+        doc['placements'].append({'item_id': identity, 'phase_id': 'now-phase', 'branch_id': None})
+    return doc
+
+
+def test_priority_indexes_are_classified_by_materialized_type_once():
+    doc = question_history()
+    result = select(doc, {'goal_index': 1, 'priority_indexes': [3, 2, 3]})
+    assert result['overview']['goal_item_ids'] == ['goal']
+    assert result['overview']['open_question_ids'] == ['question-0']
+    assert result['overview']['next_step_ids'] == ['next']
+    assert result['overview']['unresolved'] == ['待查问题0', '验收检索结果']
+
+
+def test_legacy_question_in_both_lists_is_not_a_fatal_type_conflict():
+    doc = question_history()
+    result = select(doc, {'goal_indexes': [1], 'question_indexes': [3], 'next_step_indexes': [3]})
+    assert result['overview']['open_question_ids'] == ['question-0']
+    assert result['overview']['next_step_ids'] == []
+
+
+def test_completed_items_cannot_remain_current_even_when_selected():
+    doc = question_history()
+    doc['items'][0]['status'] = 'resolved'
+    doc['items'][1]['status'] = 'resolved'
+    result = select(doc, {'goal_index': 1, 'priority_indexes': [0, 2, 3]})
+    assert result['overview']['goal_item_ids'] == []
+    assert result['overview']['open_question_ids'] == ['question-0']
+    assert result['overview']['next_step_ids'] == ['next']
+
+
+def test_priority_order_bounds_each_category_without_losing_history():
+    doc = question_history(count=6)
+    result = select(doc, {'goal_index': 1, 'priority_indexes': [8, 7, 6, 5, 4, 3]})
+    assert result['overview']['open_question_ids'] == ['question-5', 'question-4', 'question-3']
+    assert len(result['items']) == len(doc['items'])
+    assert all(i['status'] == 'open' for i in result['items'])
+
+
+def test_current_goal_is_a_semantic_choice_and_can_be_a_question():
+    doc = question_history()
+    result = select(doc, {'goal_index': 3, 'priority_indexes': [2]})
+    assert result['overview']['goal_item_ids'] == ['question-0']
+    assert result['overview']['open_question_ids'] == []
+    assert result['overview']['next_step_ids'] == ['next']
+
+
+def test_unknown_priority_identity_is_still_rejected():
+    with pytest.raises(ValueError, match='compact_invalid_current_item'):
+        select(history(), {'goal_index': 1, 'priority_indexes': [99]})
+
+
+@pytest.mark.parametrize('item_type', ['observation', 'correction', 'decision', 'option', 'goal'])
+def test_selected_open_concern_is_not_lost_due_to_information_category(item_type):
+    doc = question_history()
+    doc['items'][3]['type'] = item_type
+    result = select(doc, {'goal_index': 1, 'priority_indexes': [1, 3]})
+    assert result['overview']['goal_item_ids'] == ['goal']
+    assert result['overview']['open_question_ids'] == ['question-0']
+    assert result['overview']['unresolved'] == ['待查问题0']
+    assert result['items'][3]['type'] == item_type
+
+
+@pytest.mark.parametrize('model_goal', [None, 3])
+def test_priority_dedup_uses_effective_human_locked_goal(model_goal):
+    doc = question_history()
+    result = select(doc, {'goal_index': model_goal, 'priority_indexes': [1, 3]},
+        locks=[{'entity': 'overview', 'id': 'overview', 'field': 'goal_item_ids', 'value': ['goal']}])
+    assert result['overview']['goal_item_ids'] == ['goal']
+    assert result['overview']['open_question_ids'] == ['question-0']
+    assert result['overview']['unresolved'] == ['待查问题0']

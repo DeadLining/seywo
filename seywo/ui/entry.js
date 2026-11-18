@@ -20,7 +20,7 @@ const serverTool = async (name,args) => {
     return JSON.parse(result.content.find(c => c.type === 'text').text);
 };
 const call=args=>serverTool('seywo_panel_data',args);
-const actions={initializeProject:()=>serverTool('seywo_initialize_project',{}),selectProject:project_root=>serverTool('seywo_select_project',{project_root}),openCurrent:()=>serverTool('seywo_open',{}),modelStatus:()=>serverTool('seywo_model_status',{}),modelSave:args=>serverTool('seywo_model_save',args),modelTest:args=>serverTool('seywo_model_test',args)};
+const actions={maintenanceRetry:chat_id=>serverTool('seywo_retry_maintenance',chat_id?{chat_id}:{}),initializeProject:()=>serverTool('seywo_initialize_project',{}),selectProject:project_root=>serverTool('seywo_select_project',{project_root}),openCurrent:()=>serverTool('seywo_open',{}),modelStatus:()=>serverTool('seywo_model_status',{}),modelSave:args=>serverTool('seywo_model_save',args),modelTest:args=>serverTool('seywo_model_test',args)};
 try {
     await app.connect();
     const theme = app.getHostContext()?.theme;

@@ -97,7 +97,7 @@ def test_compact_failure_keeps_cursor_before_and_records_failure(tmp_path, monke
     chat_id = "compact-failed"
     inbox.record(config, chat_id, "PreCompact", str(make_source(root, chat_id)))
     report = maintain.run_chat(config, chat_id)
-    assert report["state"] == "partial"
+    assert report["state"] == "failed"
     assert report["error_code"] == "invalid_json"
     state_path = Path(config["_path"]).parent / "maintain" / f"{chat_id}.json"
     state = json.loads(state_path.read_text())

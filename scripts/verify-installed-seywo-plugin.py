@@ -76,15 +76,20 @@ def verify(project, host_chat=None, host_binary="codex"):
             hooks = request('hooks/list', {'cwds': [str(project)]})
             plugin_hooks = [hook for entry in hooks['data'] for hook in entry['hooks']
                             if hook.get('pluginId') == 'seywo@seywo-local']
-            assert len(plugin_hooks) == 4, hooks
+            assert len(plugin_hooks) == 5, hooks
             inventory = request('mcpServerStatus/list', {'threadId': thread})
             server = next(item for item in inventory['data'] if item['name'] == 'seywo')
-            assert server['runtimeStatus'] == 'connected'
+            # Older desktop backends omit runtimeStatus. Actual calls below
+            # establish connectivity rather than inferring it from inventory.
+            if 'runtimeStatus' in server:
+                assert server['runtimeStatus'] == 'connected'
+            assert server.get('tools'), {'fields': sorted(server)}
             tools = server['tools']
-            assert len(tools) == 16
+            assert len(tools) == 17
             metadata = tools['seywo_open']['_meta']
             assert metadata['openai/ui']['entrypoints'] == [{'type': 'thread'}]
             assert tools['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
+            assert tools['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
 
             def raw_tool(name, **arguments):
                 result = request('mcpServer/tool/call', {'threadId': thread, 'server': 'seywo',
@@ -123,11 +128,14 @@ def verify(project, host_chat=None, host_binary="codex"):
             assert html['mimeType'] == 'text/html;profile=mcp-app'
             chats = tool('seywo_panel_data', view='chats')
             narrative = None
+            maintenance = None
             if chats['results']:
                 chat = chats['results'][0]
                 narrative = tool('seywo_panel_data', view='narrative', chat_id=chat['chat_id'])
                 mainline = tool('seywo_panel_data', view='mainline', chat_id=chat['chat_id'])
                 assert mainline['model_calls'] == 0 and 'results' not in mainline
+                maintenance = tool('seywo_panel_data', view='maintenance', chat_id=chat['chat_id'])
+                assert maintenance['model_calls'] == 0 and 'retryable' in maintenance
             assert not (installed / '.seywo').exists()
             return {'passed': True, 'project': str(project), 'plugin_version': plugin['version'],
                     'installed_path': str(installed), 'host': host, 'tools': len(tools),
@@ -137,7 +145,7 @@ def verify(project, host_chat=None, host_binary="codex"):
                     'ui_bytes': len(html['text'].encode()),
                     'open_response_bytes': len(json.dumps(opened).encode()),
                     'automatic_binding_verified_via_installed_stdio': bool(host_chat), 'status_read': bool(status), 'chat_page_count': len(chats['results']),
-                    'narrative_read': narrative is not None,
+                    'narrative_read': narrative is not None, 'maintenance_read': maintenance is not None,
                     'model_calls': 0, 'desktop_menu_verified': False,
                     'desktop_panel_verified': False,
                     'desktop_note': 'This protocol verifier does not operate the desktop UI',

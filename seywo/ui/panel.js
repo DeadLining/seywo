@@ -7,13 +7,141 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         n.textContent = text; if (cls)
         n.className = cls; return n; };
     const button = (text, fn, cls = '') => { const b = el('button', text, cls); b.type = 'button'; b.onclick = fn; return b; };
-    root.innerHTML = '<header class="header"><div class="brand"><span class="mark">S</span><div><h1>Seywo</h1><p data-project>项目记忆</p></div></div><div class="header-actions"><button data-refresh aria-label="刷新记录" title="刷新记录"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg></button></div></header><div class="selector"><label for="chat">对话</label><select id="chat" data-chat><option value="">选择一个 Chat</option></select></div><button data-more-chats class="more" hidden>更多对话</button><div data-notice role="status"></div><details data-settings><summary>模型设置</summary><div data-settings-body></div></details><main data-content></main><aside data-drawer hidden aria-label="节点来源"><button data-close aria-label="关闭来源">×</button><div data-detail></div></aside><footer>本地记录 · 按需读取原文</footer>';
+    root.innerHTML = '<header class="header"><div class="brand"><span class="mark" aria-label="Seywo 轨迹标记"><svg viewBox="0 0 48 48" aria-hidden="true"><circle class="brand-halo" cx="34.5" cy="13.5" r="5.5"/><path class="brand-glyph" d="M36.1 13.8c-2.6-2.4-6.5-3.7-10.8-3.7-6.8 0-11.5 3.1-11.5 7.6 0 4.8 4.7 6.6 10.7 7.9 5.8 1.3 8.5 2.4 8.5 5.1 0 2.8-3.1 4.7-7.8 4.7-4.3 0-8.2-1.5-10.9-4.1l-3.1 3.8c3.4 3.2 8.3 5 14.1 5 8.1 0 13.4-3.9 13.4-9.8 0-5.1-3.9-7.5-10.9-9-5.8-1.3-8.3-2.4-8.3-4.5 0-1.8 2.5-3.1 6.3-3.1 3.7 0 7 1.1 9.7 3.1z"/><circle class="brand-node" cx="36.8" cy="34.2" r="3.2"/></svg></span><div><h1>Seywo</h1><p data-project>项目记忆</p></div></div><div class="header-actions"><button data-refresh aria-label="刷新记录" title="刷新记录"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.5-1L20 9M4 15l2.4 3a7 7 0 0 0 11.5-1"/></svg></button><details data-chat-switcher class="chat-switcher" name="seywo-toolbar"><summary title="查看其他对话" aria-label="查看其他对话"><span class="toolbar-full">查看其他对话</span><span class="toolbar-short" aria-hidden="true">对话</span></summary><div class="toolbar-popover"><div class="selector"><label for="chat">对话</label><select id="chat" data-chat><option value="">选择一个 Chat</option></select></div><button data-more-chats class="more" hidden>更多对话</button></div></details><details data-settings name="seywo-toolbar"><summary title="模型设置" aria-label="模型设置"><span class="toolbar-full">模型设置</span><span class="toolbar-short" aria-hidden="true">模型</span></summary><div data-settings-body class="toolbar-popover"></div></details></div></header><div data-notice role="status"></div><section class="workspace"><section data-maintenance class="maintenance" role="status" aria-live="polite" hidden></section><main data-content></main></section><aside data-drawer hidden aria-label="节点来源"><button data-close aria-label="关闭来源">×</button><div data-detail></div></aside><footer>本地记录 · 按需读取原文</footer>';
     const content = root.querySelector('[data-content]'), notice = root.querySelector('[data-notice]');
+    const chatSwitcher = root.querySelector('[data-chat-switcher]');
     const drawer = root.querySelector('[data-drawer]'), detail = root.querySelector('[data-detail]');
     const settings = root.querySelector('[data-settings]'), settingsBody = root.querySelector('[data-settings-body]');
     let settingsLoaded = false, settingsLoading = false;
     const clearNotice = () => notice.replaceChildren();
     function error(retry) { notice.replaceChildren(el('p', '暂时无法读取这部分记录。你可以重试。')); const b = button('重试', retry); b.dataset.retry = ''; notice.append(b); }
+    // Maintenance has its own lifecycle: a failed update must never replace a published view.
+    const maintenanceBox = root.querySelector('[data-maintenance]');
+    const maintenanceLabels = {idle: '暂时无需整理', queued: '等待整理', running: '正在整理', done: '整理完成', partial: '整理部分完成', failed: '整理失败', blocked: '整理暂受阻', interrupted: '整理已中断', disabled: '自动整理已停用'};
+    let maintenanceTarget = '', maintenanceStatus = null, maintenanceGeneration = 0, maintenanceRead = 0;
+    let maintenanceTimer, maintenanceUntil = 0, maintenanceSubmitting = false, maintenanceProblem = '';
+    let maintenanceCompletionReloaded = false;
+    const maintenanceActive = () => ['queued', 'running'].includes(maintenanceStatus?.state) || Boolean(maintenanceStatus?.waiting_for_turn);
+    const maintenanceVisible = () => Boolean(maintenanceProblem) || ['queued', 'running', 'failed', 'partial', 'blocked', 'interrupted'].includes(maintenanceStatus?.state);
+    function clearMaintenanceTimer() {
+        clearTimeout(maintenanceTimer); maintenanceTimer = undefined;
+    }
+    function resetMaintenance() {
+        clearMaintenanceTimer(); maintenanceGeneration++; maintenanceRead++;
+        maintenanceTarget = ''; maintenanceStatus = null; maintenanceSubmitting = false;
+        maintenanceProblem = ''; maintenanceUntil = 0; maintenanceCompletionReloaded = false;
+        maintenanceBox.hidden = true; maintenanceBox.replaceChildren();
+        maintenanceBox.removeAttribute('aria-busy');
+    }
+    function renderEmptyMainline() {
+        const status = maintenanceTarget === state.chat ? maintenanceStatus : null;
+        if (['failed', 'partial', 'blocked', 'interrupted'].includes(status?.state)) {
+            empty('主线整理失败', '这段对话还没有发布主线。失败原因和重试入口见上方整理状态，原始对话仍可搜索读取。');
+        } else {
+            empty('这段对话还没有发布主线', '原始对话可通过 Seywo 搜索读取；主线将在整理后显示。');
+        }
+    }
+    function renderMaintenance() {
+        if (!maintenanceVisible()) {
+            maintenanceBox.hidden = true;
+            maintenanceBox.replaceChildren();
+            maintenanceBox.removeAttribute('data-state');
+            maintenanceBox.removeAttribute('aria-busy');
+            return;
+        }
+        if (state.data && !state.data.version) renderEmptyMainline();
+        maintenanceBox.hidden = false; maintenanceBox.replaceChildren();
+        maintenanceBox.dataset.state = maintenanceStatus?.state || 'unavailable';
+        maintenanceBox.setAttribute('aria-busy', String(maintenanceSubmitting));
+        const statusState = maintenanceStatus?.state || 'unavailable';
+        maintenanceBox.append(el('span', maintenanceStatus?.waiting_for_turn ? '…' : ['failed', 'partial', 'blocked', 'interrupted'].includes(statusState) ? '!' : '…', 'maintenance-mark'));
+        const copy = el('div', undefined, 'maintenance-copy');
+        if (!state.chat) copy.append(el('small', '当前对话', 'muted'));
+        copy.append(el('span', maintenanceStatus?.title || maintenanceLabels[maintenanceStatus?.state] || '整理状态暂不可用'));
+        if (maintenanceStatus?.message) copy.append(el('small', maintenanceStatus.message));
+        if (maintenanceStatus?.stale_view || ['failed', 'partial', 'blocked', 'interrupted'].includes(maintenanceStatus?.state))
+            copy.append(el('small', '整理成功后会更新主线。'));
+        if (maintenanceProblem) copy.append(el('small', maintenanceProblem));
+        maintenanceBox.append(copy);
+        if (maintenanceStatus?.retryable && actions.maintenanceRetry) {
+            const retry = button(maintenanceSubmitting ? '正在提交…' : '重试整理', retryMaintenance, 'more');
+            retry.dataset.maintenanceRetry = ''; retry.disabled = maintenanceSubmitting;
+            maintenanceBox.append(retry);
+        }
+        if (maintenanceProblem || (maintenanceActive() && Date.now() >= maintenanceUntil)) {
+            const refresh = button('刷新状态', () => {
+                maintenanceUntil = Date.now() + 300000;
+                return readMaintenance();
+            }, 'more');
+            refresh.dataset.maintenanceRefresh = ''; refresh.disabled = maintenanceSubmitting;
+            maintenanceBox.append(refresh);
+        }
+    }
+    function scheduleMaintenance() {
+        clearMaintenanceTimer();
+        if (!maintenanceTarget || doc.hidden || maintenanceSubmitting || (!maintenanceActive() && maintenanceStatus)) return;
+        if (Date.now() >= maintenanceUntil) { renderMaintenance(); return; }
+        const generation = maintenanceGeneration;
+        maintenanceTimer = setTimeout(() => {
+            maintenanceTimer = undefined;
+            if (generation !== maintenanceGeneration || doc.hidden) return;
+            if (Date.now() >= maintenanceUntil) { renderMaintenance(); return; }
+            void readMaintenance();
+        }, 4000);
+        // Node's tests should not wait on a background UI poll.
+        maintenanceTimer.unref?.();
+    }
+    async function acceptMaintenance(data, generation) {
+        if (!data || data.chat_id !== maintenanceTarget || !Object.hasOwn(maintenanceLabels, data.state))
+            throw Error('maintenance_unavailable');
+        const completed = maintenanceActive() && data.state === 'done';
+        maintenanceStatus = data; maintenanceProblem = '';
+        renderMaintenance(); scheduleMaintenance();
+        if (completed && generation === maintenanceGeneration) {
+            maintenanceCompletionReloaded = true;
+            if (state.chat) await loadView(true);
+            else await bootstrap(); // The exact host Chat may now have been imported.
+        }
+    }
+    async function readMaintenance() {
+        if (!maintenanceTarget || maintenanceSubmitting || doc.hidden) return;
+        clearMaintenanceTimer();
+        const generation = maintenanceGeneration, request = ++maintenanceRead, chat = maintenanceTarget;
+        try {
+            const data = await call({view: 'maintenance', chat_id: chat});
+            if (generation !== maintenanceGeneration || request !== maintenanceRead) return;
+            await acceptMaintenance(data, generation);
+        } catch {
+            if (generation !== maintenanceGeneration || request !== maintenanceRead) return;
+            maintenanceProblem = '暂时无法读取整理状态。可以刷新状态重试。';
+            renderMaintenance();
+        }
+    }
+    async function retryMaintenance() {
+        if (!maintenanceTarget || maintenanceSubmitting || !actions.maintenanceRetry) return;
+        clearMaintenanceTimer(); maintenanceRead++;
+        const generation = maintenanceGeneration, chat = maintenanceTarget;
+        maintenanceSubmitting = true; maintenanceProblem = ''; renderMaintenance();
+        try {
+            const result = await actions.maintenanceRetry(chat);
+            if (generation !== maintenanceGeneration) return;
+            maintenanceSubmitting = false; maintenanceUntil = Date.now() + 300000;
+            await acceptMaintenance(result?.maintenance, generation);
+        } catch {
+            if (generation !== maintenanceGeneration) return;
+            maintenanceSubmitting = false;
+            maintenanceProblem = '未能提交重试，请稍后再试。'; renderMaintenance();
+        }
+    }
+    async function startMaintenance(chat) {
+        resetMaintenance(); maintenanceTarget = chat;
+        maintenanceUntil = Date.now() + 300000;
+        await readMaintenance();
+    }
+    doc.addEventListener('visibilitychange', () => {
+        clearMaintenanceTimer(); maintenanceRead++;
+        if (!doc.hidden) scheduleMaintenance();
+    });
     function renderSettingsStatus(data) {
         const source = el('select'); source.dataset.modelBackend = '';
         for (const [value, label] of [['codex', '使用 Codex 当前配置'], ['responses', '自定义模型 API']]) {
@@ -77,25 +205,58 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         b.append(meta);
         return b;
     }
-    function renderGroup(title, items, cls = '') {
-        if (!items?.length) return;
+    function icon(name) {
+        const icons = {
+            goal: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1.4"/></svg>',
+            questions: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 8 0 3 3v10a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/><path d="M5 8V5a1 1 0 0 1 1-1h8M10 10h6M10 14h6M10 18h4"/></svg>',
+            next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19V5l14 7-14 7Z"/><path d="M19 12h-5"/></svg>'
+        };
+        const span = el('span', undefined, 'section-icon');
+        span.innerHTML = icons[name] || icons.goal;
+        return span;
+    }
+    function renderGroup(title, items, cls = '', kind = 'goal') {
+        const list = Array.isArray(items) ? items : [];
         const section = el('section', undefined, 'focus ' + cls);
-        section.append(el('p', title, 'eyebrow'));
-        for (const item of items.slice(0, 3)) section.append(nodeButton(item, 'focus-node'));
-        if (items.length > 3) {
+        section.dataset.group = kind;
+        const heading = el('div', undefined, 'group-heading');
+        const label = el('div', undefined, 'group-label');
+        label.append(icon(kind), el('h2', title));
+        heading.append(label);
+        if (kind === 'goal') heading.append(el('span', 'Focus', 'group-meta'));
+        if (kind === 'questions') heading.append(el('span', `${list.length} 项`, 'group-meta'));
+        if (kind === 'next') heading.append(el('span', 'Next', 'group-meta'));
+        section.append(heading);
+        if (!list.length) {
+            const emptyText = kind === 'goal' ? '当前阶段暂无未完成目标'
+                : kind === 'questions' ? '暂无待解决事项' : '暂无下一步';
+            section.append(el('p', emptyText, 'focus-empty'));
+            return section;
+        }
+        for (const item of list.slice(0, 3)) section.append(nodeButton(item, 'focus-node'));
+        if (kind === 'goal') {
+            const source = button('查看目标来源 ↗', () => showNode(list[0].object_id), 'source-link');
+            source.dataset.source = '';
+            section.append(source);
+        }
+        if (list.length > 3) {
             const more = el('details', undefined, 'priority-more');
-            more.append(el('summary', `其余 ${items.length - 3} 项`));
-            for (const item of items.slice(3)) more.append(nodeButton(item, 'focus-node'));
+            more.append(el('summary', `其余 ${list.length - 3} 项`));
+            for (const item of list.slice(3)) more.append(nodeButton(item, 'focus-node'));
             section.append(more);
         }
-        content.append(section);
+        return section;
     }
     function renderMainline(data) {
         content.replaceChildren();
-        renderGroup('当前目标', data.goals, 'goals');
-        const heading = el('div', undefined, 'section-head');
-        heading.append(el('h2', '对话主线'), el('span', '点击阶段，按需回溯', 'muted'));
-        content.append(heading);
+        const mainlineColumn = el('section', undefined, 'mainline-column');
+        const heading = el('div', undefined, 'section-head mainline-head');
+        const title = el('div', undefined, 'mainline-title');
+        title.append(el('span', 'CONVERSATION SPINE', 'eyebrow'), el('h2', '对话主线'));
+        const phaseCount = data.phases?.length || 0;
+        const branchCount = data.branches?.length || 0;
+        heading.append(title, el('span', `共 ${phaseCount} 个阶段 · ${branchCount} 条支线`, 'muted'));
+        mainlineColumn.append(heading);
         const line = el('div', undefined, 'mainline');
         for (const phase of data.phases) {
             const row = el('div', undefined, 'stage-row');
@@ -105,30 +266,44 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             b.setAttribute('aria-expanded', 'false');
             if (phase.id === data.focus?.phase_id) {
                 b.classList.add('current');
-                b.append(el('small', '当前', 'focus-tag'));
+                b.append(el('small', '当前阶段', 'focus-tag'));
             }
             row.append(b);
             const branches = data.branches.filter(x => x.phase_id === phase.id);
             if (branches.length) {
                 const disclosure = el('details', undefined, 'branch-list');
-                disclosure.append(el('summary', `${branches.length} 条支线`));
+                if (phase.id === data.focus?.phase_id) disclosure.open = true;
+                disclosure.append(el('summary', `${disclosure.open ? '收起' : '展开'} ${branches.length} 条支线`));
                 for (const branch of branches) {
-                    const bb = button(branch.title, () => openRecords(phase.id, branch.id), 'branch');
+                    const resolved = ['resolved', 'done', 'completed'].includes(branch.status || branch.state);
+                    const bb = button('', () => openRecords(phase.id, branch.id), 'branch' + (resolved ? ' resolved' : ''));
                     bb.dataset.branch = branch.id;
+                    if (resolved) bb.append(el('span', '✓', 'branch-check'));
+                    bb.append(el('span', branch.title));
                     disclosure.append(bb);
                 }
+                disclosure.ontoggle = () => { disclosure.querySelector('summary').textContent = `${disclosure.open ? '收起' : '展开'} ${branches.length} 条支线`; };
                 row.append(disclosure);
             }
             line.append(row);
         }
         if (!data.phases.length) line.append(el('p', '主线正在整理中', 'muted'));
-        content.append(line);
-        renderGroup('待解决', data.open_questions);
-        renderGroup('下一步', data.next_steps, 'next-steps');
+        mainlineColumn.append(line);
+        content.append(mainlineColumn);
+        const sideColumn = el('aside', undefined, 'side-column');
+        const goals = renderGroup('当前目标', data.goals, 'goals focus-primary', 'goal');
+        if (goals) sideColumn.append(goals);
+        const questions = renderGroup('待解决', data.open_questions, 'open-questions', 'questions');
+        if (questions) sideColumn.append(questions);
+        const nextSteps = renderGroup('下一步', data.next_steps, 'next-steps', 'next');
+        if (nextSteps) sideColumn.append(nextSteps);
+        content.append(sideColumn);
         const records = el('section', undefined, 'records');
         records.dataset.records = '';
         records.hidden = true;
-        content.append(records);
+        // Keep stage details with the conversation spine. They are an on-demand
+        // drill-down, not a third full-width section of the dashboard.
+        mainlineColumn.append(records);
     }
     async function openRecords(phase, branch = null) {
         state.phase = phase; state.branch = branch; state.offset = 0;
@@ -252,7 +427,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
     }
     state.drawerEpoch = 0;
     root.querySelector('[data-close]').onclick = () => { drawer.hidden = true; state.drawerEpoch++; };
-    async function loadView() {
+    async function loadView(preserve = false) {
         if (!state.chat) return;
         const token = ++state.epoch;
         clearNotice();
@@ -264,13 +439,14 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             state.version = data.version;
             state.data = data;
             if (!data.version) {
-                empty('这段对话还没有发布主线', '原始对话可通过 Seywo 搜索读取；主线将在整理后显示。');
+                renderEmptyMainline();
                 return;
             }
             renderMainline(data);
         } catch {
             if (token === state.epoch) {
-                empty('主线暂时不可用'); error(loadView);
+                if (!preserve || !state.data?.version) empty('主线暂时不可用');
+                error(() => loadView(preserve));
             }
         } finally {
             if (token === state.epoch) content.removeAttribute('aria-busy');
@@ -292,6 +468,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             select.append(option);
         }
         select.value = state.chat;
+        chatSwitcher.open = !state.chat;
         root.querySelector('[data-more-chats]').hidden = !state.chatPage?.has_more;
     }
     async function loadMoreChats() {
@@ -319,19 +496,34 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         }
     }
     async function selectChat(chat) {
+        resetMaintenance();
         state.chat = chat;
         state.version = null; state.phase = null; state.branch = null; state.offset = 0;
         state.recordsOpen = false; state.data = null;
+        chatSwitcher.open = !chat;
         state.drawerEpoch++; drawer.hidden = true;
         state.chatEpoch++; state.epoch++;
         content.removeAttribute('aria-busy'); clearNotice(); populateChats();
-        if (!chat) { empty('选择一个 Chat', '选择对话，查看主线与当前重点。'); return; }
+        if (!chat) {
+            empty('选择一个 Chat', '选择对话，查看主线与当前重点。');
+            await startMaintenance(state.currentChat || ''); return;
+        }
         empty('正在读取主线…');
-        await loadView();
+        const chatToken = state.chatEpoch;
+        await Promise.all([startMaintenance(chat), loadView()]);
+        if (chatToken !== state.chatEpoch || maintenanceStatus?.state !== 'done' || maintenanceCompletionReloaded) return;
+        const publishedVersion = maintenanceStatus.published_version;
+        // The first status read can observe completion after the parallel view
+        // read captured an older version. Legacy receipts need one bounded reload.
+        if (!Number.isInteger(publishedVersion) || (state.data?.version ?? 0) < publishedVersion) {
+            maintenanceCompletionReloaded = true;
+            await loadView(true);
+        }
     }
     root.querySelector('[data-chat]').onchange = e => selectChat(e.target.value);
     root.querySelector('[data-more-chats]').onclick = loadMoreChats;
     async function bootstrap() {
+        resetMaintenance();
         root.querySelector('[data-more-chats]').disabled = false;
         const token = ++state.bootstrapEpoch;
         state.epoch++;
@@ -345,7 +537,11 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                 return;
             if (data.error)
                 throw Error('chats_unavailable');
-            if (!state.chat && data.default_chat_id) state.chat = data.default_chat_id;
+            state.currentChat = data.current_chat_id || state.currentChat || '';
+            if (!state.chat) {
+                const currentIsImported = state.currentChat && data.results.some(chat => chat.chat_id === state.currentChat);
+                state.chat = data.default_chat_id || (currentIsImported ? state.currentChat : '');
+            }
             state.project = data.project_root;
             state.chats = data.results;
             state.chatPage = data.retrieval;
@@ -353,6 +549,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             root.querySelector('[data-project]').textContent = state.project.split('/').filter(Boolean).at(-1) || '项目记忆';
             if (!state.chat && data.current_chat_id) {
                 empty('当前对话尚未收录', '整理当前对话后会在这里显示。也可以从上方查看项目中的其他对话。');
+                await startMaintenance(data.current_chat_id);
                 return;
             }
             await selectChat(state.chat);
@@ -368,6 +565,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         const retry=button('重试',()=>reopen());retry.dataset.retry='';content.append(retry);
     }
     async function reopen(initialize=false) {
+        resetMaintenance();
         const token=++state.bootstrapEpoch;
         clearNotice();empty('正在初始化项目记忆');
         try {
@@ -393,7 +591,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         form.append(label,input,submit);fallback.append(form);
         form.onsubmit=async event=>{
             event.preventDefault();if(!input.value.trim())return;
-            submit.disabled=true;clearNotice();
+            resetMaintenance();submit.disabled=true;clearNotice();
             const token=++state.bootstrapEpoch;
             try{
                 const result=await actions.selectProject(input.value.trim());
@@ -404,6 +602,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         };
     }
     async function open(info={}){
+        resetMaintenance();state.currentChat=info.current_chat_id||'';
         state.epoch++;state.chatEpoch++;state.bootstrapEpoch++;state.drawerEpoch++;
         state.chat=info.chat_id||'';state.version=null;drawer.hidden=true;
         content.removeAttribute('aria-busy');clearNotice();

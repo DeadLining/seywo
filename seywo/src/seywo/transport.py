@@ -120,9 +120,9 @@ class Transport:
                                    max_output_tokens=max_output_tokens)
 
     def complete_compact(self, *, model, instructions, payload, max_output_tokens=1200):
-        from .compact_model import SCHEMA
+        from .compact_model import schema_for
         return self._complete_json(model=model, instructions=instructions, payload=payload,
-                                   max_output_tokens=max_output_tokens, schema=SCHEMA)
+                                   max_output_tokens=max_output_tokens, schema=schema_for(payload))
 
     @staticmethod
     def _read(stream):

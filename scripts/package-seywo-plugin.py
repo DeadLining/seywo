@@ -20,7 +20,7 @@ def build(output):
     marketplace = package / '.agents/plugins'
     marketplace.mkdir(parents=True)
     shutil.copy2(REPO / '.agents/plugins/marketplace.json', marketplace / 'marketplace.json')
-    roots = ['.codex-plugin', 'bin', 'src', 'skills', 'docs']
+    roots = ['.codex-plugin', 'bin', 'src/seywo', 'skills', 'docs']
     files = ['README.md', 'pyproject.toml', 'mcp.json', 'hooks.json',
              'ui/panel.html', 'ui/THIRD_PARTY_NOTICES.txt']
     sources = [plugin / name for name in files]
@@ -49,7 +49,7 @@ codex plugin marketplace add /absolute/path/to/seywo-plugin-VERSION
 codex plugin add seywo@seywo-local
 ```
 
-Enable Seywo in the current project and review/trust its four Hooks in Codex.
+Enable Seywo in the current project and review/trust its five Hooks in Codex.
 Default extraction reuses the installed Codex login and global model configuration.
 No standalone Seywo/SessionGraph application or extra API key is required.
 macOS/Linux needs Python 3.11+ or uv. First SDK provisioning requires network access.

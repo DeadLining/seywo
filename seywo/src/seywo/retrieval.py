@@ -624,8 +624,20 @@ class Retrieval:
             chats,
         ).fetchall()
         memories = work_memory.list_rows(self.db, chats) if chats else []
+        from .maintenance_status import read as maintenance_read
+        rows = [{"chat_id": chat} for chat in chats]
+        # Only hydrate the requested page. Status reads never schedule work.
+        for row in rows[offset:offset + limit + 1]:
+            try:
+                maintenance = maintenance_read(self.store.config, row['chat_id'], db=self.db)
+            except (OSError, ValueError):
+                maintenance = {'state': 'interrupted', 'retryable': False, 'stale_view': True,
+                               'message': '整理状态暂不可用。'}
+            row['maintenance'] = {key: maintenance[key] for key in ('state', 'retryable', 'stale_view')}
+            if maintenance.get('retryable'):
+                row['maintenance']['message'] = maintenance['message']
         return page(
-            [{"chat_id": chat} for chat in chats],
+            rows,
             offset=offset,
             limit=limit,
             max_bytes=max_bytes,

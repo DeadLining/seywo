@@ -20,7 +20,7 @@ import time
 REPO = Path(__file__).resolve().parents[1]
 
 
-def verify():
+def verify(host="codex"):
     requests = []
 
     class Provider(BaseHTTPRequestHandler):
@@ -80,7 +80,7 @@ stream_max_retries = 0
 ''')
             env = {**os.environ, 'CODEX_HOME': str(home)}
             for args in [('plugin', 'marketplace', 'add', str(REPO)), ('plugin', 'add', 'seywo@seywo-local')]:
-                subprocess.run(['codex', *args], env=env, cwd=project, check=True, capture_output=True, timeout=30)
+                subprocess.run([host, *args], env=env, cwd=project, check=True, capture_output=True, timeout=30)
             version = json.loads((REPO / 'seywo/.codex-plugin/plugin.json').read_text())['version']
             installed = home / 'plugins/cache/seywo-local/seywo' / version
             setup = "from pathlib import Path; from seywo.config import initialize,enable_plugin_hook; initialize(Path('.')); enable_plugin_hook(Path('.seywo/config.json'))"
@@ -88,7 +88,7 @@ stream_max_retries = 0
                            cwd=project, check=True, capture_output=True, timeout=20)
             notices, buffer, identity = [], b'', 0
             with (base / 'host.stderr').open('wb') as errors:
-                process = subprocess.Popen(['codex', 'app-server', '--stdio', '--enable', 'hooks'],
+                process = subprocess.Popen([host, 'app-server', '--stdio', '--enable', 'hooks'],
                     cwd=project, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
 
                 def read(timeout):
@@ -131,7 +131,7 @@ stream_max_retries = 0
                     process.stdin.write(b'{"method":"initialized"}\n')
                     process.stdin.flush()
                     hooks = request('hooks/list', {'cwds': [str(project)]})['data'][0]['hooks']
-                    assert len(hooks) == 4
+                    assert len(hooks) == 5
                     # This isolated verifier reviews its own installed source.
                     for hook in hooks:
                         request('config/value/write', {'keyPath': 'hooks.state.' + json.dumps(hook['key']) + '.trusted_hash',
@@ -150,9 +150,15 @@ stream_max_retries = 0
                     found = []
                     while time.monotonic() < deadline:
                         db_path = project / '.seywo/index.sqlite3'
-                        with sqlite3.connect(db_path) as db:
-                            db.row_factory = sqlite3.Row
-                            found = [dict(row) for row in db.execute('SELECT state,turn_count,segment_count,model_calls,error_code FROM compact_batches')]
+                        # Hook completion schedules an asynchronous worker. Wait
+                        # for its publication schema instead of creating/reading
+                        # an empty database before the worker has initialized it.
+                        if db_path.is_file():
+                            with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+                                db.row_factory = sqlite3.Row
+                                ready = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='compact_batches'").fetchone()
+                                if ready:
+                                    found = [dict(row) for row in db.execute('SELECT state,turn_count,segment_count,model_calls,error_code FROM compact_batches')]
                         if found and any(row['state'] == 'done' for row in found):
                             break
                         time.sleep(0.2)
@@ -160,10 +166,34 @@ stream_max_retries = 0
                     runs = [row['params']['run'] for row in notices if row.get('method') == 'hook/completed']
                     assert {'preCompact', 'postCompact'} <= {row['eventName'] for row in runs if row['status'] == 'completed'}, runs
                     assert sum(row['model_calls'] for row in found) == 1, found
-                    return {'status': 'passed', 'verified_on': date.today().isoformat(), 'host': subprocess.check_output(['codex', '--version'], text=True).strip(),
+                    # Seed one safe failure receipt in this disposable project,
+                    # then exercise the real native UserPromptSubmit parser.
+                    receipt = project / '.seywo/maintenance' / (thread + '.json')
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if receipt.exists() and json.loads(receipt.read_text()).get('state') == 'done':
+                            break
+                        time.sleep(0.1)
+                    seed = ("from pathlib import Path; from seywo.config import load_config; "
+                            "from seywo.maintenance_status import record; "
+                            "record(load_config(Path('.seywo/config.json')), " + repr(thread) +
+                            ", 'failed', error_code='source_missing')")
+                    subprocess.run(['python3', '-c', seed], env={**env, 'PYTHONPATH': str(installed / 'src')},
+                                   cwd=project, check=True, capture_output=True, timeout=20)
+                    notices.clear()
+                    request('turn/start', {'threadId': thread, 'input': [{'type': 'text',
+                        'text': '检查已有整理状态。', 'text_elements': []}]})
+                    until('turn/completed')
+                    failure_hooks = [row['params']['run'] for row in notices if row.get('method') == 'hook/completed'
+                                     and row['params']['run']['eventName'] in {'sessionStart', 'userPromptSubmit', 'stop'}]
+                    assert failure_hooks and all(row['status'] == 'completed' for row in failure_hooks), failure_hooks
+                    warnings = [entry for hook_run in failure_hooks for entry in hook_run.get('entries', [])
+                                if entry.get('kind') == 'warning']
+                    assert len(warnings) == 1 and '原始对话' in warnings[0]['text'], failure_hooks
+                    return {'status': 'passed', 'verified_on': date.today().isoformat(), 'host': subprocess.check_output([host, '--version'], text=True).strip(),
                             'provider': 'deterministic loopback fixture; no semantic quality claim',
                             'compact_hooks': [{'event': row['eventName'], 'status': row['status']} for row in runs],
-                            'receipts': found, 'provider_requests': requests, 'user_config_modified': False}
+                            'receipts': found, 'failure_notice_hooks': failure_hooks, 'provider_requests': requests, 'user_config_modified': False}
                 except Exception:
                     print(json.dumps({'requests': requests, 'notices': notices[-12:]}, ensure_ascii=False)[-12000:])
                     raise
@@ -178,8 +208,9 @@ stream_max_retries = 0
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--host', default='codex', help='Codex executable; select the desktop backend for desktop Hook acceptance')
     args = parser.parse_args()
-    result = verify()
+    result = verify(args.host)
     text = json.dumps(result, ensure_ascii=False, indent=2) + '\n'
     if args.report:
         args.report.write_text(text)

@@ -1,0 +1,50 @@
+{
+  "date": "2026-11-17",
+  "python": {
+    "passed": 817,
+    "warnings": 1,
+    "log": "/tmp/seywo-maintenance-python-final-20261117.log"
+  },
+  "ui_dom": {
+    "passed": 46,
+    "log": "/tmp/seywo-maintenance-ui-final-20261117.log"
+  },
+  "native_desktop_hook": {
+    "passed": true,
+    "host": "codex-cli 0.144.0-alpha.4",
+    "failure_warnings": 1,
+    "provider": "deterministic loopback fixture; not semantic acceptance",
+    "report": "/tmp/seywo-maintenance-desktop-lifecycle-20261117.json"
+  },
+  "installed": {
+    "passed": true,
+    "tools": 17,
+    "hooks": [
+      {
+        "event": "preCompact",
+        "trust": "trusted"
+      },
+      {
+        "event": "postCompact",
+        "trust": "trusted"
+      },
+      {
+        "event": "sessionStart",
+        "trust": "trusted"
+      },
+      {
+        "event": "userPromptSubmit",
+        "trust": "trusted"
+      }
+    ],
+    "maintenance_read": true,
+    "model_calls": 0,
+    "desktop_panel_verified": false
+  },
+  "deployment_receipt": "/Users/shengzhoukong/.local/share/seywo/deployments/20261117-142248-maintenance/deployment.json",
+  "codex_restarted": false,
+  "real_chat_compact_after_restart_verified": false,
+  "screenshot": "docs/evidence/seywo-maintenance-failed-20261117.jpg",
+  "screenshot_data": "synthetic fixture with actual panel.js",
+  "package_sha256": "0827f3dcf46caf0e5fbad30170d806ab30bcc29b6809c65570029d262a21e933"
+}

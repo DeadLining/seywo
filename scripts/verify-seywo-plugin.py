@@ -106,7 +106,7 @@ def verify(repository=REPOSITORY):
                 discovered = request('hooks/list', {'cwds': [str(workspace)]})
                 reviewed = [hook for entry in discovered['data'] for hook in entry['hooks']
                             if hook.get('pluginId') == 'seywo@seywo-local']
-                assert len(reviewed) == 4
+                assert len(reviewed) == 5
                 for hook in reviewed:
                     request('config/value/write', {
                         'keyPath': 'hooks.state.' + json.dumps(hook['key']) + '.trusted_hash',
@@ -129,12 +129,12 @@ def verify(repository=REPOSITORY):
                 inventory = request('mcpServerStatus/list', {'threadId': thread})
                 running = next(item for item in inventory['data'] if item['name'] == 'seywo')
                 assert running['runtimeStatus'] == 'connected', running['runtimeStatus']
-                assert len(running['tools']) == 16
+                assert len(running['tools']) == 17
                 hook_inventory = request('hooks/list', {'cwds': [str(workspace)]})
                 plugin_hooks = [hook for entry in hook_inventory['data'] for hook in entry['hooks']
                                 if hook.get('pluginId') == 'seywo@seywo-local']
-                assert len(plugin_hooks) == 4, hook_inventory
-                assert {hook['eventName'] for hook in plugin_hooks} == {'preCompact', 'postCompact', 'sessionStart', 'userPromptSubmit'}
+                assert len(plugin_hooks) == 5, hook_inventory
+                assert {hook['eventName'] for hook in plugin_hooks} == {'preCompact', 'postCompact', 'sessionStart', 'userPromptSubmit', 'stop'}
                 assert all(hook['trustStatus'] == 'trusted' for hook in plugin_hooks), plugin_hooks
                 assert all(not entry['errors'] for entry in hook_inventory['data']), hook_inventory
                 assert running['tools']['seywo_model_status']['_meta']['ui']['visibility'] == ['app']
@@ -215,8 +215,9 @@ def verify(repository=REPOSITORY):
                 open_meta = running['tools']['seywo_open']['_meta']
                 assert open_meta['openai/ui']['entrypoints'] == [{'type': 'thread'}]
                 assert running['tools']['seywo_open']['title'] == 'Seywo'
-                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v1.html'
+                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v3.html'
                 assert running['tools']['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
+                assert running['tools']['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
                 opened = raw_tool('seywo_open', chat_id='plugin-acceptance')
                 assert opened['structuredContent']['chat_id'] == 'plugin-acceptance'
                 assert len(json.dumps(opened).encode()) < 1000

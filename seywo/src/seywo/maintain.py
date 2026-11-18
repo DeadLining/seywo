@@ -18,7 +18,7 @@ import sys
 import time
 from uuid import uuid4
 
-from . import inbox
+from . import inbox, maintenance_status
 from .admission import NonHumanSource
 from .config import load_config
 from .codex_transport import CodexTransport
@@ -71,16 +71,55 @@ def _after(cursor):
 
 
 def run_chat(config, chat_id):
-    from .locking import lifecycle
+    from .locking import lifecycle, file_lock
     with lifecycle(config):
         handle = _lock(config, chat_id)
         if handle is None:
             return {"state": "busy", "calls": 0, "chat_id": chat_id}
+        totals, windows = {}, []
+        maintenance_status.safe_record(config, chat_id, "running")
         try:
-            return _run_chat(config, chat_id)
+            while True:
+                report = _run_chat(config, chat_id)
+                for key in ('calls', 'input_chars', 'output_chars', 'input_tokens', 'output_tokens', 'compact_segments'):
+                    if key in report:
+                        totals[key] = totals.get(key, 0) + report[key]
+                windows.extend(report.get('windows', []))
+                # The Hook publishes under the same inbox lock. Checking for
+                # work and releasing ownership must be one serialized step:
+                # arrivals before it are drained here; arrivals after it can
+                # acquire the chat lock in their own spawned worker.
+                with file_lock(inbox.root(config) / '.lock'):
+                    if report.get('state') in {'done', 'idle'} and inbox.pending(config, chat_id):
+                        continue
+                    completed = {**report, **totals, 'windows': windows}
+                    receipt_state = report.get('state')
+                    failed = inbox.failed(config, chat_id)
+                    if receipt_state in {'done', 'idle'} and failed:
+                        receipt_state = 'failed'
+                        completed.update(state='failed', error_code=failed[-1].get('error_code') or 'operation_failed')
+                    if receipt_state in {'done', 'idle'} and report.get('deferred_turn'):
+                        receipt_state = 'partial'
+                        completed['error_code'] = 'awaiting_turn_complete'
+                    if receipt_state in {'done', 'idle'}:
+                        receipt_state = 'done'
+                    elif receipt_state == 'excluded':
+                        receipt_state = 'idle'
+                    elif receipt_state not in {'partial', 'failed', 'blocked'}:
+                        receipt_state = 'partial'
+                    maintenance_status.safe_record(config, chat_id, receipt_state,
+                                                   error_code=completed.get('error_code'), report=completed)
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+                    handle.close()
+                    handle = None
+                    return completed
+        except Exception:
+            maintenance_status.safe_record(config, chat_id, 'failed', error_code='maintainer_exception')
+            raise
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
-            handle.close()
+            if handle is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+                handle.close()
 
 
 def _run_chat(config, chat_id):
@@ -856,12 +895,16 @@ def main(argv=None):
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--chat", required=True)
     args = parser.parse_args(argv)
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except (OSError, ValueError):
+        maintenance_status.safe_record(args.config, args.chat, 'blocked', error_code='config_invalid')
+        return 1
     if (config.get("hook") or {}).get("enabled") is not True:
         return 0
     try:
         report = run_chat(config, args.chat)
-    except Exception:  # a compact must never break the session
+    except Exception:  # run_chat records failure while it still owns the chat lock
         report = {"state": "failed", "error_code": "maintainer_exception"}
     print(json.dumps(report, ensure_ascii=False))
     return 0 if report.get("state") in {"done", "idle", "partial", "busy"} else 1

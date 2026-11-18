@@ -58,9 +58,11 @@ def test_tool_records_are_removed_before_turn_assembly():
     assert "must not enter model" not in json.dumps(packets, ensure_ascii=False)
 
 
-def test_acknowledgement_turn_does_not_consume_a_semantic_segment():
+def test_short_dialogue_is_preserved_for_contextual_semantic_classification():
     rows = [source(0, "user", "好的", turn="t1"), source(1, "assistant", "收到", turn="t1")]
-    assert _turn_packets(rows) == []
+    packets = _turn_packets(rows)
+    assert len(packets) == 1
+    assert packets[0]["user"] == "好的"
 
 
 def test_one_compact_can_cover_multiple_turns_and_create_one_condensed_item():
@@ -106,7 +108,7 @@ def test_update_resolves_existing_item_without_creating_duplicate():
 
 
 def test_chunking_is_bounded_and_preserves_turn_order():
-    turns = [turn(str(i), "用户" + ("x" * 1200), "助手" + ("y" * 2200),
+    turns = [turn(str(i), "用户" + ("x" * 1198), "助手" + ("y" * 2198),
                   source(i * 2, "user", "u", turn=str(i)),
                   source(i * 2 + 1, "assistant", "a", turn=str(i))) for i in range(25)]
     batches = _batch_turns(turns)

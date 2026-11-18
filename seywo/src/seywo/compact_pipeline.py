@@ -13,11 +13,15 @@ from pathlib import Path
 import time
 
 from . import compact_schema, inbox
+from .admission import NonHumanSource
 from .compact_model import (
-    MAX_INPUT_CHARS, MAX_OUTPUT_TOKENS, MAX_TURNS, POLICY, request_payload, instructions, validate,
+    MAX_OUTPUT_TOKENS, MAX_REPAIRS, POLICY, CompactValidationError,
+    request_payload, instructions, validate, repair_instructions,
 )
 from .delta_pipeline import _source
 from .compact_turns import closed_rows, commit_turns
+from .compact_input import batch_turns as _batch_turns
+from .compact_identity import canonical_item as _canonical_item
 from .hook import chat_identity
 from .model_contract import model_eligible
 from .narrative import Narrative, empty
@@ -28,7 +32,6 @@ from .understanding import Understanding
 
 PIPELINE = "seywo-compact-v1"
 UNRESOLVED_TYPES = {"question", "goal", "action", "next_step", "correction"}
-NO_WORK = re.compile(r"^(?:继续|好的?|收到|可以|行|嗯嗯?|明白|了解|已处理|已完成|谢谢|ok|okay|thanks)[。！？!,.，\s]*$", re.I)
 _COMPLETED_ASSISTANT = re.compile(r"(?:已(?:经)?(?:实现|完成|修复|验证|解决|关闭|通过|恢复|正常)|确认(?:完成|通过)|问题解决|无遗留)", re.I)
 _PENDING_ASSISTANT = re.compile(r"(?:待(?:验证|确认|处理)|尚待|仍(?:需|待)|未(?:完成|解决|验证)|需要继续|还要)", re.I)
 
@@ -41,14 +44,6 @@ def _write_state(path, state):
 
 def _source_key(source):
     return source["event_id"], source["snapshot_id"], source["start"], source["end"]
-
-
-def _clip(text, limit):
-    text = " ".join(str(text or "").split())
-    if len(text) <= limit:
-        return text
-    left = max(1, limit // 2)
-    return text[:left] + "…" + text[-(limit - left):]
 
 
 def _turn_packets(rows):
@@ -74,26 +69,10 @@ def _turn_packets(rows):
         assistant = "\n".join(source["text"] for source in eligible if source["role"] == "assistant")
         if not user and not assistant:
             continue
-        # A pure acknowledgement remains in the source store but never consumes
-        # model context or creates a semantic segment change.
-        if NO_WORK.fullmatch(user.strip()) and (not assistant or NO_WORK.fullmatch(assistant.strip())):
-            continue
+        # Human text is never declared semantically empty by a lexical rule.
+        # A short receipt may approve a decision or report work completion.
         grouped.append({"turn_id": key, "user": user, "assistant": assistant, "sources": eligible})
     return grouped
-
-
-def _batch_turns(turns):
-    batches, current, chars = [], [], 0
-    for turn in turns:
-        cost = len(turn["user"]) + len(turn["assistant"])
-        if current and (len(current) >= MAX_TURNS or chars + cost > MAX_INPUT_CHARS):
-            batches.append(current)
-            current, chars = [], 0
-        current.append(turn)
-        chars += cost
-    if current:
-        batches.append(current)
-    return batches
 
 
 def _state_and_catalog(doc, turns=()):
@@ -200,6 +179,8 @@ def _apply_change(doc, change, turns, target_id, task_id, ordinal, *, locks=()):
             source = items[source_id]
             if source.get("type") != target.get("type") or source.get("attribution") != target.get("attribution"):
                 raise ValueError("compact_merge_incompatible")
+            if "hidden" in _locked_fields(locks, "item", source_id) and not source.get("hidden"):
+                raise ValueError("compact_locked_merge_source")
             _merge_evidence(target, source)
             source["hidden"] = True
             absorbed.append(source_id)
@@ -223,75 +204,173 @@ def _ensure_phase(doc, task_id, title):
     return phase
 
 
-def _apply_segment_structure(doc, segment, added, touched, task_id):
-    # A return-to-mainline segment may intentionally contain no new item. Its
-    # semantic effect is the focus transition itself, so it must still run.
-    if not added and not touched and segment["action"] != "return":
-        return
-    action = segment["action"]
-    if not doc["phases"] and action == "new_phase":
-        # The first segment initializes the chat mainline; it cannot be a
-        # transition from a previous phase. Accept the model's conservative
-        # label without manufacturing an empty predecessor phase.
-        action = "continue"
-    current = _ensure_phase(doc, task_id, segment["title"])
-    focus = doc["overview"]["focus"]
-    transition = None
-    if action == "new_phase":
-        anchor = next((node for node in added if node["attribution"] == "user_statement" and node["type"] in OBJECTIVE_TYPES), None)
+def _segment_anchor(doc, segment, related, identities):
+    """Bind focus to an item identity, never to a title or a new-item count."""
+    index = segment.get("anchor_index")
+    if index is not None:
+        identity = identities.get(index) if type(index) is int else None
+        anchor = next((i for i in doc["items"] if i["id"] == identity and not i.get("hidden")), None)
         if anchor is None:
+            raise ValueError("compact_unknown_anchor")
+        return anchor
+    if segment["action"] not in {"branch", "new_phase"}:
+        return None
+    # Old saved outputs have no anchor field. Accept only an unambiguous
+    # identity-based binding, rather than guessing from semantic title matches.
+    if segment["action"] == "new_phase":
+        candidates = [i for i in related if i["type"] in OBJECTIVE_TYPES
+                      and i["attribution"] == "user_statement"]
+    else:
+        candidates = [i for i in related if i["type"] != "goal"] or related
+        questions = [i for i in candidates if i["type"] == "question"]
+        if len(questions) == 1:
+            candidates = questions
+    if len(candidates) != 1:
+        raise ValueError("compact_structure_anchor_required")
+    return candidates[0]
+
+
+def _branch_state(doc, branch, *, active=None, locks=()):
+    """Derive completion from canonical work state and activity from focus."""
+    items = {i["id"]: i for i in doc["items"]}
+    evidence = [items.get(_canonical_item(doc, identity)) for identity in branch["evidence_item_ids"]]
+    evidence = [i for i in evidence if i]
+    if not evidence or (branch["state"] == "abandoned" and active is None):
+        return
+    locked = _locked_fields(locks, "branch", branch["id"])
+    if all(i.get("status") == "resolved" for i in evidence):
+        if "state" not in locked:
+            branch["state"] = "resolved"
+        if "outcome_item_ids" not in locked:
+            branch["outcome_item_ids"] = list(dict.fromkeys(i["id"] for i in evidence))
+    else:
+        if active is None:
+            focus = doc["overview"]["focus"]
+            active = focus["phase_id"] == branch["phase_id"] and focus.get("branch_id") == branch["id"]
+        if "state" not in locked:
+            branch["state"] = "active" if active else "waiting"
+        # Reopening work invalidates the current completion, while immutable
+        # older snapshots retain its past outcome. A human-pinned resolved
+        # state must retain its required outcome for layout integrity.
+        if "outcome_item_ids" not in locked and branch["state"] != "resolved":
+            branch["outcome_item_ids"] = []
+
+
+def _apply_segment_structure(doc, segment, related, new_ids, task_id, *, anchor=None, locks=()):
+    """Apply every structural action, even when its item delta is empty."""
+    action = "return" if segment["action"] == "mainline" else segment["action"]
+    if not doc["phases"] and not related and anchor is None:
+        if action in {"branch", "new_phase"}:
+            raise ValueError("compact_structure_anchor_required")
+        return
+    initial = not doc["phases"]
+    main_goal = next((i for i in related if i["type"] == "goal" and i is not anchor), None)
+    current = _ensure_phase(doc, task_id, main_goal["title"] if initial and main_goal else segment["title"])
+    focus = deepcopy(doc["overview"]["focus"])
+    transition = None
+    if initial and action == "new_phase":
+        action = "continue"
+    if action == "new_phase":
+        if (anchor is None or anchor["id"] not in new_ids
+                or anchor["id"] not in {item["id"] for item in related}
+                or anchor["attribution"] != "user_statement" or anchor["type"] not in OBJECTIVE_TYPES):
             raise ValueError("compact_new_phase_requires_user_objective")
         old_phase = current
-        old_branch_id = focus.get("branch_id")
-        phase = {"id": _phase_id(task_id, len(doc["phases"])), "title": segment["title"], "goal_item_ids": [anchor["id"]]}
-        doc["phases"].append(phase)
-        focus = {"phase_id": phase["id"], "branch_id": None}
-        transition = {"kind": "goal_change", "from_phase_id": old_phase["id"], "from_branch_id": old_branch_id,
-                      "to_phase_id": phase["id"], "to_branch_id": None, "result_item_ids": [], "unresolved": [],
-                      "reason": "compact entered a new human objective", "evidence_item_ids": [anchor["id"]]}
-        current = phase
+        current = {"id": _phase_id(task_id, len(doc["phases"])), "title": segment["title"],
+                   "goal_item_ids": [anchor["id"]]}
+        doc["phases"].append(current)
+        transition = {"kind": "goal_change", "from_phase_id": old_phase["id"],
+                      "from_branch_id": focus.get("branch_id"), "to_phase_id": current["id"],
+                      "to_branch_id": None, "reason": "compact entered a new human objective",
+                      "evidence_item_ids": [anchor["id"]]}
+        focus = {"phase_id": current["id"], "branch_id": None}
     elif action == "branch":
-        branch = {"id": _branch_id(task_id, len(doc["branches"])), "phase_id": current["id"],
-                  "title": segment["title"], "goal": (added or touched)[-1]["title"],
-                  "resolve_when": "问题得到明确结果", "state": "active", "outcome_item_ids": [],
-                  "evidence_item_ids": [item["id"] for item in added or touched]}
-        doc["branches"].append(branch)
+        if anchor is None:
+            raise ValueError("compact_structure_anchor_required")
+        matches = [b for b in doc["branches"] if b["phase_id"] == current["id"]
+                   and anchor["id"] in {_canonical_item(doc, i) for i in b["evidence_item_ids"]}]
+        if len(matches) > 1:
+            raise ValueError("compact_ambiguous_branch_anchor")
+        branch = matches[0] if matches else None
+        if branch is None:
+            branch = {"id": _branch_id(task_id, len(doc["branches"])), "phase_id": current["id"],
+                      "title": segment["title"], "goal": anchor["title"],
+                      "resolve_when": "问题得到明确结果", "state": "active", "outcome_item_ids": [],
+                      "evidence_item_ids": [anchor["id"]]}
+            doc["branches"].append(branch)
+        # A resolved final item can still have an earlier branch-enter event;
+        # historical movement and the item's net completion are independent.
+        old_branch = next((b for b in doc["branches"] if b["id"] == focus.get("branch_id")), None)
+        if old_branch and old_branch is not branch:
+            _branch_state(doc, old_branch, active=False, locks=locks)
+        _branch_state(doc, branch, active=True, locks=locks)
+        if focus.get("branch_id") != branch["id"]:
+            transition = {"kind": "enter", "from_phase_id": current["id"],
+                          "from_branch_id": focus.get("branch_id"), "to_phase_id": current["id"],
+                          "to_branch_id": branch["id"], "reason": "compact entered an identified side line",
+                          "evidence_item_ids": [anchor["id"]]}
         focus = {"phase_id": current["id"], "branch_id": branch["id"]}
-        transition = {"kind": "enter", "from_phase_id": current["id"], "from_branch_id": None,
-                      "to_phase_id": current["id"], "to_branch_id": branch["id"], "result_item_ids": [],
-                      "unresolved": [], "reason": "compact opened a bounded side line",
-                      "evidence_item_ids": branch["evidence_item_ids"]}
     elif action == "return":
-        branch_id = focus.get("branch_id")
-        if branch_id:
-            branch = next((row for row in doc["branches"] if row["id"] == branch_id), None)
-            if branch is None:
-                raise ValueError("compact_return_branch_not_found")
-            # Returning changes focus; it closes the side line only when its
-            # recorded evidence is already resolved. The branch's own evidence
-            # is the durable proof for a return segment that has no new item.
-            evidence_ids = [item["id"] for item in added or touched] or list(branch.get("evidence_item_ids", []))
-            item_by_id = {item["id"]: item for item in doc["items"]}
-            branch_evidence = [item_by_id[identity] for identity in branch.get("evidence_item_ids", [])
-                               if identity in item_by_id]
-            if branch_evidence and all(item.get("status") == "resolved" for item in branch_evidence):
-                branch["state"] = "resolved"
-                branch["outcome_item_ids"] = list(dict.fromkeys(branch.get("evidence_item_ids", [])))
-            transition = {"kind": "return", "from_phase_id": current["id"], "from_branch_id": branch_id,
-                          "to_phase_id": current["id"], "to_branch_id": None, "result_item_ids": [],
-                          "unresolved": [], "reason": "compact returned to the mainline",
-                          "evidence_item_ids": evidence_ids}
+        branch = next((b for b in doc["branches"] if b["id"] == focus.get("branch_id")), None)
+        if branch:
+            _branch_state(doc, branch, active=False, locks=locks)
+            transition = {"kind": "return", "from_phase_id": current["id"],
+                          "from_branch_id": branch["id"], "to_phase_id": current["id"],
+                          "to_branch_id": None, "reason": "compact returned to the mainline",
+                          "evidence_item_ids": list(branch["evidence_item_ids"])}
         focus = {"phase_id": current["id"], "branch_id": None}
     doc["overview"]["focus"] = focus
-    current = next(p for p in doc["phases"] if p["id"] == focus["phase_id"])
-    for item in added:
-        doc["placements"].append({"item_id": item["id"], "phase_id": focus["phase_id"], "branch_id": focus.get("branch_id")})
-        if item["type"] in {"goal", "question", "decision"} and item["id"] not in current["goal_item_ids"]:
-            current["goal_item_ids"].append(item["id"])
     if transition:
-        transition["result_item_ids"] = [item["id"] for item in added or touched]
-        transition["id"] = _transition_id(task_id, len(doc["transitions"]))
+        transition.update(id=_transition_id(task_id, len(doc["transitions"])),
+                          result_item_ids=list(dict.fromkeys(i["id"] for i in related)), unresolved=[])
         doc["transitions"].append(transition)
+
+
+def _place_items(doc, added, structures, *, locks=()):
+    """Each item has one owner; broad evidence never dictates branch identity."""
+    locations = {p["item_id"]: p for p in doc["placements"]}
+    for item in added:
+        relevant = [s for s in structures if item["id"] in s["related_ids"]]
+        anchored = [s for s in relevant if s["anchor_id"] == item["id"]
+                    and s["action"] in {"branch", "new_phase"}]
+        chosen = next(iter(anchored or relevant), None)
+        if chosen is None or chosen["focus"]["phase_id"] is None:
+            raise ValueError("compact_item_placement_required")
+        branch = chosen["focus"].get("branch_id")
+        if item["type"] == "goal" and not anchored:
+            branch = None
+        location = {"item_id": item["id"], "phase_id": chosen["focus"]["phase_id"], "branch_id": branch}
+        doc["placements"].append(location)
+        locations[item["id"]] = location
+    # A formerly mainline question can explicitly become a side line. Existing
+    # phase ownership and human placement locks remain authoritative.
+    for structure in structures:
+        if structure["action"] != "branch" or not structure["anchor_id"]:
+            continue
+        location = locations.get(structure["anchor_id"])
+        if location is None:
+            continue
+        focus = structure["focus"]
+        if location["phase_id"] != focus["phase_id"]:
+            raise ValueError("compact_branch_anchor_phase_mismatch")
+        locked = _locked_fields(locks, "placement", structure["anchor_id"])
+        if location["branch_id"] != focus["branch_id"] and "branch_id" in locked:
+            raise ValueError("compact_locked_branch_placement")
+        location["branch_id"] = focus["branch_id"]
+    by_id = {i["id"]: i for i in doc["items"]}
+    added_ids = {i["id"] for i in added}
+    for phase in doc["phases"]:
+        if "goal_item_ids" in _locked_fields(locks, "phase", phase["id"]):
+            continue
+        # Keep historical goal identities except items explicitly reassigned
+        # to a branch in this phase. Only mainline items extend the main goals.
+        phase["goal_item_ids"] = [i for i in phase["goal_item_ids"]
+                                  if not (i in locations and locations[i]["branch_id"] is not None)]
+        for identity, place in locations.items():
+            if identity not in added_ids or place["phase_id"] != phase["id"] or place["branch_id"] is not None:
+                continue
+            if by_id[identity]["type"] in {"goal", "question", "decision"} and identity not in phase["goal_item_ids"]:
+                phase["goal_item_ids"].append(identity)
 
 
 def _normalize_changes(output, turns):
@@ -321,7 +400,6 @@ def apply_compact(previous, output, turns, catalog, task_id, *, locks=()):
     doc = deepcopy(previous) if previous else empty()
     doc.setdefault("identity_changes", [])
     doc.setdefault("pending_revisions", [])
-    doc.setdefault("resolution_log", [])
     item_ids = {row["index"]: row["id"] for row in catalog}
     virtual_ids = {}
     effects = []
@@ -338,13 +416,14 @@ def apply_compact(previous, output, turns, catalog, task_id, *, locks=()):
             target_id = item_ids.get(target_index) or virtual_ids.get(target_index)
             if target_id is None:
                 raise ValueError("compact_target_not_found")
+            target_id = _canonical_item(doc, target_id)
         if change["operation"] == "merge":
             merge_ids = []
             for index in change["merge_indexes"]:
                 identity = item_ids.get(index) or virtual_ids.get(index)
                 if identity is None:
                     raise ValueError("compact_merge_source_not_found")
-                merge_ids.append(identity)
+                merge_ids.append(_canonical_item(doc, identity))
             change = {**change, "merge_ids": merge_ids}
         node, existing, absorbed = _apply_change(doc, change, turns, target_id, task_id, len(doc["items"]) + ordinal, locks=locks)
         if node:
@@ -355,32 +434,52 @@ def apply_compact(previous, output, turns, catalog, task_id, *, locks=()):
             touched_total.append(existing)
         effects.append({"change": change, "node": node, "existing": existing, "absorbed": absorbed})
 
-    # Build structure from the first segment touched by each change. A change
-    # spanning segments contributes evidence to one item, never one item per
-    # segment.
-    used = set()
-    segment_focus = []
+    # Content changes are applied once; every structural action independently
+    # binds to all relevant item identities, including unchanged history.
+    identities = {index: _canonical_item(doc, identity)
+                  for index, identity in {**item_ids, **virtual_ids}.items()}
+    new_ids = {i["id"] for i in added_total}
+    for branch in doc["branches"]:
+        _branch_state(doc, branch, locks=locks)
+    structures = []
     for segment_index, segment in enumerate(output["segments"]):
         segment_turns = set(segment["turn_indexes"])
-        added, touched = [], []
+        related = {}
         for effect in effects:
-            change = effect["change"]
-            if id(effect) in used or not segment_turns.intersection(change["turn_indexes"]):
-                continue
-            used.add(id(effect))
-            if effect["node"]:
-                added.append(effect["node"])
-            if effect["existing"]:
-                touched.append(effect["existing"])
-        _apply_segment_structure(doc, segment, added, touched, task_id + f":{segment_index}")
-        segment_focus.append(deepcopy(doc["overview"]["focus"]))
+            if segment_turns.intersection(effect["change"]["turn_indexes"]):
+                item = effect["node"] or effect["existing"]
+                if item:
+                    identity = _canonical_item(doc, item["id"])
+                    related[identity] = next(i for i in doc["items"] if i["id"] == identity)
+        related = list(related.values())
+        anchor = _segment_anchor(doc, segment, related, identities)
+        if segment["action"] == "new_phase" and anchor:
+            user_sources = {_source_key(source) for source in _turn_sources(turns, segment["turn_indexes"])
+                            if source["role"] == "user"}
+            if not any(_source_key(ref) in user_sources for ref in anchor.get("evidence", [])):
+                raise CompactValidationError("compact_new_phase_requires_user_objective",
+                                             segment_index=segment_index, anchor_index=segment.get("anchor_index"),
+                                             reason="anchor_user_evidence_missing_in_segment")
+        if segment["action"] != "new_phase" and anchor and anchor["id"] not in {i["id"] for i in related}:
+            related.append(anchor)
+        _apply_segment_structure(doc, segment, related, new_ids, task_id + f":{segment_index}",
+                                 anchor=anchor, locks=locks)
+        focus = deepcopy(doc["overview"]["focus"])
+        structures.append({"action": segment["action"], "anchor_id": anchor["id"] if anchor else None,
+                           "related_ids": {i["id"] for i in related}, "focus": focus})
+    _place_items(doc, added_total, structures, locks=locks)
 
-    focus_index = output.get("focus_segment")
-    if focus_index is not None:
-        doc["overview"]["focus"] = segment_focus[focus_index]
     for lock in locks:
         if lock.get("entity") == "overview" and lock.get("field") == "focus":
             doc["overview"]["focus"] = deepcopy(lock["value"])
+    # Chronological actions determine focus; the old redundant focus_segment
+    # cannot contradict movement. Human overrides still take precedence.
+    # Reconcile activity after overrides, including a phase change away.
+    focus = doc["overview"]["focus"]
+    for branch in doc["branches"]:
+        active = branch["phase_id"] == focus["phase_id"] and branch["id"] == focus.get("branch_id")
+        if branch["state"] in {"active", "waiting"} or active:
+            _branch_state(doc, branch, active=active, locks=locks)
     from .current_view import project_current
     project_current(doc, output.get("current"), {**item_ids, **virtual_ids}, locks=locks)
     validate_layout(doc)
@@ -448,6 +547,7 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                     commit_turns(store.db, chat_id, rows)
                     store.db.execute("INSERT INTO delta_progress VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET cursor_json=excluded.cursor_json,version=excluded.version,windows=excluded.windows",
                                      (chat_id, encode(state["cursor"]), state.get("version", 0), state.get("windows", 0) + 1))
+            inbox.settle_imported(config, chat_id, state.get("cursor"))
             _write_state(state_path, state)
             report.update(state="done", calls=0, pipeline=PIPELINE, version=state.get("version"), compact_segments=0, deferred_turn=deferred)
             return report
@@ -459,6 +559,7 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
         batch_id = _receipt_id(chat_id, before, after)
         if store.db.execute("SELECT 1 FROM compact_batches WHERE id=? AND state='done'", (batch_id,)).fetchone():
             state["cursor"] = after
+            inbox.settle_imported(config, chat_id, after)
             _write_state(state_path, state)
             report.update(state="done", calls=0, pipeline=PIPELINE, version=state.get("version", 0))
             return report
@@ -479,31 +580,41 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                 payload_turns = _payload_turns(chunk)
                 payload = request_payload(payload_turns, state_ctx, catalog)
                 request_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-                result = transport.complete_compact(model=transport.model, instructions=instructions(), payload=payload, max_output_tokens=MAX_OUTPUT_TOKENS)
-                calls += 1
-                input_chars += len(request_text)
-                usage = result.get("usage") or {}
-                info = result.get("model_info") or {"backend": "responses", "selected_model": transport.model,
-                                                    "selection": "explicit"}
-                identity = {key: info[key] for key in ("backend", "requested_model", "selected_model", "provider", "selection") if key in info}
-                run = next((r for r in model_runs if all(r.get(k) == v for k, v in identity.items())), None)
-                if run is None:
-                    run = {**identity, "calls": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
-                    model_runs.append(run)
-                run["calls"] += 1
-                for key in ("input_tokens", "output_tokens"):
-                    if type(usage.get(key)) is int:
-                        run[key] += usage[key]
-                run["cached_input_tokens"] += result.get("cached_input_tokens", 0)
-                input_tokens += usage.get("input_tokens", 0) if isinstance(usage.get("input_tokens"), int) else 0
-                output_tokens += usage.get("output_tokens", 0) if isinstance(usage.get("output_tokens"), int) else 0
-                if result.get("error") or result.get("output") is None:
-                    raise ValueError(result.get("error") or "compact_empty")
-                output = validate(result["output"], list(range(len(payload_turns))), set(item_ids), require_current=True)
-                segment_count += len(output["segments"])
-                output_chars += len(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
-                working, added, touched = apply_compact(
-                    working, output, chunk, catalog, f"{batch_id}:{chunk_index}", locks=locks)
+                prompt = instructions()
+                for attempt in range(MAX_REPAIRS + 1):
+                    result = transport.complete_compact(model=transport.model, instructions=prompt, payload=payload, max_output_tokens=MAX_OUTPUT_TOKENS)
+                    calls += 1
+                    input_chars += len(request_text) + (len(prompt) - len(instructions()))
+                    usage = result.get("usage") or {}
+                    info = result.get("model_info") or {"backend": "responses", "selected_model": transport.model,
+                                                        "selection": "explicit"}
+                    identity = {key: info[key] for key in ("backend", "requested_model", "selected_model", "provider", "selection") if key in info}
+                    run = next((r for r in model_runs if all(r.get(k) == v for k, v in identity.items())), None)
+                    if run is None:
+                        run = {**identity, "calls": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
+                        model_runs.append(run)
+                    run["calls"] += 1
+                    for key in ("input_tokens", "output_tokens"):
+                        if type(usage.get(key)) is int:
+                            run[key] += usage[key]
+                    run["cached_input_tokens"] += result.get("cached_input_tokens", 0)
+                    input_tokens += usage.get("input_tokens", 0) if isinstance(usage.get("input_tokens"), int) else 0
+                    output_tokens += usage.get("output_tokens", 0) if isinstance(usage.get("output_tokens"), int) else 0
+                    if result.get("error") or result.get("output") is None:
+                        raise ValueError(result.get("error") or "compact_empty")
+                    output_chars += len(json.dumps(result["output"], ensure_ascii=False, separators=(",", ":")))
+                    try:
+                        output = validate(result["output"], list(range(len(payload_turns))), set(item_ids), require_current=True)
+                        candidate, added, touched = apply_compact(
+                            working, output, chunk, catalog, f"{batch_id}:{chunk_index}", locks=locks)
+                    except ValueError as exc:
+                        if attempt >= MAX_REPAIRS or not str(exc).startswith(("compact_", "new_phase_")):
+                            raise
+                        prompt = repair_instructions(exc, result["output"])
+                        continue
+                    working = candidate
+                    segment_count += len(output["segments"])
+                    break
                 added_count += added
                 touched_count += touched
             current = working
@@ -523,16 +634,18 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                                  (chat_id, encode(cursor), version, state["windows"]))
                 _record(store.db, (batch_id, chat_id, encode(before), encode(after), base_head[0], version, "done", len(turns), segment_count, calls,
                                     input_chars, output_chars, input_tokens, output_tokens, "[]", "[]", None, time.time(), time.time()), model_runs)
+            inbox.settle_imported(config, chat_id, after)
             _write_state(state_path, state)
             report.update(state="done", calls=calls, pipeline=PIPELINE, version=version,
-                          compact_items=len(current.get("items", [])), compact_segments=segment_count,
+                          compact_items=len(current.get("items", [])), compact_segments=segment_count, deferred_turn=deferred,
                           input_chars=input_chars, output_chars=output_chars, input_tokens=input_tokens, output_tokens=output_tokens)
             return report
         except ValueError as exc:
             with store.db:
                 _record(store.db, (batch_id, chat_id, encode(before), encode(after), base_head[0], None, "failed", len(turns), segment_count, calls,
                                     input_chars, output_chars, input_tokens, output_tokens, "[]", "[]", str(exc)[:120], time.time(), time.time()), model_runs)
-            report.update(state="partial", error_code=str(exc)[:120], calls=calls, pipeline=PIPELINE,
+            inbox.settle_imported(config, chat_id, before, error=str(exc)[:120])
+            report.update(state="failed", error_code=str(exc)[:120], calls=calls, pipeline=PIPELINE,
                           input_chars=input_chars, output_chars=output_chars, input_tokens=input_tokens, output_tokens=output_tokens)
             _write_state(state_path, state)
             return report
@@ -545,12 +658,27 @@ def _import_claimed(store, config, chat_id, claimed):
 
 
 def _import_owned(store, config, chat_id, claimed):
+    imported = claimed.get("imported_snapshot_id")
+    if imported and store.db.execute(
+            "SELECT 1 FROM source_snapshots ss JOIN source_segments s ON s.id=ss.segment_id "
+            "WHERE ss.id=? AND s.chat_id=?", (imported, chat_id)).fetchone():
+        return True
     source = claimed.get("snapshot") or claimed["transcript"]
     path = Path(source)
-    owner = chat_identity(str(path), chat_id)
+    try:
+        owner = chat_identity(str(path), chat_id)
+    except NonHumanSource:
+        inbox.finish(config, claimed, state="done", error="excluded_nonhuman_source")
+        return False
     if owner != chat_id:
-        inbox.record(config, owner, claimed["event"], str(path))
+        try:
+            inbox.record(config, owner, claimed["event"], str(path))
+        except (OSError, ValueError):
+            inbox.finish(config, claimed, state="failed", error="chat_identity_unresolved")
+            return False
         inbox.finish(config, claimed, state="done", error="rerouted_chat")
+        from .maintain import spawn_worker
+        spawn_worker(Path(config["_path"]), owner)
         return False
     if not path.is_file():
         inbox.finish(config, claimed, state="failed", error="source_missing")
@@ -559,6 +687,9 @@ def _import_owned(store, config, chat_id, claimed):
     path, manifest = content_capture(path, inbox.root(config) / "live", chat_id)
     if str(path) != claimed.get("snapshot"):
         claimed = inbox.relocate(config, claimed, path)
-    store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
-    inbox.finish(config, claimed, state="done", error=None)
+    imported = store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
+    end = store.db.execute(
+        "SELECT ordinal,record_no FROM current_sources WHERE chat_id=? ORDER BY ordinal DESC,record_no DESC LIMIT 1",
+        (chat_id,)).fetchone()
+    inbox.imported(config, claimed, snapshot_id=imported["snapshot_id"], cursor=list(end) if end else None)
     return True

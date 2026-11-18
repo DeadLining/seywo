@@ -6,7 +6,7 @@ Version **0.4.0** packages the existing local runtime, STDIO MCP server, history
 
 Initial platform: macOS/Linux. The bundled launcher uses Python 3.11+ with an available MCP SDK, or `uv run` with `mcp==1.28.1`. With Python but no SDK/uv it provisions a private reusable venv. First provisioning requires network access; it never installs into the system interpreter. A machine with neither Python 3.11+ nor uv must install one. `fcntl` prevents claiming Windows support. Node/npm are build-only dependencies.
 
-The `.codex-plugin/plugin.json` manifest keeps the Codex loader entrypoint and the four native Hooks at the plugin root. The loader resolves the MCP `cwd`, shell entrypoint and bundled resources relative to the installed plugin directory. Four native Hooks remain subject to host review/trust. The plugin never grants its own trust or installs global Hook fallbacks.
+The `.codex-plugin/plugin.json` manifest keeps the Codex loader entrypoint and the five native Hooks at the plugin root. The loader resolves the MCP `cwd`, shell entrypoint and bundled resources relative to the installed plugin directory. Five native Hooks remain subject to host review/trust. The plugin never grants its own trust or installs global Hook fallbacks.
 
 ## Default model
 
@@ -54,7 +54,7 @@ Call `seywo_open` without arguments to open the current Codex Chat by default. C
 
 Compact is a processing trigger. Its execution table stores no duplicate segments/changes payload; at most the latest success and latest failure per Chat are retained. A successful commit clears old failures. Setup trims pre-existing execution rows transactionally when the writer next runs. Source-backed narrative revisions remain compressed deltas for stable MCP IDs, pinned pagination and manual-edit concurrency. Older version/diff read APIs remain compatible, but are not UI entrypoints. Read-only views never run cleanup or models.
 
-The plugin exposes 16 tools: nine history tools, project selection/init, `seywo_open`, app-only `seywo_panel_data`, and three app-only model settings tools. Legacy `seywo --config … mcp` exposes the nine history tools with strict startup validation. Panel opening may initialize the bound project; subsequent data views are read-only and make zero model calls. The data tools do not schedule extraction or scan history. Codex model status/testing use the host-level Codex configuration; only the optional Responses API settings are project-local, and only an explicit model test makes one model call.
+The plugin exposes 17 tools: nine history tools, project selection/init, `seywo_open`, app-only `seywo_panel_data`, three app-only model settings tools, and app-only `seywo_retry_maintenance`. Legacy `seywo --config … mcp` exposes the nine history tools with strict startup validation. Panel opening may initialize the bound project; subsequent data views are read-only and make zero model calls. The data tools do not schedule extraction or scan history. Codex model status/testing use the host-level Codex configuration; only the optional Responses API settings are project-local, and only an explicit model test makes one model call.
 
 ## Build and verify
 
@@ -87,6 +87,46 @@ The same model call returns bounded current indexes (one goal, three questions, 
 
 History selection reserves the current goal and ranks remaining short items by dialogue relevance, focus and recency within twelve items. Native and Responses backends send the output schema once via structured output. The Codex subprocess disables discovered Skills catalogs and image tools with process-local overrides; user settings, credentials and normal Chats remain intact. The host may still include a minimal noninteractive user-input tool definition; no claim of zero host overhead is made.
 
-Each bounded latest-success/failure receipt stores model selection/provider and aggregated input/output/cache tokens, without credentials, prompts or duplicated semantic output. A selected Codex model is the explicit request target, not proof of a gateway's private upstream routing. Existing Hooks retain their entrypoint definitions; no new hooks or tools are added.
+Each bounded latest-success/failure receipt stores model selection/provider and aggregated input/output/cache tokens, without credentials, prompts or duplicated semantic output. A selected Codex model is the explicit request target, not proof of a gateway's private upstream routing. Existing Hooks retain their entrypoint definitions and the history tool surface stays unchanged.
 
 Turn completion also has a small `(chat_id, turn_id, end-coordinate)` progress record, committed with the narrative and physical cursor. This is not a Compact history or transcript copy: it distinguishes an already-published interrupted request from a newly terminal old partial turn. Unterminated JSONL records never seal a turn or advance its semantic boundary. Snapshot adapter revisions retain unchanged per-record body versions, so lifecycle upgrades reuse historical body payloads.
+
+
+## Maintenance visibility and retry (2026-11-17)
+
+The panel reads `seywo_panel_data(view="maintenance")` for the selected Chat,
+including a queued Chat not yet imported when it is the exact host identity.
+A compact status row shows queued/running/completed, incomplete, failed, blocked,
+or interrupted work. A failed update preserves the published mainline. Messages
+use fixed local wording, never raw model errors, paths, credentials or tracebacks.
+The public `seywo_status` tool includes a compact maintenance state per paged Chat.
+All status reads and polling make zero model calls and never initialize storage.
+
+`seywo_retry_maintenance` is app-only and explicit. It requeues failed durable
+boundaries and schedules the existing single-writer maintainer. Repeated clicks
+while queued/running do not start more workers. The action returns immediately;
+subsequent extraction may call the configured model as usual. It preserves
+published versions, manual edits, source references and the semantic cursor.
+
+Each Chat uses one atomically replaced small `.seywo/maintenance/CHAT.json`
+receipt, with a safe state/cause, timestamp and last successful completion.
+No new Compact history, transcript copy or heartbeat log is stored. Existing
+writer locks identify interrupted processes; a queued process that does not
+start within 60 seconds becomes retryable. The panel polls active work every
+four seconds for at most five minutes, pausing when hidden; it then offers
+manual status refresh. Completion refreshes the mainline once.
+
+Failures produce a bounded native Hook `systemMessage` at the next
+SessionStart/UserPromptSubmit, once per failure. Immediate queue/launch errors
+can report at the Compact boundary. Hook exit remains zero so Codex can continue.
+The Hook does not call a model. Waiting for a native turn to close is an expected
+incomplete state, not a failure notification or a reason to spend another call.
+A `Stop` Hook recaptures the now-complete native transcript and wakes the existing
+compact worker only while a compact boundary remains pending/claimed. Ordinary
+turns without unfinished compact work do not capture sources or start extraction.
+The frozen boundary is preserved; the turn ledger prevents replaying committed
+turns. Explicit retry also recaptures the source for this waiting state, instead
+of replaying the same incomplete snapshot. Waiting receipts remain retryable and
+the panel polls them through publication without showing a success checkmark.
+A process that fails before Seywo's Hook runtime starts is outside these receipts;
+Codex owns that command-execution error.

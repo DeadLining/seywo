@@ -3,8 +3,8 @@
 No database, no model and no source rewriting happen in a hook process. A record
 only names a chat, an event and a source; a PreCompact event may additionally
 carry a bounded verbatim snapshot, because compaction can rewrite the source
-after the hook returns. Duplicate delivery coalesces on the source fingerprint
-and never by wall-clock time.
+after the hook returns. Duplicate delivery coalesces on the immutable capture
+and source fingerprint within the same chat, event and transcript path.
 """
 
 from functools import wraps
@@ -17,7 +17,7 @@ from uuid import uuid4
 from .locking import file_lock, lifecycle
 from .store import digest
 
-EVENTS = {"PreCompact", "PostCompact", "SessionEnd"}
+EVENTS = {"PreCompact", "PostCompact", "SessionEnd", "Stop"}
 SNAPSHOT_LIMIT = 64 * 1024 * 1024
 KEEP_RECORDS = 200
 
@@ -92,28 +92,41 @@ def _record(config, chat_id: str, event: str, transcript: str) -> dict:
     source = Path(transcript)
     folder = root(config) / "pending"
     folder.mkdir(parents=True, exist_ok=True)
-    fingerprint = _fingerprint(source)
-    key = digest(f"{chat_id}\0{event}\0{source}")[:32]
-    path = folder / f"{key}.json"
     with file_lock(root(config) / ".lock"):
-        previous = _read(path)
-        if previous and previous["state"] == "claimed":
-            # Never mutate a record a worker is reading.
-            key = digest(f"{chat_id}\0{event}\0{source}\0{time.time_ns()}")[:32]
-            path = folder / f"{key}.json"
-            previous = None
-        if previous and previous["state"] == "pending" and previous["fingerprint"] == fingerprint:
-            return {**previous, "coalesced": True}
+        # Capture before deduplication: metadata can be restored after a rewrite,
+        # and a source path alone identifies neither the bytes nor the boundary.
+        boundary = {
+            "chat_id": chat_id, "event": event, "transcript": str(source),
+            "fingerprint": _fingerprint(source),
+            "snapshot": snapshot(config, source, chat_id),
+        }
+        key = digest(json.dumps(boundary, ensure_ascii=False, sort_keys=True))[:32]
+        path = folder / f"{key}.json"
+        retry_path = None
+        # Match fields as well as the filename so legacy path-only records and
+        # a pending redelivery beside a claimed record retain their identities.
+        for candidate in sorted(folder.glob("*.json")):
+            previous = _read(candidate)
+            if not previous or not all(previous.get(k) == v for k, v in boundary.items()):
+                continue
+            if previous.get("state") == "pending":
+                return {**previous, "_path": str(candidate), "coalesced": True}
+            if previous.get("state") in {"failed", "done"}:
+                retry_path = candidate
+        if retry_path is not None:
+            # Re-delivery retries a terminal record as before: clear the error
+            # and start a new attempt allowance. Explicit retry is unchanged.
+            path = retry_path
+        else:
+            # A claimed record stays immutable. Keep one pending redelivery;
+            # subsequent copies find and coalesce it above. Never replace any
+            # other boundary, including an unreadable pre-existing record.
+            while path.exists():
+                path = folder / f"{digest(key + uuid4().hex)[:32]}.json"
         item = {
-            "version": 1, "id": path.stem, "chat_id": chat_id, "event": event,
-            "transcript": str(source), "fingerprint": fingerprint,
+            **boundary, "version": 1, "id": path.stem,
             "state": "pending", "attempts": 0, "error_code": None,
             "created_at": time.time(), "updated_at": time.time(),
-            # A post-compact file is a new physical segment by definition,
-            # and any outstanding record still points at the previous
-            # snapshot, so both cases need their own filename.
-            "snapshot": snapshot(config, source, chat_id, unique=bool(
-                event == "PostCompact" or _open_for(config, chat_id))),
         }
         _write_atomic(path, item)
         _prune(folder)
@@ -187,7 +200,7 @@ def claim(config, item: dict) -> dict | None:
 
 @_serialized
 def requeue_failed(config, chat_id: str, *, limit: int = 5) -> int:
-    """Retry a failed record on the next compact, but not forever."""
+    """Bound source-import retries; semantic retries have their own call budget."""
     folder = root(config) / "pending"
     if not folder.is_dir():
         return 0
@@ -195,7 +208,9 @@ def requeue_failed(config, chat_id: str, *, limit: int = 5) -> int:
     for path in folder.glob("*.json"):
         item = _read(path)
         if (item and item.get("state") == "failed" and item.get("chat_id") == chat_id
-                and item.get("attempts", 0) < limit):
+                and (item.get("imported_snapshot_id") or item.get("attempts", 0) < limit)):
+            # Imported sources need no further I/O attempt. A new worker run
+            # may retry semantics; compact_pipeline bounds its model calls.
             item.update(state="pending", updated_at=time.time())
             _write_atomic(path, item)
             count += 1
@@ -238,6 +253,34 @@ def finish(config, item: dict, *, state: str, error: str | None = None) -> None:
         # rewritten) live transcript. prune_live reclaims it later.
         _write_atomic(path, current)
 
+
+
+@_serialized
+def imported(config, item: dict, *, snapshot_id: str, cursor) -> None:
+    """Record source durability; the claim still awaits semantic publication."""
+    path = Path(item["_path"])
+    current = _read(path)
+    if current and current.get("state") == "claimed":
+        current.update(imported_snapshot_id=snapshot_id, imported_cursor=cursor, updated_at=time.time())
+        _write_atomic(path, current)
+
+
+@_serialized
+def settle_imported(config, chat_id: str, cursor, *, error: str | None = None) -> None:
+    """Acknowledge only imported claims covered by the committed watermark.
+
+    Failed claims retain import identity for retry. An open trailing turn stays
+    claimed until a later boundary closes it; successful prefixes cannot ack it.
+    """
+    for path in (root(config) / "pending").glob("*.json"):
+        item = _read(path)
+        if (not item or item.get("chat_id") != chat_id or item.get("state") != "claimed"
+                or not item.get("imported_snapshot_id")):
+            continue
+        end = item.get("imported_cursor")
+        if error or end is None or (cursor is not None and tuple(end) <= tuple(cursor)):
+            item.update(state="failed" if error else "done", error_code=error, updated_at=time.time())
+            _write_atomic(path, item)
 
 
 @_serialized
@@ -308,3 +351,32 @@ def retry(config, item: dict) -> None:
 
 def snapshot_dir(config) -> Path:
     return root(config) / "live"
+
+
+@_serialized
+def resume_turn(config, chat_id: str, transcript: str | None = None) -> bool:
+    """Capture completion only for a compact boundary still awaiting publication.
+
+    Never alter the frozen boundary or its imported snapshot. A new content-addressed
+    capture supplies final/terminal rows; the turn ledger skips committed dialogue.
+    Holding the inbox lock serializes Stop with the worker's final settlement.
+    """
+    sources = set()
+    for path in (root(config) / 'pending').glob('*.json'):
+        item = _read(path)
+        if (item and item.get('chat_id') == chat_id
+                and item.get('state') in {'pending', 'claimed'}):
+            if item.get('transcript'):
+                sources.add(item['transcript'])
+    if not sources:
+        return False
+    if transcript:
+        sources = {transcript}
+    from .hook import chat_identity
+    for source in sorted(sources):
+        # Do not recover a foreign/subagent transcript or silently freeze a
+        # missing path in place of the original compact evidence.
+        if chat_identity(source, chat_id) != chat_id or not Path(source).is_file():
+            raise ValueError('source_missing')
+        record(config, chat_id, 'Stop', source)
+    return True

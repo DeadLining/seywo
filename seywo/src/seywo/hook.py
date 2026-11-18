@@ -1,7 +1,7 @@
 """Codex lifecycle hook: record a compact boundary, then leave.
 
-Contract: compact boundary events never write to stdout; injection events may
-emit one bounded additionalContext object. Always exit 0, with no model or
+Contract: successful compact boundary events never write to stdout. Failures
+may emit one bounded native systemMessage; injection events may also emit context. Always exit 0, with no model or
 network call in this process. A compact can rewrite or delete the transcript,
 so PreCompact copies a verbatim snapshot first.
 
@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 
-from . import inbox
+from . import inbox, maintenance_status
 from .admission import NonHumanSource, require_human, transcript_meta
 from .config import load_config
 from .retrieval import Retrieval
@@ -24,7 +24,7 @@ from .store import Store
 
 BOUNDARY_EVENTS = {"PreCompact", "PostCompact"}
 INJECTION_EVENTS = {"SessionStart", "UserPromptSubmit"}
-EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS
+EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS | {"Stop"}
 MAX_CONTEXT_CHARS = 6000
 BOUNDARY = Path(".seywo/config.json")
 CHAT = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -141,8 +141,20 @@ def resume_context(config_path: Path, chat_id: str) -> str | None:
     )
 
 
-def spawn(config: Path, chat_id: str) -> None:
+def spawn(config: Path, chat_id: str) -> bool:
     try:
+        # The plugin entrypoint adds ``src`` to sys.path itself, but a child
+        # launched with ``python -m`` starts from the host project directory
+        # and does not inherit that path mutation. Export the installed package
+        # location explicitly so the worker cannot exit before maintenance
+        # starts with ``ModuleNotFoundError: seywo``.
+        package_src = str(Path(__file__).resolve().parent.parent)
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH")
+        paths = [package_src]
+        if existing:
+            paths.extend(path for path in existing.split(os.pathsep) if path and path != package_src)
+        env["PYTHONPATH"] = os.pathsep.join(paths)
         subprocess.Popen(
             [
                 sys.executable,
@@ -157,11 +169,28 @@ def spawn(config: Path, chat_id: str) -> None:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
             start_new_session=True,
             close_fds=True,
         )
+        return True
     except OSError:
-        pass  # the durable record stays pending; the next compact retries it
+        maintenance_status.safe_record(config, chat_id, 'failed', error_code='worker_start_failed')
+        return False  # the durable record stays pending; explicit retry can resume it
+
+
+def _emit_notice(config, chat_id, *, output=None, fallback=None):
+    output = dict(output or {})
+    try:
+        notice = maintenance_status.take_notice(config, chat_id)
+    except (OSError, ValueError):
+        notice = fallback or 'Seywo：无法记录整理状态，请检查磁盘空间和写入权限。'
+    if notice or fallback:
+        output['systemMessage'] = notice or fallback
+    if output:
+        json.dump(output, sys.stdout, ensure_ascii=False)
+        sys.stdout.write('\n')
+        sys.stdout.flush()
 
 
 def main() -> int:
@@ -192,35 +221,53 @@ def main() -> int:
     try:
         config = load_config(config_path)
     except (OSError, ValueError):
+        maintenance_status.safe_record(config_path, chat_id, 'blocked', error_code='config_invalid')
+        _emit_notice(config_path, chat_id)
         return 0
     if (config_path.parent / "disabled").exists() or (config.get("hook") or {}).get(
         "enabled"
     ) is not True:
         return 0
+    if event == 'Stop':
+        try:
+            from .locking import lifecycle, file_lock
+            with lifecycle(config), file_lock(inbox.root(config) / '.lock'):
+                if not inbox.resume_turn(config, chat_id, transcript or None):
+                    return 0
+                saved = maintenance_status.safe_record(config, chat_id, 'queued')
+            spawn(config_path, chat_id)
+            if not saved:
+                _emit_notice(config, chat_id, fallback='Seywo：补全任务已保存，但无法记录整理状态。')
+        except (OSError, ValueError):
+            maintenance_status.safe_record(config, chat_id, 'failed', error_code='queue_write_failed')
+            _emit_notice(config, chat_id)
+        return 0
     if event in BOUNDARY_EVENTS:
         try:
-            inbox.record(config, chat_id, event, transcript)
+            from .locking import lifecycle, file_lock
+            # Keep queue publication and its visible state in the same ordering
+            # as the worker's final check/release of inbox ownership.
+            with lifecycle(config), file_lock(inbox.root(config) / '.lock'):
+                inbox.record(config, chat_id, event, transcript)
+                saved = maintenance_status.safe_record(config, chat_id, 'queued')
         except (OSError, ValueError):
+            maintenance_status.safe_record(config, chat_id, 'failed', error_code='queue_write_failed')
+            _emit_notice(config, chat_id, fallback='Seywo：本次整理任务无法保存，请检查磁盘空间和写入权限。')
             return 0
         spawn(config_path, chat_id)
+        if not saved:
+            _emit_notice(config, chat_id, fallback='Seywo：整理任务已保存，但无法记录状态，请检查磁盘空间和写入权限。')
+        else:
+            _emit_notice(config, chat_id)
         return 0
+    output = {}
     try:
         context = resume_context(config_path, chat_id)
         if context:
-            json.dump(
-                {
-                    "hookSpecificOutput": {
-                        "hookEventName": event,
-                        "additionalContext": context,
-                    }
-                },
-                sys.stdout,
-                ensure_ascii=False,
-            )
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+            output['hookSpecificOutput'] = {'hookEventName': event, 'additionalContext': context}
     except (OSError, ValueError):
         pass
+    _emit_notice(config, chat_id, output=output)
     return 0
 
 

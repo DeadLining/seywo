@@ -9,14 +9,18 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from .config import initialize, load_config
 from .panel import Panel
 from .plugin_binding import ProjectRequired
-from .plugin_context import current_chat
+from .plugin_context import current_chat, host_thread_id
 from .retrieval import Retrieval, serialize, snapshot
 from .settings import provider_status, read_provider, save_provider, use_codex, validate_endpoint
 from .transport import Transport
 from .codex_transport import CodexTransport
 from .store import Store
 
-RESOURCE_URI = 'ui://seywo/panel-v1.html'
+# Bump the resource URI when the self-contained app shell changes materially.
+# Codex may retain an MCP App resource by URI for the lifetime of a Chat, so
+# reusing panel-v1.html would keep an already-open Chat on the previous DOM
+# even after the plugin files have been reinstalled.
+RESOURCE_URI = 'ui://seywo/panel-v3.html'
 
 
 def register_panel(server, resolve_config):
@@ -142,10 +146,42 @@ def register_panel(server, resolve_config):
                           'error': result.get('error'), 'usage': result.get('usage'),
                           'seconds': result.get('seconds'), 'model_calls': 1})
 
+    def maintenance_chat(store, requested):
+        # Current unimported chat may already have a queued/failed Compact.
+        # Other selections must be admitted human chats in this exact project.
+        identity = host_thread_id(server.get_context())
+        selected = requested or identity
+        if selected is None:
+            raise ValueError('chat_id_required')
+        exists = store.db.execute('SELECT 1 FROM chats WHERE id=?', (selected,)).fetchone()
+        if not exists and selected != identity:
+            raise ValueError('unknown_chat_id')
+        if exists:
+            store.require_human_chat(selected)
+        from .maintenance_status import _path
+        _path(store.config, selected)
+        return selected
+
+    @server.tool(annotations=app_only_write, structured_output=False,
+                 meta={'ui': {'visibility': ['app']}})
+    async def seywo_retry_maintenance(chat_id: str | None = None) -> str:
+        """Explicit app retry for this project's selected chat. Schedules a worker.
+
+        Reuses durable source boundaries and existing progress; never imports a
+        different chat, clears a published mainline or calls a model in this MCP
+        request. Repeated clicks while queued/running do not schedule more work.
+        """
+        from .maintenance_control import retry
+        path = await resolve_config(server.get_context())
+        config = load_config(path)
+        with Store(config, read_only=True) as store:
+            selected = maintenance_chat(store, chat_id)
+        return serialize(await asyncio.to_thread(retry, config, selected))
+
     @server.tool(annotations=readonly, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
     async def seywo_panel_data(
-        view: Literal['chats', 'mainline', 'narrative', 'versions', 'changes', 'node', 'source'],
+        view: Literal['chats', 'mainline', 'narrative', 'versions', 'changes', 'node', 'source', 'maintenance'],
         chat_id: str | None = None, version: int | None = None,
         phase_id: str | None = None, branch_id: str | None = None,
         object_id: str | None = None, event_id: str | None = None,
@@ -156,7 +192,10 @@ def register_panel(server, resolve_config):
         path = await resolve_config(server.get_context())
         with Store(load_config(path), read_only=True) as store, snapshot(store):
             panel = Panel(store)
-            if view == 'chats':
+            if view == 'maintenance':
+                from .maintenance_status import read
+                result = read(store.config, maintenance_chat(store, chat_id), db=store.db)
+            elif view == 'chats':
                 result = panel.chats(offset=offset, limit=limit)
                 identity, default = current_chat(store, server.get_context())
                 result.update(current_chat_id=identity, default_chat_id=default)
