@@ -1,13 +1,11 @@
 """Bounded Codex catalog discovery and fixed, credential-free failure reasons."""
-import asyncio
 import json
-import os
 import re
 from pathlib import Path
-import tempfile
+import tomllib
 
 from .plugin_context import catalog_home
-from .runtime_platform import ProcessScope
+from .runtime_platform import find_codex
 
 REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
@@ -19,9 +17,16 @@ def validate_reasoning_effort(value):
 
 
 ERROR_MESSAGES = {
-    'codex_not_available': '未找到可运行的 Codex。请更新并重新打开 Codex App，或安装 Codex CLI。',
+    'codex_not_available': '未找到 Codex 应用服务运行时。请更新并重新打开 Codex App。',
+    'codex_app_server_incompatible': '当前 Codex 应用服务不支持所需协议。请更新 Codex App 后重试。',
+    'codex_app_server_invalid': 'Codex 应用服务返回的协议数据无效。请重试或更新 Codex App。',
+    'codex_worker_broken': 'Codex 应用服务已断开。下次重试会重新启动服务。',
+    'codex_worker_busy': 'Codex 应用服务正在处理其他请求。请稍后重试。',
+    'codex_worker_closed': 'Codex 应用服务已关闭。请重新打开 Seywo。',
+    'codex_input_limit': '整理内容超过应用服务输入上限。请缩小本次任务。',
+    'codex_interrupted': '本次整理已中断。可以重试继续处理。',
     'codex_cli_incompatible': '当前 Codex 运行时不支持所需接口或隔离选项。请更新 Codex 后重试。',
-    'codex_auth_required': '本机 Codex 登录已失效或尚未登录。请在本机 Codex 登录后重试。',
+    'codex_auth_required': 'Codex 账号需要授权。请在模型设置中连接 Codex 账号，再检查授权并重试。',
     'codex_model_unavailable': '当前登录或提供方无法使用所选模型。请从列表选择其他模型后测试。',
     'codex_reasoning_unsupported': '当前模型未声明支持所选思考强度。请重新读取模型列表，选择支持的档位或自动后重试。',
     'invalid_reasoning_selection': '思考强度无效。请重新选择支持的档位或自动。',
@@ -44,11 +49,11 @@ def error_message(code):
 
 
 def classify_error(text):
-    """Return only an allowlisted code. Never return raw CLI/provider messages."""
+    """Return only a fixed code; never expose runtime/provider messages."""
     value = text.lower()
     if any(s in value for s in ('unexpected argument', 'unknown variant', 'unknown feature',
                                 'unrecognized subcommand', 'method not found', 'unknown method')):
-        return 'codex_cli_incompatible'
+        return 'codex_app_server_incompatible'
     if any(s in value for s in ('unauthorized', '401 unauthorized', 'not logged in', 'please log in',
                                 'authentication', 'invalid api key', 'invalid_api_key', 'token expired')):
         return 'codex_auth_required'
@@ -67,109 +72,108 @@ def classify_error(text):
     return 'codex_execution_failed'
 
 
-async def _catalog(command, home, timeout):
-    async def read_catalog():
-        with tempfile.TemporaryDirectory(prefix='seywo-catalog-') as directory, ProcessScope() as scope:
-            # No thread is created. Disable executable discovery surfaces even
-            # during initialization, without relying on CLI feature-name flags.
-            args = [*command, 'app-server']
-            for key in ('hooks', 'plugins', 'apps', 'shell_tool', 'memories'):
-                args += ['-c', f'features.{key}=false']
-            process = await scope.start_async(*args, cwd=directory,
-                env={**os.environ, 'CODEX_HOME': str(home), 'SEYWO_INTERNAL_MODEL': '1'},
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE, limit=256 * 1024)
-            async def drain_stderr():
-                captured = bytearray()
-                while chunk := await process.stderr.read(8192):
-                    captured.extend(chunk[:max(0, 65536 - len(captured))])
-                return bytes(captured)
-            stderr_task = asyncio.create_task(drain_stderr())
-            total = 0
-            request_id = 0
-
-            async def send(method, params=None, *, notification=False):
-                nonlocal request_id, total
-                request_id += 1
-                msg = {'method': method}
-                if params is not None: msg['params'] = params
-                if not notification: msg['id'] = request_id
-                process.stdin.write((json.dumps(msg) + '\n').encode())
-                await process.stdin.drain()
-                if notification: return None
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        # Wait for stderr to flush before classification.
-                        await process.wait()
-                        raise ValueError(classify_error((await stderr_task).decode('utf-8', errors='replace')))
-                    total += len(line)
-                    if total > 2 * 1024 * 1024: raise ValueError('codex_catalog_limit')
-                    msg = json.loads(line)
-                    if not isinstance(msg, dict): raise ValueError('codex_catalog_invalid')
-                    if msg.get('id') != request_id: continue
-                    if 'error' in msg:
-                        error = msg['error']
-                        if isinstance(error, dict) and error.get('code') == -32601:
-                            raise ValueError('codex_cli_incompatible')
-                        raise ValueError(classify_error(json.dumps(error)))
-                    if not isinstance(msg.get('result'), dict): raise ValueError('codex_catalog_invalid')
-                    return msg['result']
-            try:
-                await send('initialize', {'clientInfo': {'name': 'seywo_models', 'version': '0.4.0'}})
-                await send('initialized', notification=True)
-                models, seen, cursors = [], set(), set()
-                cursor = None
-                for _ in range(10):
-                    page = await send('model/list', {'limit': 100, 'cursor': cursor, 'includeHidden': False})
-                    data = page.get('data')
-                    if not isinstance(data, list): raise ValueError('codex_catalog_invalid')
-                    for row in data:
-                        if not isinstance(row, dict): raise ValueError('codex_catalog_invalid')
-                        model = row.get('model')
-                        if not isinstance(model, str) or not model or len(model) > 200:
-                            raise ValueError('codex_catalog_invalid')
-                        if row.get('hidden') or model in seen: continue
-                        seen.add(model)
-                        label = row.get('displayName')
-                        efforts = row.get('supportedReasoningEfforts') or []
-                        efforts = [e.get('reasoningEffort') for e in efforts if isinstance(e, dict)] if isinstance(efforts, list) else []
-                        efforts = [e for e in efforts if isinstance(e, str) and re.fullmatch(r'[a-z_]{1,30}', e)]
-                        default_effort = row.get('defaultReasoningEffort')
-                        models.append({'model': model, 'label': label[:200] if isinstance(label, str) and label else model,
-                                       'is_default': row.get('isDefault') is True,
-                                       'reasoning_efforts': efforts[:20],
-                                       'default_reasoning_effort': default_effort if default_effort in efforts else None})
-                    cursor = page.get('nextCursor')
-                    if cursor is None: return models
-                    if not isinstance(cursor, str) or not cursor or cursor in cursors: raise ValueError('codex_catalog_invalid')
-                    cursors.add(cursor)
-                raise ValueError('codex_catalog_limit')
-            finally:
-                if process.returncode is None:
-                    scope.terminate()
-                await process.wait()
-                if not stderr_task.done(): stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-    return await asyncio.wait_for(read_catalog(), timeout=timeout)
+def app_server_command(command, home):
+    """Build one app-server command with discovery surfaces disabled."""
+    path = Path(home) / 'config.toml'
+    try:
+        config = tomllib.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+        servers = config.get('mcp_servers') or {}
+        if any(not re.fullmatch(r'[A-Za-z0-9_-]+', name) for name in servers):
+            raise ValueError('unsupported_mcp_name')
+    except FileNotFoundError:
+        servers = {}
+    except (OSError, ValueError, TypeError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError('codex_config_invalid') from exc
+    values = [
+        'features.hooks=false',
+        'features.plugins=false',
+        'features.apps=false',
+        'features.shell_tool=false',
+        'features.memories=false',
+        'features.multi_agent=false',
+        'features.multi_agent_v2=false',
+        'features.view_image=false',
+        'features.image_generation=false',
+        'features.goals=false',
+        'features.skill_search=false',
+        'features.skip_host_skill_discovery=true',
+        'project_doc_max_bytes=0',
+        'web_search="disabled"',
+        'memories.use_memories=false',
+        'memories.generate_memories=false',
+    ]
+    values.extend(f'mcp_servers.{name}.enabled=false' for name in servers)
+    skills = set()
+    for root in (Path(home) / 'skills', Path.home() / '.agents/skills'):
+        if root.is_dir():
+            skills.update(root.glob('*/SKILL.md'))
+            skills.update(root.glob('*/*/SKILL.md'))
+    skills.update(Path(home) / 'skills/.system' / name / 'SKILL.md' for name in
+                  ('imagegen', 'skill-creator', 'skill-installer', 'plugin-creator', 'openai-docs'))
+    skills |= {path.resolve() for path in skills}
+    values.append('skills.config=[' + ','.join(
+        '{path=' + json.dumps(str(path)) + ',enabled=false}' for path in sorted(skills)) + ']')
+    args = [*command, 'app-server', '--stdio']
+    for value in values:
+        args.extend(['-c', value])
+    return args
 
 
-def list_models(*, command=None, home=None, timeout=15):
-    """Ask this Codex runtime for its catalog; no model generation or chat import."""
-    from .codex_transport import codex_command
-    command = codex_command() if command is None else command
+
+def normalize_models(data):
+    """Expose only the catalog's bounded public fields."""
+    if not isinstance(data, list):
+        raise ValueError('codex_catalog_invalid')
+    models = []
+    for row in data:
+        if not isinstance(row, dict):
+            raise ValueError('codex_catalog_invalid')
+        model = row.get('model')
+        if not isinstance(model, str) or not model or len(model) > 200:
+            raise ValueError('codex_catalog_invalid')
+        if row.get('hidden'):
+            continue
+        label = row.get('displayName')
+        efforts = row.get('supportedReasoningEfforts') or []
+        efforts = [e.get('reasoningEffort') for e in efforts if isinstance(e, dict)] if isinstance(efforts, list) else []
+        efforts = [e for e in efforts if e in REASONING_EFFORTS]
+        default = row.get('defaultReasoningEffort')
+        models.append({'model': model, 'label': label[:200] if isinstance(label, str) and label else model,
+                       'is_default': row.get('isDefault') is True, 'reasoning_efforts': efforts[:20],
+                       'default_reasoning_effort': default if default in efforts else None})
+    return models
+
+
+def list_models(*, command=None, home=None, timeout=15, refresh=True):
+    """Read the shared worker catalog; no thread or model turn is created."""
+    from .codex_app_server import get_worker
+    command = find_codex() if command is None else command
     result = {'models': [], 'error': None, 'model_calls': 0}
     if not command:
         result['error'] = 'codex_not_available'
     else:
         try:
-            result['models'] = asyncio.run(_catalog(command, Path(home) if home is not None else catalog_home(), timeout))
-        except TimeoutError:
-            result['error'] = 'codex_timeout'
-        except FileNotFoundError:
-            result['error'] = 'codex_not_available'
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+            worker = get_worker(command=command, home=Path(home) if home is not None else catalog_home(), timeout=timeout)
+            result['models'] = worker.models(timeout=timeout, refresh=refresh)
+        except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
             code = str(exc)
             result['error'] = code if code in ERROR_MESSAGES else 'codex_catalog_invalid'
-    if result['error']: result['message'] = error_message(result['error'])
+    if result['error']:
+        result['message'] = error_message(result['error'])
     return result
+
+
+def account_status(*, action='status', command=None, home=None, timeout=15):
+    """Explicit app-server managed login; Seywo never reads or returns tokens."""
+    from .codex_app_server import get_worker
+    if action not in {'status', 'login', 'cancel'}:
+        raise ValueError('invalid_account_action')
+    command = find_codex() if command is None else command
+    try:
+        if not command:
+            raise ValueError('codex_not_available')
+        worker = get_worker(command=command, home=Path(home) if home is not None else catalog_home(), timeout=timeout)
+        return worker.account(action=action, timeout=timeout)
+    except (OSError, ValueError, RuntimeError, TypeError) as exc:
+        code = str(exc) if str(exc) in ERROR_MESSAGES else 'codex_execution_failed'
+        return {'state': 'unavailable', 'error': code, 'message': error_message(code), 'model_calls': 0}

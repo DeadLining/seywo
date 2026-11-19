@@ -24,7 +24,7 @@ from .runtime_platform import FileLease, replace_file, sync_directory
 
 from .sqlite_paths import sqlite_uri
 
-from .archive import archived, capture, garbage_collect, inspect_archives, publication, source_digest
+from .archive import archived, capture, garbage_collect, inspect_archives, publication, source_digest, reblock
 from .locking import lifecycle
 from .config import load_config
 from .store import SCHEMA_VERSION, Store
@@ -170,7 +170,15 @@ def _db_digest(config):
             nh.update(b"\n")
             ncount += 1
         narrative = {"rows": ncount, "sha256": nh.hexdigest()}
-    return {"schema": version, "source": source, "narrative": narrative}
+        th = hashlib.sha256()
+        tcount = 0
+        if version >= 2:
+            for row in store.db.execute('SELECT * FROM understanding_tasks ORDER BY id'):
+                th.update(json.dumps(list(row), ensure_ascii=False, separators=(',', ':')).encode())
+                th.update(b'\n')
+                tcount += 1
+        tasks = {'rows': tcount, 'sha256': th.hexdigest()}
+    return {"schema": version, "source": source, "narrative": narrative, "tasks": tasks}
 
 
 def _manifest_target(path: Path, digest: str):
@@ -368,7 +376,7 @@ def migrate(config, *, dry_run=False):
         reconciliation = _rewrite_paths(config, mapping)
         seeded = _seed_progress(config)
         after = _db_digest(config)
-        if any(after[k] != baseline[k] for k in ("source", "narrative")):
+        if any(after[k] != baseline[k] for k in ("source", "narrative", "tasks")):
             raise ValueError("logical database digest changed during migration")
         for old, meta in raw_before.items():
             if source_digest(mapping[old]) != (meta["sha256"], meta["bytes"]):
@@ -376,12 +384,18 @@ def migrate(config, *, dry_run=False):
         _integrity(config)
         persist("validated", archive_reconciliation=reconciliation)
         removed = _remove_legacy(mapping)
+        reblocked = 0
+        for path in sorted(live.glob('*.jsonl')):
+            reblocked += bool(reblock(path))
+        with Store(config) as store, store.db:
+            from .storage_lifecycle import collect_database
+            reclaimed = collect_database(store.db)
         gc = garbage_collect(state / "inbox")
         persist("reclaimed")
-        with closing(sqlite3.connect(config["_database"], timeout=60)) as db:
-            db.execute("VACUUM")
+        with Store(config) as store:
+            store.db.execute("VACUUM")
         final = _verify(config)
-        if any(final["database"][k] != baseline[k] for k in ("source", "narrative")):
+        if any(final["database"][k] != baseline[k] for k in ("source", "narrative", "tasks")):
             raise ValueError("logical database digest changed after vacuum")
         result = {"state": "migrated", "schema": final["database"]["schema"],
                   "database_before": baseline, "database_after": final["database"],
@@ -389,7 +403,7 @@ def migrate(config, *, dry_run=False):
                   "raw_legacy_removed": removed, "created_manifests": marker["created_manifests"],
                   "garbage_collect": gc, "archive_reconciliation": reconciliation,
                   "backup": marker["backup"], "integrity": final["integrity"], "foreign_key_violations": 0,
-                  "seeded_delta_cursors": seeded}
+                  "seeded_delta_cursors": seeded, "archives_reblocked": reblocked, "database_reclaimed": reclaimed}
         persist("complete", result=result)
         guard.unlink()
         return result
@@ -402,8 +416,6 @@ def run(config_path, command, *, dry_run=False):
     if command == "verify":
         return verify(config)
     if command == "gc":
-        with lifecycle(config, exclusive=True):
-            if (_state(config) / GUARD).exists():
-                raise ValueError("storage migration pending")
-            return garbage_collect(_state(config) / "inbox")
+        from .storage_lifecycle import collect
+        return collect(config, force=True)
     raise ValueError("unknown storage command")

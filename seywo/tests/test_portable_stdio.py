@@ -32,7 +32,7 @@ def test_declared_uv_entry_serves_relocated_project_and_offline_hook(tmp_path):
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=60)) as session:
                 await session.initialize()
-                assert len((await session.list_tools()).tools) == 18
+                assert len((await session.list_tools()).tools) == 19
                 assert not (project / '.seywo').exists()
                 setup = await session.call_tool('seywo_initialize_project', {})
                 assert not setup.isError

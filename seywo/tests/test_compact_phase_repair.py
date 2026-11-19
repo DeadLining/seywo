@@ -315,3 +315,26 @@ def test_phase_anchor_requires_user_evidence_inside_its_segment():
     with pytest.raises(ValueError, match='compact_new_phase_requires_user_objective') as error:
         apply_compact(empty(), output, turns, [], 'assistant-only-phase')
     assert error.value.details['reason'] == 'anchor_user_evidence_missing_in_segment'
+
+
+def test_runtime_preflight_failure_records_zero_model_calls_and_stays_retryable(tmp_path, monkeypatch):
+    class UnavailableTransport:
+        model = 'codex-default'
+
+        def complete_compact(self, **request):
+            return {'output': None, 'error': 'codex_auth_required', 'usage': None,
+                    'model_calls': 0, 'model_info': {'backend': 'codex', 'runtime': 'app-server'}}
+
+    config = setup(tmp_path, monkeypatch, UnavailableTransport())
+    boundary = inbox.record(config, 'auth', 'PreCompact', str(make_source(tmp_path, 'auth')))
+    result = maintain.run_chat(config, 'auth')
+    assert result['state'] == 'failed' and result['calls'] == 0
+    assert result['error_code'] == 'codex_auth_required'
+    with Store(config, read_only=True) as store:
+        batch = store.db.execute('SELECT model_calls,model_runs_json,state FROM compact_batches').fetchone()
+        assert batch['model_calls'] == 0 and batch['state'] == 'failed'
+        run = json.loads(batch['model_runs_json'])[0]
+        assert run['calls'] == 0 and run['runtime'] == 'app-server'
+        assert store.db.execute('SELECT count(*) FROM narrative_versions').fetchone()[0] == 0
+    assert inbox._read(Path(boundary['_path']))['state'] == 'failed'
+    assert maintenance_status.read(config, 'auth')['retryable']

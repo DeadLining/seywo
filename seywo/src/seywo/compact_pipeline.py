@@ -583,17 +583,18 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                 prompt = instructions()
                 for attempt in range(MAX_REPAIRS + 1):
                     result = transport.complete_compact(model=transport.model, instructions=prompt, payload=payload, max_output_tokens=MAX_OUTPUT_TOKENS)
-                    calls += 1
+                    submitted = result.get("model_calls", 1)
+                    calls += submitted
                     input_chars += len(request_text) + (len(prompt) - len(instructions()))
                     usage = result.get("usage") or {}
                     info = result.get("model_info") or {"backend": "responses", "selected_model": transport.model,
                                                         "selection": "explicit"}
-                    identity = {key: info[key] for key in ("backend", "requested_model", "selected_model", "provider", "selection") if key in info}
+                    identity = {key: info[key] for key in ("backend", "requested_model", "selected_model", "provider", "selection", "runtime", "actual_model", "actual_provider", "reasoning_effort") if key in info}
                     run = next((r for r in model_runs if all(r.get(k) == v for k, v in identity.items())), None)
                     if run is None:
                         run = {**identity, "calls": 0, "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0}
                         model_runs.append(run)
-                    run["calls"] += 1
+                    run["calls"] += submitted
                     for key in ("input_tokens", "output_tokens"):
                         if type(usage.get(key)) is int:
                             run[key] += usage[key]

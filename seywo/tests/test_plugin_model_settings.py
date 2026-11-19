@@ -208,8 +208,9 @@ def test_codex_probe_reports_safe_reason_and_actual_selection(tmp_path, monkeypa
     data = json.loads(asyncio.run(create_plugin_server(tmp_path).call_tool(
         'seywo_model_test', {'backend': 'codex', 'model': 'fixture'}))[0].text)
     assert not data['ok']
-    assert '登录' in data['message']
+    assert '授权' in data['message']
     assert data['model_info']['selected_model'] == 'fixture'
+
 
 
 def test_explicit_codex_model_is_not_silently_discarded_before_initialization(tmp_path):
@@ -279,3 +280,18 @@ def test_invalid_reasoning_does_not_mutate_configuration(tmp_path):
     with pytest.raises(ValueError, match='invalid_reasoning_selection'):
         use_codex(load_config(path), reasoning_effort='extreme')
     assert path.read_bytes() == before
+
+
+def test_account_action_is_explicit_app_only_and_never_initializes_project(tmp_path, monkeypatch):
+    import asyncio
+    from seywo import plugin_ui
+    calls = []
+    monkeypatch.setattr(plugin_ui, 'codex_account_status', lambda **kwargs:
+        calls.append(kwargs) or {'state': 'login_pending', 'auth_url': 'https://auth.openai.com/authorize', 'model_calls': 0})
+    server = create_plugin_server(tmp_path)
+    data = json.loads(asyncio.run(server.call_tool('seywo_codex_account', {'action': 'login'}))[0].text)
+    assert data['state'] == 'login_pending' and data['model_calls'] == 0
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    assert tools['seywo_codex_account'].meta['ui']['visibility'] == ['app']
+    assert calls == [{'action': 'login'}]
+    assert not (tmp_path / '.seywo').exists()

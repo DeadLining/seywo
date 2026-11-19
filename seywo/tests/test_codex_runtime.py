@@ -59,7 +59,7 @@ for raw in sys.stdin:
 
 @pytest.mark.parametrize('body, expected', [
     ('print("Unauthorized: Bearer secret-token",file=sys.stderr);sys.exit(1)', 'codex_auth_required'),
-    ('print("error: unexpected argument --ephemeral",file=sys.stderr);sys.exit(2)', 'codex_cli_incompatible'),
+    ('print("error: unexpected argument --ephemeral",file=sys.stderr);sys.exit(2)', 'codex_app_server_incompatible'),
     ('print("Model missing is not supported",file=sys.stderr);sys.exit(1)', 'codex_model_unavailable'),
     ('time.sleep(3)', 'codex_timeout'),
 ])
@@ -72,76 +72,21 @@ def test_catalog_errors_are_safe_and_bounded(tmp_path, body, expected):
     assert 'secret-token' not in json.dumps(result)
 
 
-def test_exec_classifies_error_event_and_stderr_even_on_nonzero_exit(tmp_path):
-    command = cli(tmp_path, '''
-print(json.dumps({'type':'turn.failed','error':{'message':'Model unavailable is not supported with this account; secret-token'}}))
-print('other warning',file=sys.stderr)
-sys.exit(1)
-''')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path).probe()
-    assert result['error'] == 'codex_model_unavailable', result
-    assert 'secret-token' not in json.dumps(result)
 
-
-def test_exec_uses_only_reasoning_effort_advertised_by_selected_model(tmp_path, monkeypatch):
+def test_app_server_probe_uses_selected_reasoning_effort(tmp_path, monkeypatch):
+    from seywo.codex_transport import CodexTransport
+    from test_codex_transport import configure_fake, requests
     monkeypatch.setattr(codex_transport, 'list_models', lambda **kw: {'models': [
-        {'model': 'fixture', 'reasoning_efforts': ['none'], 'default_reasoning_effort': 'none'}], 'error': None})
-    (tmp_path / 'config.toml').write_text('model="fixture"\nmodel_reasoning_effort="high"\n')
-    command = cli(tmp_path, '''
-from pathlib import Path
-assert 'model_reasoning_effort="low"' not in sys.argv
-assert 'model_reasoning_effort="none"' in sys.argv
-Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('{"ok":true}')
-''')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path).probe()
-    assert result['error'] is None, result
-
-
-def test_timeout_retains_safe_authentication_reason_without_echoing_stderr(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_transport, 'list_models', lambda **kw: {'models': [], 'error': None})
-    command = cli(tmp_path, 'print("Unauthorized secret-token",file=sys.stderr,flush=True);time.sleep(3)')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path, timeout=.2).probe()
-    assert result['error'] == 'codex_auth_required'
-    assert 'secret-token' not in json.dumps(result)
-
-
-def test_low_effort_preferred_when_catalog_advertises_low_and_minimal(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_transport, 'list_models', lambda **kw: {'models': [
-        {'model':'fixture', 'reasoning_efforts':['minimal','low','high']}], 'error': None})
+        {'model': 'fixture', 'reasoning_efforts': ['low', 'high'], 'default_reasoning_effort': 'low'}],
+        'error': None})
     (tmp_path / 'config.toml').write_text('model="fixture"\n')
-    command = cli(tmp_path, '''
-from pathlib import Path
-assert 'model_reasoning_effort="low"' in sys.argv
-Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('{"ok":true}')
-''')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path).probe()
-    assert result['error'] is None, result
-
-
-def test_timeout_does_not_classify_conversation_text_as_provider_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_transport, 'list_models', lambda **kw: {'models': [], 'error': None})
-    command = cli(tmp_path, '''
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'authentication failure, model not supported'}}),flush=True)
-time.sleep(3)
-''')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path, timeout=.2).probe()
-    assert result['error'] == 'codex_timeout', result
-
-
-def test_explicit_reasoning_overrides_automatic_low_and_reaches_exec(tmp_path, monkeypatch):
-    monkeypatch.setattr(codex_transport, 'list_models', lambda **kw: {'models': [
-        {'model': 'fixture', 'reasoning_efforts': ['low', 'high']}], 'error': None})
-    (tmp_path / 'config.toml').write_text('model="fixture"\n')
-    command = cli(tmp_path, '''
-from pathlib import Path
-assert 'model_reasoning_effort="high"' in sys.argv
-assert 'model_reasoning_effort="low"' not in sys.argv
-Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('{"ok":true}')
-''')
-    result = codex_transport.CodexTransport(command=command, home=tmp_path, reasoning_effort='high').probe()
+    command = configure_fake(monkeypatch, tmp_path)
+    result = CodexTransport(command=command, home=tmp_path, reasoning_effort='high').probe()
     assert result['error'] is None, result
     assert result['model_info']['reasoning_effort'] == 'high'
     assert result['model_calls'] == 1
+    turn = next(row for row in requests(tmp_path) if row.get('method') == 'turn/start')
+    assert turn['params']['effort'] == 'high'
 
 
 @pytest.mark.parametrize('catalog,error', [

@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import time
 from uuid import uuid4
@@ -72,6 +73,27 @@ def _after(cursor):
 
 
 def run_chat(config, chat_id):
+    # Upgrade only in the detached worker, before acquiring shared writer leases.
+    # Hooks stay fast and read-only retrieval never implicitly starts migration.
+    try:
+        from .store import SCHEMA_VERSION
+        with Store(config, read_only=True) as store:
+            needs_upgrade = store.db.execute('PRAGMA user_version').fetchone()[0] < SCHEMA_VERSION
+        if needs_upgrade or (Path(config['_path']).parent / 'storage-migration.pending').exists():
+            from .storage_admin import migrate
+            maintenance_status.safe_record(config, chat_id, 'running', error_code='storage_migration_in_progress')
+            migrate(config)
+    except (OSError, ValueError, sqlite3.Error):
+        maintenance_status.safe_record(config, chat_id, 'blocked', error_code='storage_upgrade_failed')
+        return {'state': 'blocked', 'error_code': 'storage_upgrade_failed', 'calls': 0}
+    report = _run_chat_owned(config, chat_id)
+    if report.get('state') in {'done', 'idle'}:
+        from .storage_lifecycle import safe_collect
+        report['storage'] = safe_collect(config)
+    return report
+
+
+def _run_chat_owned(config, chat_id):
     from .locking import lifecycle, file_lock
     with lifecycle(config):
         handle = _lock(config, chat_id)

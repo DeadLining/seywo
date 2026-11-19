@@ -120,4 +120,7 @@ def main(argv=None):
     except (OSError, ValueError) as exc:
         print(f'Seywo could not open the selected project: {exc}', file=sys.stderr)
         return 1
+    finally:
+        from .codex_app_server import close_workers
+        close_workers()
     return 0

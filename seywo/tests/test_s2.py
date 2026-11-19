@@ -346,11 +346,11 @@ def test_old_s1_database_migrates_in_place_without_read_side_writes(tmp_path):
         assert store.status()["schema_version"] == 1
     assert database.read_bytes() == before
     with Store(config) as store:
-        assert store.status()["schema_version"] == 7
+        assert store.status()["schema_version"] == 8
         assert store.db.execute("PRAGMA foreign_key_check").fetchall() == []
         assert store.db.execute("SELECT count(*) FROM projects").fetchone()[0] == 1
     with Store(config) as store:
-        assert store.status()["schema_version"] == 7
+        assert store.status()["schema_version"] == 8
 
 
 def test_schema4_migrates_to_turn_identity_schema5(tmp_path):
@@ -382,7 +382,7 @@ def test_schema4_migrates_to_turn_identity_schema5(tmp_path):
         db.execute("PRAGMA user_version=4")
     config = load_config(state / "config.json")
     with Store(config) as store:
-        assert store.status()["schema_version"] == 7
+        assert store.status()["schema_version"] == 8
         columns = {
             row[1]
             for row in store.db.execute("PRAGMA table_info(source_fragments)")
@@ -392,7 +392,7 @@ def test_schema4_migrates_to_turn_identity_schema5(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='index' AND name='fragments_turn'"
         ).fetchone()
     with Store(config) as store:
-        assert store.status()["schema_version"] == 7
+        assert store.status()["schema_version"] == 8
 
 
 def test_capacity_overrun_is_charged_but_not_accepted(setup):

@@ -73,7 +73,7 @@ def load_config(path: Path) -> dict:
     database = path.parent / data["database"]
     if database.is_symlink():
         raise ValueError("Seywo database must not be a symlink")
-    return {**data, "_path": str(path), "_database": str(database)}
+    return {**data, "_path": str(path.resolve()), "_database": str(database.resolve())}
 
 
 def enable_plugin_hook(config_path: Path) -> dict:
@@ -146,7 +146,22 @@ def _initialize_locked(root: Path, state: Path, *, plugin_hook: bool = False, sk
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     config = load_config(path)
     from .store import Store
-    with Store(config, create=True):
-        pass
+    database = Path(config['_database'])
+    if database.exists():
+        with Store(config):
+            pass
+    else:
+        # Readers may observe config.json before initialization finishes. Publish
+        # the database only after every schema migration is committed and closed.
+        temporary = state / f'.index-{uuid4().hex}.sqlite3'
+        try:
+            with Store({**config, '_database': str(temporary)}, create=True):
+                pass
+            replace_file(temporary, database)
+            from .runtime_platform import sync_directory
+            sync_directory(state)
+        finally:
+            temporary.unlink(missing_ok=True)
+            temporary.with_name(temporary.name + '-journal').unlink(missing_ok=True)
     return {"config": str(path), "project_id": config["project_id"],
             "database": config["_database"], "automatic_maintenance": False}

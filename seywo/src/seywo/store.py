@@ -13,7 +13,7 @@ from .admission import require_human, transcript_meta
 from .projection import VERSION, assistant_body_hash, compact_body_hash, project, search_tokens
 
 APPLICATION_ID = 0x5345574F
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 MAX_LINE_BYTES = 16 * 1024 * 1024
 DDL = """
 CREATE TABLE projects(id TEXT PRIMARY KEY, root TEXT NOT NULL);
@@ -106,7 +106,7 @@ class Store:
                                 (config["project_id"], config["project_root"]))
                 self.db.commit()
             if (self.db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-                    or self.db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4, 5, 6, SCHEMA_VERSION)):
+                    or self.db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION)):
                 raise ValueError("not a supported Seywo database; no legacy fallback")
             owner = self.db.execute("SELECT id,root FROM projects").fetchall()
             if len(owner) != 1 or tuple(owner[0]) != (config["project_id"], config["project_root"]):
@@ -130,6 +130,8 @@ class Store:
                 migrate_storage(self.db)
                 from .progress_schema import migrate as migrate_progress
                 migrate_progress(self.db)
+                from .storage_v8 import migrate as migrate_shared
+                migrate_shared(self.db)
         except BaseException:
             self.db.rollback()
             self.db.close()
@@ -145,6 +147,9 @@ class Store:
             if self._lease is not None:
                 self._lease.__exit__(None, None, None)
                 self._lease = None
+        if getattr(self, '_reclaim_after_close', False):
+            from .storage_lifecycle import safe_collect
+            safe_collect(self.config)
 
     @contextmanager
     def _transaction(self):
@@ -276,8 +281,8 @@ class Store:
                         names = [r[1] for r in self.db.execute("PRAGMA table_info(source_fragments)") if r[1] != "row_id"]
                         values = [snapshot_id if n == "snapshot_id" else changed if n == "payload_id" else "" if n == "safe_text"
                                   else "{}" if n == "projection_json" else saved[n] for n in names]
-                        fragment = self.db.execute("INSERT INTO source_fragments(" + ",".join(names) + ") VALUES(" +
-                                                   ",".join("?" for _ in names) + ")", values).lastrowid
+                        from .storage_v8 import insert_fragment
+                        fragment = insert_fragment(self.db, dict(zip(names, values)))
                         row_ids[position] = fragment
                         inserted += 1
                         self.db.execute("INSERT INTO coverage_ranges VALUES(?,?,?)", (fragment, "excluded_mechanical", "compact_summary_mirror"))
@@ -296,13 +301,13 @@ class Store:
                 else:
                     event_id = digest(f"{segment_id}:{count}")
                     self.db.execute("INSERT OR IGNORE INTO source_events VALUES(?,?,?)", (event_id, segment_id, count))
-                    fragment = self.db.execute("""INSERT INTO source_fragments(
-                        event_id,snapshot_id,byte_start,byte_end,raw_sha256,kind,role,channel,call_id,tool,
-                        occurred_at,safe_text,safe_sha256,turn_id,root_turn_id,turn_seq,projection_json,payload_id)
-                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (event_id, snapshot_id, start, offset, raw_hash, projection["kind"], projection["role"],
-                         projection["channel"], projection["call_id"], projection["tool"], projection["timestamp"], "", digest(safe),
-                         current_turn, current_root, projection["turn_seq"], "{}", pid)).lastrowid
+                    from .storage_v8 import insert_fragment
+                    fragment = insert_fragment(self.db, dict(
+                        event_id=event_id, snapshot_id=snapshot_id, byte_start=start, byte_end=offset,
+                        raw_sha256=raw_hash, kind=projection["kind"], role=projection["role"], channel=projection["channel"],
+                        call_id=projection["call_id"], tool=projection["tool"], occurred_at=projection["timestamp"],
+                        safe_text="", safe_sha256=digest(safe), turn_id=current_turn, root_turn_id=current_root,
+                        turn_seq=projection["turn_seq"], projection_json="{}", payload_id=pid))
                     self.db.execute("INSERT INTO coverage_ranges VALUES(?,?,?)", (fragment, projection["state"], projection["reason"]))
                     inserted += 1
                 row_ids.append(fragment)
@@ -327,7 +332,8 @@ class Store:
                 if self.db.execute("SELECT 1 FROM source_fts WHERE rowid=?", (pid,)).fetchone():
                     continue
                 text = self.db.execute("SELECT seywo_source_text(data) FROM source_payloads WHERE id=?", (pid,)).fetchone()[0]
-                self.db.execute("INSERT OR IGNORE INTO source_fts(rowid,tokens) VALUES(?,?)", (pid, search_tokens(text)))
+                self.db.execute("INSERT OR IGNORE INTO search_documents VALUES(?)", (pid,))
+                self.db.execute("INSERT INTO source_fts(rowid,tokens) VALUES(?,?)", (pid, search_tokens(text)))
         return {"chat_id": chat_id, "segment_id": segment_id, "snapshot_id": snapshot_id,
                 "records": count, "source_sha256": expected_hash, "reused_snapshot": False,
                 "semantic_done": False, "inserted_fragments": inserted}
@@ -375,8 +381,10 @@ class Store:
             return self._import_source(path, chat_id, ordinal, stream=transcript, identity=identity)
 
     def _reindex(self):
-        self.db.execute("DELETE FROM source_fts")
+        self.db.execute("INSERT INTO source_fts(source_fts) VALUES('delete-all')")
+        self.db.execute("DELETE FROM search_documents")
         rows = self.db.execute("SELECT DISTINCT payload_id,safe_text FROM current_sources WHERE safe_text<>'' AND state<>'excluded_mechanical'").fetchall()
+        self.db.executemany("INSERT OR IGNORE INTO search_documents VALUES(?)", ((r[0],) for r in rows))
         self.db.executemany("INSERT INTO source_fts(rowid,tokens) VALUES(?,?)",
                             ((r["payload_id"], search_tokens(r["safe_text"])) for r in rows))
 
@@ -490,8 +498,10 @@ class Store:
             self.db.execute("BEGIN IMMEDIATE")
             self.db.execute("INSERT OR IGNORE INTO tombstones VALUES(?)", (chat_id,))
             self.db.execute("DELETE FROM chats WHERE id=?", (chat_id,))
-            self.db.execute("DELETE FROM source_payloads WHERE NOT EXISTS(SELECT 1 FROM source_fragments f WHERE f.payload_id=source_payloads.id)")
+            from .storage_lifecycle import collect_database
+            collect_database(self.db)
             self._reindex()
             self.db.execute("INSERT INTO source_fts(source_fts) VALUES('optimize')")
+        self._reclaim_after_close = True
         return {"chat_id": chat_id, "deleted": True, "reimport_blocked": True,
                 "original_source_deleted": False}

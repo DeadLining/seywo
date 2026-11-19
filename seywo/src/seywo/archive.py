@@ -20,7 +20,8 @@ from .runtime_platform import replace_file, sync_directory
 from .locking import file_lock
 
 BLOCK_BYTES = 256 * 1024
-MAX_MANIFEST = 1024 * 1024
+MAX_MANIFEST = 4 * 1024 * 1024
+MAX_CHUNKS = 32768  # Preserve the legacy 1 GiB capacity at the new 32 KiB minimum.
 HASH = re.compile(r"[a-f0-9]{64}")
 
 
@@ -142,7 +143,7 @@ def _manifest(handle):
             or type(manifest["seywo_archive"]) is not int or manifest["seywo_archive"] != 1
             or type(manifest["bytes"]) is not int or manifest["bytes"] < 0
             or not isinstance(manifest["sha256"], str) or not HASH.fullmatch(manifest["sha256"])
-            or not isinstance(manifest["chunks"], list) or len(manifest["chunks"]) > 4096
+            or not isinstance(manifest["chunks"], list) or len(manifest["chunks"]) > MAX_CHUNKS
             or any(not isinstance(c, str) or not HASH.fullmatch(c) for c in manifest["chunks"])):
         raise ValueError("invalid archive manifest")
     return manifest
@@ -199,10 +200,8 @@ def _capture(source, target, *, limit=None):
     size, digest, chunks = 0, hashlib.sha256(), []
     with open_source(source) as incoming:
         before = os.fstat(incoming.fileno())
-        while True:
-            data = incoming.read(BLOCK_BYTES)
-            if not data:
-                break
+        from .archive_chunks import chunks as content_chunks
+        for data in content_chunks(incoming):
             size += len(data)
             if limit is not None and size > limit:
                 raise ValueError("snapshot_too_large")
@@ -216,7 +215,7 @@ def _capture(source, target, *, limit=None):
             else:
                 _atomic(block, zlib.compress(data, level=3))
             chunks.append(identity)
-            if len(chunks) > 4096:
+            if len(chunks) > MAX_CHUNKS:
                 raise ValueError("oversized archive manifest")
         after = os.fstat(incoming.fileno())
         if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
@@ -302,3 +301,23 @@ def garbage_collect(inbox):
         for block in unused:
             block.unlink()
         return {"referenced_blocks": len(referenced), "removed_blocks": len(unused)}
+
+
+def reblock(path):
+    """Atomically share rewritten histories while preserving every logical byte."""
+    path = Path(path)
+    with publication(path):
+        with path.open('rb') as handle:
+            old = _manifest(handle)
+        if old is None:
+            return False
+        temporary = path.with_name(f'.reblock-{uuid4().hex}.jsonl')
+        try:
+            new = _capture(path, temporary)
+            if (new['sha256'], new['bytes']) != (old['sha256'], old['bytes']):
+                raise ValueError('archive reblock changed logical source')
+            if old != new:
+                _atomic(path, json.dumps(new, separators=(',', ':')).encode())
+            return old != new
+        finally:
+            temporary.unlink(missing_ok=True)

@@ -1,6 +1,6 @@
 # Seywo Codex 插件
 
-当前版本 **0.4.0**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。
+当前版本 **0.5.1**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。
 
 ## 安装和首次启用
 
@@ -15,27 +15,31 @@ codex plugin add seywo@seywo-local
 
 Windows、macOS、Linux 使用同一个插件和同一个 `uv` 启动入口。机器需先安装 `uv`，并确保 Codex 能在 PATH 中找到它；`uv` 在私有缓存中准备 Python 3.11+ 与固定的 `mcp==1.28.1`，不会修改系统 Python。首次 MCP 连接允许下载依赖；Hook 使用相同缓存并强制离线，不在 compact 回调里下载或安装。没有 `uv` 时需要先完成这一项运行依赖安装，无需手动选择操作系统、Python 路径或 Shell。Node/npm 只用于开发构建。
 
-平台差异集中在 `runtime_platform.py` 与按需加载的 `win32_native.py`：Unix 使用 flock/进程组；Windows 使用 LockFileEx/Job Object，模型进程先挂起、加入 Job 后恢复，防止超时留下子进程。已有数据库、索引、主线和 MCP 工具契约无需迁移。可选 Responses API 的 Windows 凭据通过当前用户 DPAPI 加密，不依赖 Unix 权限位。Windows 工作区 URI、npm Codex shim 和 SQLite 路径由适配层处理。
+平台差异集中在 `runtime_platform.py` 与按需加载的 `win32_native.py`：Unix 使用 flock/进程组；Windows 使用 LockFileEx/Job Object，模型进程先挂起、加入 Job 后恢复，防止超时留下子进程。平台适配不改变主线和 MCP 工具契约；0.5.1 的存储升级另按下文执行无损迁移。可选 Responses API 的 Windows 凭据通过当前用户 DPAPI 加密，不依赖 Unix 权限位。Windows 工作区 URI、npm Codex shim 和 SQLite 路径由适配层处理。
 
 原生验收矩阵位于 `.github/workflows/portable-runtime.yml`，在 Windows、macOS、Linux 运行完整 Python 测试、真实声明入口/离线 Hook 检查、UI 测试和打包检查。本地 macOS 测试不能替代 Windows 原生执行结果。
 
-正常使用时根据当前 Chat 自动定位项目。首次授权启用项目后创建 `.seywo/.gitignore`、配置和索引，并启用插件整理。初始化和打开面板不调用模型，不扫描其他项目。Codex 的四个插件 Hook 仍需在宿主中审核信任；安装代码不会替用户写入信任。升级后若命令或安装路径变化，宿主可能要求重新审核。已有 Chat 的 MCP 连接可能需要重连。
+正常使用时根据当前 Chat 自动定位项目。首次授权启用项目后创建 `.seywo/.gitignore`、配置和索引，并启用插件整理。初始化和打开面板不调用模型，不扫描其他项目。Codex 的五个插件 Hook 仍需在宿主中审核信任；安装代码不会替用户写入信任。升级后若命令或安装路径变化，宿主可能要求重新审核。已有 Chat 的 MCP 连接可能需要重连。
 
 ## 模型与整理
 
 运行时优先使用宿主提供的 Codex 可执行文件，避免误用 PATH 中另一套旧 CLI；缺少宿主路径时才使用 PATH 或已知应用位置。
 
-默认后端是 `codex`：通过安装的 `codex exec --ephemeral` 复用 Codex 已有登录、提供方和全局默认模型。它不是直接读取当前 Chat 临时覆盖的模型；设置显式模型时可覆盖。无需 `GRAPH_LLM_API_KEY`，不读取独立应用的模型模板。自定义 Responses API 作为可选来源，在面板设置中保存；密钥存于项目忽略目录的受限凭据文件，状态接口不返回密钥。
+默认后端 `codex` 使用宿主的 **app-server JSON-RPC**：模型目录、账号状态、测试和压缩使用同一个运行时接口。每个拥有它的插件 MCP 或后台整理进程复用自己的 Worker；每次生成创建独立的临时 Thread，结束后释放，不继承上一次语义上下文，也不生成用户可见的分析 Chat。后台整理是独立进程，不与 MCP 跨进程共享 Worker。
 
-模型设置提供“跟随 Codex 默认模型”和当前 Codex 模型列表。列表通过原生 `model/list` 读取，不创建分析 Chat、不生成模型内容；可选模型的账户权限和提供方兼容性仍由显式测试确认。所选模型可测试并保存到项目配置。运行时只从该模型声明支持的推理强度中选择较低强度，不对所有模型固定传入 `low`。列表失败保留原选择，并提供重新读取入口。
+运行时沿用本机 Codex 的全局提供方和默认模型，项目可以覆盖模型及思考强度；不会读取当前 Chat 临时选择的模型，也不直接调用当前 App Chat 的模型会话。不再调用 `codex exec` 或 `codex login status`，不读取 App 私有账号令牌。仍需要宿主提供的 Codex 可执行文件来运行 `app-server --stdio`，无需独立 Seywo 应用或额外 API Key。
 
-测试失败显示固定的可操作原因，区分登录、模型权限、CLI 接口不兼容、推理配置、限流、网络与超时；不展示原始 stderr、提供方响应或密钥。
+账号由 app-server 管理。缺少账号授权时，面板显示“连接 Codex 账号”，通过官方浏览器授权，再点击“检查授权”并测试。授权检查和模型目录读取不生成模型内容。若 App 的现有授权未向应用服务开放，仍需完成这次授权，不能保证 App 登录态天然共享。可选 Responses API 后端保持原样，密钥仍存于项目忽略目录的受限凭据文件。
 
-整理仍走同一套 `maintain → compact_pipeline`：规则过滤工具调用/工具响应和内部指令；输入多轮用户/AI正文及短历史状态；模型只输出紧凑标题、结构操作与定位索引；程序校验后更新主线、支线、当前重点、合并节点和来源。正常有界批次调用一次；超长输入按既有容量规则分批，不承诺任意长 Chat 仅调用一次。切换到默认 Codex 后端时使用 `seywo-compact-v1`，不修改已有来源和主线内容。
+模型列表通过 `model/list` 分页读取；生成复用最多 60 秒的目录缓存，显式刷新绕过缓存，Codex 配置变化重建 Worker。思考强度仅从目标模型声明支持的档位选择；手选档位无法确认支持时，在生成前返回原因。保存设置、检索、打开、初始化和账号操作均不调用模型；用户点击测试才额外生成一次。
 
-子任务在临时空目录、只读沙箱中运行，关闭 Hook、插件、MCP、工具、网络搜索和记忆发现，结束清理临时文件；不保存新的分析 Chat。当前 CLI 不提供与 Responses 完全等价的输出 token 硬上限，使用 JSON Schema、紧凑输出契约、超时和输出文件大小校验。
+整理仍走 `maintain → compact_pipeline`：规则移除工具调用、响应和内部指令；模型接收用户/AI正文及短历史状态，输出紧凑标题、结构操作与定位索引。Schema 随 `turn/start.outputSchema` 传入一次，不写临时 Schema 或输出文件。结构、语义校验及有界 repair 继续由 compact 管线负责；失败可重试，原有来源、版本和发布幂等性保持既有规则。超长输入仍按容量分批，不能承诺任意长度只调用一次。
 
-真实实测：两轮输入合并为一个节点、一次模型调用，输入 5,085 token / 输出 139 token。原生 Codex 仍有约 4k token 的基础上下文成本，不能将它描述成几十 token 的请求。
+Worker 在临时空目录、只读沙箱中运行，关闭 Hook、插件、MCP、全局技能发现、记忆、Shell、图片、目标管理及搜索入口。宿主仍可能附带 `request_user_input` 定义，较旧版本还会附带 `apply_patch`，任何工具调用都会拒绝本次结果。超时中断并清理进程树；协议损坏后下一次请求重建 Worker，运行时不暗中重放生成请求。用户可见错误为固定原因，区分授权、协议兼容、模型权限、限流、网络、中断和超时，不返回原始 stderr 或凭据。
+
+app-server 没有与 Responses 完全等价的输出 Token 硬上限；Seywo 使用紧凑 Schema、领域校验、超时、单条消息/累计字节上限。当前机器两次真实连通测试使用 `crs / gpt-6.1-sol / low`，输入均为 **5,728 token**，输出分别 **15 / 29 token**，耗时 **4.832 / 9.181 秒**。这是该提供方和宿主版本下的探测成本，不能等同于实际 compact 或账号模式结果。本地假提供方另行验证请求中没有全局技能目录且不持久化 Thread；字符数不等同于模型 Token 数。
+
+验证命令：`pytest -q seywo/tests`、`node --test seywo/ui/panel.test.mjs`。安装 Codex 的主机可额外运行 `python3 scripts/verify-seywo-app-server.py`，检查真实宿主协议与本地假提供方的隔离契约，不消耗真实模型额度。浏览器 OAuth 全流程与原生 Windows/macOS/Linux 发布验收需分别记录。
 
 ## 面板、检索和存储
 
@@ -46,3 +50,18 @@ Compact 执行表按 Chat 最多保留最近一次成功和最近一次失败，
 安装后实际桌面面板和用户真实 Compact 属于宿主验收，须与自动化、隔离项目的模型验收分别记录。
 
 模型设置中的“思考强度”随当前模型更新可选档位，默认“自动（优先低消耗）”。手选档位同时用于测试模型和后续 Compact；保存自动会清除强度覆盖。模型目录读取和强度选择不调用模型生成，手选档位无法确认支持时会在生成前提示。
+
+## 0.5.1 存储生命周期
+
+来源出现位置和引用 ID 保持稳定，相同描述与任务正文使用共享压缩存储；历史任务仍可逐字回读。全文索引保留用户、AI 和工具内容的原有检索语义，从现有压缩正文派生检索文本。原始归档按内容分块，无损复用多次 compact 中重复的内部历史。
+
+成功发布或明确无变化后，统一回收没有数据库或失败重试引用的临时来源、孤立正文和孤立块；失败任务所需的来源保留。活跃写入存在时推迟回收。只有实际空闲页达到阈值才收缩数据库，不在每次 compact 执行全库 VACUUM。回收不调用模型，失败只提示存储维护状态，不撤销已发布主线，下次成功整理后重试。
+
+旧项目第一次后台整理会先建立压缩回滚备份，再进行有锁、可恢复的 schema 8 升级；该一次性迁移可能耗时数分钟。升级失败保留迁移日志和已有备份，面板可重试继续。只读检索不会触发迁移。也可在选定项目显式执行：
+
+```sh
+seywo/bin/seywo --config "$PWD/.seywo/config.json" storage migrate
+seywo/bin/seywo --config "$PWD/.seywo/config.json" storage verify
+```
+
+每次成功升级保留一份 `.seywo/maintenance/storage-migration/*.sqlite3.gz` 回滚映像；重复运行当前版本不会重复备份。备份计入实际磁盘占用，但与活跃数据分别报告，不通过删除备份美化压缩率。原始 Codex 对话和共享数据库不在回收范围；可检索历史本身仍会随真实新增对话增长。

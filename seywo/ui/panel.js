@@ -22,7 +22,8 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
     let maintenanceTimer, maintenanceUntil = 0, maintenanceSubmitting = false, maintenanceProblem = '';
     let maintenanceCompletionReloaded = false;
     const maintenanceActive = () => ['queued', 'running'].includes(maintenanceStatus?.state) || Boolean(maintenanceStatus?.waiting_for_turn);
-    const maintenanceVisible = () => Boolean(maintenanceProblem) || ['queued', 'running', 'failed', 'partial', 'blocked', 'interrupted'].includes(maintenanceStatus?.state);
+    const storageFailed = () => maintenanceStatus?.storage?.state === 'failed';
+    const maintenanceVisible = () => storageFailed() || Boolean(maintenanceProblem) || ['queued', 'running', 'failed', 'partial', 'blocked', 'interrupted'].includes(maintenanceStatus?.state);
     function clearMaintenanceTimer() {
         clearTimeout(maintenanceTimer); maintenanceTimer = undefined;
     }
@@ -57,7 +58,9 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         maintenanceBox.append(el('span', maintenanceStatus?.waiting_for_turn ? '…' : ['failed', 'partial', 'blocked', 'interrupted'].includes(statusState) ? '!' : '…', 'maintenance-mark'));
         const copy = el('div', undefined, 'maintenance-copy');
         if (!state.chat) copy.append(el('small', '当前对话', 'muted'));
-        copy.append(el('span', maintenanceStatus?.title || maintenanceLabels[maintenanceStatus?.state] || '整理状态暂不可用'));
+        const onlyStorage = storageFailed() && !['queued', 'running', 'failed', 'partial', 'blocked', 'interrupted'].includes(statusState);
+        copy.append(el('span', onlyStorage ? '存储回收暂未完成' : maintenanceStatus?.title || maintenanceLabels[maintenanceStatus?.state] || '整理状态暂不可用'));
+        if (storageFailed()) copy.append(el('small', '已发布主线正常可用；存储回收会在下次整理完成后重试。'));
         if (maintenanceStatus?.message) copy.append(el('small', maintenanceStatus.message));
         if (maintenanceStatus?.stale_view || ['failed', 'partial', 'blocked', 'interrupted'].includes(maintenanceStatus?.state))
             copy.append(el('small', '整理成功后会更新主线。'));
@@ -155,7 +158,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         const sourceLabel = el('label', '模型来源'); sourceLabel.append(source);
         const fields = el('div', undefined, 'model-settings-fields'); fields.dataset.apiFields = '';
         for (const [label, input] of [['端点', endpoint], ['模型', model], ['API KEY', key]]) { const l = el('label', label); l.append(input); fields.append(l); }
-        const nativeInfo = el('p', '沿用本机 Codex 的提供方和登录信息，模型和思考强度可单独设置。', 'muted');
+        const nativeInfo = el('p', '通过 Codex 应用服务整理对话，沿用本机提供方配置。模型和思考强度可单独设置。', 'muted');
         const nativeFields = el('div', undefined, 'model-settings-fields');
         const nativeModel = el('select'); nativeModel.dataset.codexModel = '';
         const inherit = el('option', '跟随 Codex 默认模型'); inherit.value = 'codex-default'; nativeModel.append(inherit);
@@ -238,15 +241,36 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
             if (native && !catalogLoaded) void loadModels();
             endpoint.required = model.required = !native;
         };
-        source.onchange = showFields; showFields();
+        source.onchange = () => { showFields(); login.hidden = accountRefresh.hidden = true; }; showFields();
         const actionRow = el('div', undefined, 'model-settings-actions');
         const test = button('测试模型', undefined); test.dataset.modelTest = '';
         const save = button('保存配置', undefined); save.dataset.modelSave = ''; save.type = 'submit';
-        actionRow.append(test, save); form.append(sourceLabel, nativeInfo, nativeFields, fields, actionRow);
+        const login = button('连接 Codex 账号', undefined); login.dataset.codexLogin = ''; login.hidden = true;
+        const accountRefresh = button('检查授权', undefined); accountRefresh.dataset.codexAccountRefresh = ''; accountRefresh.hidden = true;
+        actionRow.append(test, save, login, accountRefresh); form.append(sourceLabel, nativeInfo, nativeFields, fields, actionRow);
         const status = el('p', data.backend === 'codex'
-            ? (data.configured ? '正在使用 Codex。' : '请先安装并登录 Codex 命令行。')
+            ? (data.configured ? '正在使用 Codex。' : '请更新并重新打开 Codex App。')
             : (data.configured ? (data.credential_configured ? '已配置，可供 Compact 使用。' : '还没有 API KEY。') : '尚未配置模型。'), 'muted');
         status.dataset.modelStatus = ''; settingsBody.replaceChildren(status, form);
+        const accountAction = async action => {
+            login.disabled = accountRefresh.disabled = true;
+            try {
+                const result = await actions.codexAccount?.(action);
+                if (result?.state === 'login_pending') {
+                    await actions.openLink?.(result.auth_url);
+                    accountRefresh.hidden = false;
+                    status.textContent = '请在浏览器中完成 Codex 授权，然后点击“检查授权”。';
+                } else if (result?.state === 'ready') {
+                    login.hidden = accountRefresh.hidden = true;
+                    catalogLoaded = false;
+                    await loadModels();
+                    status.textContent = 'Codex 账号已连接，可以测试模型。';
+                } else status.textContent = result?.message || '尚未完成授权，请在浏览器中完成后重新检查。';
+            } catch { status.textContent = '无法连接账号授权服务，请稍后重试。'; }
+            finally { login.disabled = accountRefresh.disabled = false; }
+        };
+        login.onclick = () => accountAction('login');
+        accountRefresh.onclick = () => accountAction('status');
         const run = async kind => {
             test.disabled = save.disabled = source.disabled = nativeModel.disabled = nativeReasoning.disabled = true;
             try {
@@ -256,6 +280,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                 const result = kind === 'test' ? await actions.modelTest?.(args) : await actions.modelSave?.(args);
                 if (!result) throw Error('unavailable');
                 if (kind === 'test') {
+                    login.hidden = accountRefresh.hidden = !(native && result.error === 'codex_auth_required' && actions.codexAccount);
                     const selected = result.model_info?.selected_model;
                     const effort = result.model_info?.reasoning_effort;
                     status.textContent = result.ok ? `连接成功${selected ? ' · ' + selected : ''}${effort ? ' · 思考强度：' + (effortLabels[effort] || effort) : ''}，本次仅调用 1 次模型。` : (result.message || '连接失败，请检查模型配置或 Codex 登录状态。');

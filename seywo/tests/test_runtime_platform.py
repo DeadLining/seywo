@@ -156,3 +156,19 @@ def test_atomic_publication_preserves_utf8_and_releases_handles(tmp_path):
     replace_file(incoming, target)
     assert target.read_bytes() == '中文'.encode('utf-8') and not incoming.exists()
     target.unlink()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX process-group permission handling')
+@pytest.mark.parametrize('exited', [True, False])
+def test_process_group_permission_error_is_only_ignored_after_exit(monkeypatch, exited):
+    from types import SimpleNamespace
+    scope = ProcessScope()
+    scope.process = SimpleNamespace(pid=123456789, returncode=0 if exited else None)
+    def denied(*args):
+        raise PermissionError('fixture')
+    monkeypatch.setattr(os, 'killpg', denied)
+    if exited:
+        scope.terminate()
+    else:
+        with pytest.raises(PermissionError):
+            scope.terminate()

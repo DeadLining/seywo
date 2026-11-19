@@ -152,6 +152,10 @@ class ProcessScope:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                code = self.process.poll() if isinstance(self.process, subprocess.Popen) else self.process.returncode
+                if code is None:
+                    raise
 
     def __exit__(self, *exc):
         self.terminate()

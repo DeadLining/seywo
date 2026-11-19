@@ -1,5 +1,6 @@
-"""Native Codex execution is isolated, bounded and reuses the Compact contract."""
+"""Codex app-server transport keeps semantic calls isolated and bounded."""
 import json
+from pathlib import Path
 import sys
 
 import pytest
@@ -21,53 +22,108 @@ def test_plugin_enable_selects_codex_and_preserves_existing_provider(tmp_path):
     assert read_provider(saved)['backend'] == 'codex'
 
 
-def fake_cli(tmp_path, body):
-    script = tmp_path / 'fake-codex.py'
-    script.write_text('import json,sys,time\nfrom pathlib import Path\nif sys.argv[1:2] == ["app-server"]: sys.exit(0)\n' + body)
+def fake_app_server(tmp_path, *, mode='ok', model='fixture'):
+    script = tmp_path / 'fake-codex-app-server.py'
+    script.write_text(r'''
+import json, os, sys, time
+mode = os.environ.get('FAKE_APP_SERVER_MODE', 'ok')
+model = os.environ.get('FAKE_APP_SERVER_MODEL', 'fixture')
+thread_id = 'thread-fixture'
+turn_id = 'turn-fixture'
+log = os.environ.get('FAKE_APP_SERVER_LOG')
+def emit(value):
+    if log:
+        with open(log, 'a', encoding='utf-8') as f: f.write(json.dumps(value) + '\n')
+    print(json.dumps(value), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    emit({'seen': request})
+    method = request.get('method')
+    rid = request.get('id')
+    if method == 'initialize':
+        emit({'id': rid, 'result': {'userAgent': 'fake'}})
+    elif method == 'model/list':
+        emit({'id': rid, 'result': {'data': [{'model': model, 'displayName': model, 'isDefault': True,
+            'supportedReasoningEfforts': [{'reasoningEffort': 'low'}, {'reasoningEffort': 'high'}],
+            'defaultReasoningEffort': 'low'}], 'nextCursor': None}})
+    elif method == 'account/read':
+        print(json.dumps({'id': rid, 'result': {'requiresOpenaiAuth': False}}), flush=True)
+    elif method == 'thread/start':
+        if mode == 'auth':
+            emit({'id': rid, 'error': {'code': -32000, 'message': 'Unauthorized secret-token'}})
+        else:
+            emit({'id': rid, 'result': {'thread': {'id': thread_id}}})
+    elif method == 'turn/start':
+        if mode == 'hang':
+            emit({'id': rid, 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
+            time.sleep(30)
+            continue
+        emit({'id': rid, 'result': {'turn': {'id': turn_id, 'status': 'inProgress'}}})
+        if mode == 'tool':
+            emit({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,
+                'item': {'id': 'tool-1', 'type': 'commandExecution', 'command': 'cat secret'}}})
+            continue
+        input_text = request.get('params', {}).get('input', [{}])[0].get('text', '')
+        text = '{"ok":true}' if 'ok' in input_text and 'segments' not in input_text else '{"segments":[],"changes":[],"current":{"goal_index":null,"priority_indexes":[]}}'
+        emit({'method': 'item/agentMessage/delta', 'params': {'threadId': thread_id, 'turnId': turn_id,
+            'itemId': 'agent-1', 'delta': text}})
+        emit({'method': 'item/completed', 'params': {'threadId': thread_id, 'turnId': turn_id,
+            'item': {'id': 'agent-1', 'type': 'agentMessage', 'text': text}}})
+        emit({'method': 'turn/completed', 'params': {'threadId': thread_id,
+            'turn': {'id': turn_id, 'status': 'completed', 'items': []}}})
+    elif method == 'thread/unsubscribe':
+        print(json.dumps({'id': rid, 'result': {}}), flush=True)
+    elif method == 'turn/interrupt':
+        emit({'id': rid, 'result': {}})
+''', encoding='utf-8')
     return [sys.executable, str(script)]
 
 
-def test_codex_exec_uses_stdin_schema_and_disables_hooks_and_tools(tmp_path):
+def configure_fake(monkeypatch, tmp_path, *, mode='ok', model='fixture'):
+    monkeypatch.setenv('FAKE_APP_SERVER_MODE', mode)
+    monkeypatch.setenv('FAKE_APP_SERVER_MODEL', model)
+    monkeypatch.setenv('FAKE_APP_SERVER_LOG', str(tmp_path / 'app-server.log'))
+    return fake_app_server(tmp_path, mode=mode, model=model)
+
+
+def requests(tmp_path):
+    path = tmp_path / 'app-server.log'
+    return [row['seen'] for row in (json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()) if 'seen' in row] if path.exists() else []
+
+
+def test_codex_app_server_uses_structured_turn_and_disables_discovery(tmp_path, monkeypatch):
     from seywo.codex_transport import CodexTransport
-    cli = fake_cli(tmp_path, '''
-args=sys.argv[1:]
-prompt=sys.stdin.read()
-assert '--ephemeral' in args and '--output-schema' in args
-assert '--sandbox' in args and args[args.index('--sandbox')+1]=='read-only'
-assert 'hooks' in args and 'plugins' in args and 'shell_tool' in args
-assert 'mcp_servers.test.enabled=false' in args
-assert 'compact-fixture' in prompt and 'toolSecret' not in prompt
-schema=json.loads(Path(args[args.index('--output-schema')+1]).read_text())
-assert 'segments' in schema['properties']
-Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'segments': [], 'changes': [], 'focus_segment': None}))
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':120,'cached_input_tokens':40,'output_tokens':30}}))
-''')
+    cli = configure_fake(monkeypatch, tmp_path)
     home = tmp_path / 'codex-home'
     home.mkdir()
     (home / 'config.toml').write_text('[mcp_servers.test]\ncommand="test"\n')
     result = CodexTransport(command=cli, home=home).complete_compact(
-        model='codex-default', instructions='compact-fixture', payload={'turns': []}, max_output_tokens=768)
+        model='codex-default', instructions='compact-fixture', payload={'turns': [], 'toolSecret': 'drop'}, max_output_tokens=768)
     assert result['finish'] == 'complete', result
-    assert result['usage'] == {'input_tokens': 120, 'output_tokens': 30}
     assert result['output']['changes'] == []
-    assert sorted(p.name for p in tmp_path.iterdir()) == ['codex-home', 'fake-codex.py']
+    seen = requests(tmp_path)
+    start = next(row for row in seen if row.get('method') == 'thread/start')
+    turn = next(row for row in seen if row.get('method') == 'turn/start')
+    assert start['params']['ephemeral'] is True
+    assert start['params']['sandbox'] == 'read-only'
+    assert 'runtimeWorkspaceRoots' not in start['params']
+    assert turn['params']['outputSchema']['properties']['segments']['type'] == 'array'
+    assert 'toolSecret' in turn['params']['input'][0]['text']
+    assert all('exec' not in str(row) for row in seen)
 
 
-@pytest.mark.parametrize('body,error', [
-    ('print("provider secret-token",file=sys.stderr);sys.exit(1)', 'codex_execution_failed'),
-    ("Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('invalid')", 'invalid_json'),
-    ('time.sleep(10)', 'codex_timeout'),
-])
-def test_codex_failure_does_not_publish_output_or_echo_process_text(tmp_path, body, error):
+@pytest.mark.parametrize('mode,error', [('auth', 'codex_auth_required'), ('tool', 'codex_unexpected_tool_use'), ('hang', 'codex_timeout')])
+def test_codex_app_server_failure_does_not_publish_or_echo_process_text(tmp_path, monkeypatch, mode, error):
     from seywo.codex_transport import CodexTransport
-    result = CodexTransport(command=fake_cli(tmp_path, body), timeout=0.1).complete_compact(
+    cli = configure_fake(monkeypatch, tmp_path, mode=mode)
+    result = CodexTransport(command=cli, home=tmp_path, timeout=.1).complete_compact(
         model='codex-default', instructions='test', payload={}, max_output_tokens=768)
-    assert result['error'] == error
+    assert result['error'] == error, result
     assert result['output'] is None
     assert 'secret-token' not in json.dumps(result)
 
 
-@pytest.mark.parametrize("effort", ["auto", "high"])
+@pytest.mark.parametrize('effort', ['auto', 'high'])
 def test_maintainer_routes_compact_through_codex_without_provider_credentials(tmp_path, monkeypatch, effort):
     from seywo import inbox, maintain
     from test_compact_maintain import CompactTransport, make_source
@@ -93,29 +149,22 @@ def test_maintainer_routes_compact_through_codex_without_provider_credentials(tm
     assert runtime_options[0]['reasoning_effort'] == effort
 
 
-def test_native_model_is_frozen_and_auditable_without_duplicate_schema_prompt(tmp_path):
+def test_native_model_is_frozen_and_auditable_without_duplicate_schema_prompt(tmp_path, monkeypatch):
     from seywo.codex_transport import CodexTransport
     home = tmp_path / 'home'
     home.mkdir()
     (home / 'config.toml').write_text('model="configured-model"\nmodel_provider="fixture-provider"\n')
-    cli = fake_cli(tmp_path, '''
-args=sys.argv[1:]
-assert args[args.index('--model')+1]=='configured-model'
-assert 'model_provider="fixture-provider"' in args
-prompt=sys.stdin.read()
-assert 'additionalProperties' not in prompt
-Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'segments': [], 'changes': [], 'focus_segment': None, 'current': {'goal_indexes': [], 'question_indexes': [], 'next_step_indexes': []}}))
-print(json.dumps({'type':'turn.completed','usage':{'input_tokens':120,'cached_input_tokens':40,'output_tokens':30}}))
-''')
+    cli = configure_fake(monkeypatch, tmp_path, model='configured-model')
     result = CodexTransport(command=cli, home=home).complete_compact(
         model='codex-default', instructions='rules', payload={'turns': []})
     assert result['error'] is None, result
-    assert result['model_info'] == {'backend': 'codex', 'requested_model': 'codex-default',
-        'selected_model': 'configured-model', 'provider': 'fixture-provider', 'selection': 'config'}
-    assert result['cached_input_tokens'] == 40
+    assert result['model_info']['selected_model'] == 'configured-model'
+    assert result['model_info']['provider'] == 'fixture-provider'
+    turn = next(row for row in requests(tmp_path) if row.get('method') == 'turn/start')
+    assert 'additionalProperties' not in turn['params']['input'][0]['text']
 
 
-def test_model_subprocess_excludes_skill_catalog_without_editing_user_configuration(tmp_path):
+def test_model_worker_does_not_edit_user_configuration(tmp_path, monkeypatch):
     from seywo.codex_transport import CodexTransport
     home = tmp_path / 'home'
     skill = home / 'skills/private-skill/SKILL.md'
@@ -123,14 +172,7 @@ def test_model_subprocess_excludes_skill_catalog_without_editing_user_configurat
     skill.write_text('private skill')
     config = home / 'config.toml'
     config.write_text('model="fixture"\n')
-    cli = fake_cli(tmp_path, '''
-args=sys.argv[1:]
-overrides=[args[i+1] for i,a in enumerate(args[:-1]) if a=='-c']
-skills=next(v for v in overrides if v.startswith('skills.config='))
-assert 'private-skill' in skills and 'SKILL.md' in skills and 'enabled=false' in skills
-assert 'view_image' in args and 'image_generation' in args
-Path(args[args.index('--output-last-message')+1]).write_text('{}')
-''')
+    cli = configure_fake(monkeypatch, tmp_path)
     result = CodexTransport(command=cli, home=home)._execute('rules', {}, {'type': 'object'})
     assert result['error'] is None, result
     assert config.read_text() == 'model="fixture"\n'

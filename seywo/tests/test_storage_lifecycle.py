@@ -307,7 +307,7 @@ def test_migration_resumes_after_every_durable_boundary(
         Store(cfg)
     result = storage_admin.migrate(cfg)
     assert result["state"] == "migrated"
-    assert result["schema"] == 7
+    assert result["schema"] == 8
     assert backups[0].read_bytes() == backup
     assert not raw.exists()
     assert not (root / ".seywo" / storage_admin.GUARD).exists()
@@ -576,19 +576,34 @@ def test_native_turn_identity_deduplicates_copied_prefix_but_retains_new_turn(pr
         assert len(users) == 1 and users[0]["turn_id"] == "t2"
 
 
-def test_schema6_cursor_is_seeded_before_removing_the_cache(project):
+def test_schema6_cursor_is_seeded_before_removing_the_cache(project, monkeypatch):
     import sqlite3
     from seywo.narrative import Narrative, empty
     from seywo.delta_pipeline import run_delta
 
     root, cfg = project
     raw = source(root, root / "raw.jsonl", [message("already consumed")])
-    with Store(cfg) as store:
-        store.import_compact(raw, "chat", "native")
-        with store.db:
-            Narrative(store)._write(
-                "chat", 1, 0, empty(), "[]", origin="model_delta_v1"
-            )
+    # Build an actual pre-v8 database; lowering only user_version on a v8
+    # physical layout does not rehearse a schema-6 upgrade.
+    from seywo import store as store_module, storage_v8
+    with monkeypatch.context() as old_runtime:
+        old_runtime.setattr(store_module, "SCHEMA_VERSION", 7)
+        old_runtime.setattr(storage_v8, "migrate", lambda db: None)
+        def old_insert(db, values):
+            names = list(values)
+            return db.execute("INSERT INTO source_fragments(" + ",".join(names) + ") VALUES(" + ",".join("?" for _ in names) + ")", list(values.values())).lastrowid
+        old_runtime.setattr(storage_v8, "insert_fragment", old_insert)
+        Path(cfg["_database"]).unlink()
+        with Store(cfg, create=True) as store:
+            # Only this fixture runs the current importer against the prior
+            # schema; its compatibility membership table is not part of v7.
+            store.db.execute('CREATE TABLE search_documents(id INTEGER PRIMARY KEY)')
+            store.import_compact(raw, "chat", "native")
+            store.db.execute('DROP TABLE search_documents')
+            with store.db:
+                Narrative(store)._write(
+                    "chat", 1, 0, empty(), "[]", origin="model_delta_v1"
+                )
     folder = root / ".seywo/maintain"
     folder.mkdir()
     cache = folder / "chat.json"
@@ -688,3 +703,34 @@ def test_delta_planning_decodes_only_fresh_eligible_bodies(project):
         )
         assert _fresh_rows(store, "chat", [1, 3]) == []
         assert decoded == ["fresh dialogue"]
+
+
+def test_maintenance_upgrades_legacy_storage_before_worker_and_preserves_retry(project, monkeypatch):
+    from seywo import maintain
+    root, cfg = project
+    legacy_five(root, cfg)
+    def worker(config, chat):
+        with Store(config, read_only=True) as store:
+            assert store.db.execute('PRAGMA user_version').fetchone()[0] == 8
+            assert current(store) == ['preserved evidence']
+        return {'state': 'done', 'calls': 0}
+    monkeypatch.setattr(maintain, '_run_chat_owned', worker)
+    assert maintain.run_chat(cfg, 'chat')['state'] == 'done'
+    assert len(list((root / '.seywo/maintenance/storage-migration').glob('*.sqlite3.gz'))) == 1
+    assert maintain.run_chat(cfg, 'chat')['state'] == 'done'
+    assert len(list((root / '.seywo/maintenance/storage-migration').glob('*.sqlite3.gz'))) == 1
+
+
+def test_maintenance_upgrade_failure_is_visible_and_does_not_run_model(project, monkeypatch):
+    from seywo import maintain, maintenance_status
+    root, cfg = project
+    legacy_five(root, cfg)
+    def failed(*args, **kwargs):
+        raise OSError('private filesystem detail')
+    monkeypatch.setattr(storage_admin, 'migrate', failed)
+    monkeypatch.setattr(maintain, '_run_chat_owned', lambda *args: pytest.fail('worker cannot run before upgrade'))
+    report = maintain.run_chat(cfg, 'chat')
+    assert report['state'] == 'blocked' and report['calls'] == 0
+    assert report['error_code'] == 'storage_upgrade_failed'
+    assert 'private filesystem detail' not in json.dumps(report)
+    assert maintenance_status.read({**cfg, 'hook': {'enabled': True}}, 'chat')['state'] == 'blocked'

@@ -24,7 +24,9 @@ FAILURES = {'partial', 'failed', 'blocked', 'interrupted'}
 REASONS = {
     **{code: ERROR_MESSAGES[code] for code in (
         'codex_cli_incompatible', 'codex_auth_required', 'codex_model_unavailable',
-        'codex_reasoning_unsupported', 'codex_rate_limited', 'codex_network_error', 'codex_config_invalid')},
+        'codex_reasoning_unsupported', 'codex_rate_limited', 'codex_network_error', 'codex_config_invalid',
+        'codex_app_server_incompatible', 'codex_app_server_invalid', 'codex_worker_broken',
+        'codex_worker_busy', 'codex_worker_closed', 'codex_interrupted', 'codex_input_limit')},
     'compact_new_phase_requires_user_objective': '新阶段缺少本段用户目标的有效定位，模型修正后仍未通过校验。可以重试整理。',
     'provider_not_configured': '模型尚未配置，请检查模型设置。',
     'missing_provider_credential': '模型凭据不可用，请检查模型设置。',
@@ -34,6 +36,7 @@ REASONS = {
     'maintainer_exception': '后台整理遇到异常，可以重试。',
     'config_invalid': '项目记忆配置无法读取，请检查项目配置后重试。',
     'queue_write_failed': '未能保存本次整理任务，请检查磁盘空间和写入权限。',
+    'storage_upgrade_failed': '项目记忆存储升级未完成，原始数据保留，已生成的回滚备份不会删除。可重试整理以继续升级。',
     'storage_migration_in_progress': '项目记忆正在迁移，完成后可重试。',
     'codex_requires_compact_pipeline': '整理配置不兼容，请重新启用项目记忆。',
     'context_ceiling': '本次整理达到上下文限制，尚未完成。',
@@ -180,6 +183,18 @@ def safe_record(config, chat_id, state, **kwargs):
         return False
 
 
+def _migration_active(config):
+    path = _config_path(config).parent / 'storage-migration.lock'
+    from .locking import owns_exclusive
+    if owns_exclusive(path):
+        return True
+    try:
+        with FileLease(path, create=False) as lease:
+            return not lease.acquire(exclusive=True, blocking=False)
+    except OSError:
+        return False
+
+
 def read(config, chat_id, *, db=None):
     path = _path(config, chat_id)
     data = _load(path)
@@ -198,6 +213,9 @@ def read(config, chat_id, *, db=None):
     if (_config_path(config).parent / 'disabled').exists() or (
             isinstance(config, dict) and (config.get('hook') or {}).get('enabled') is not True):
         state = 'disabled'
+    elif ((_config_path(config).parent / 'storage-migration.pending').exists()
+          or (state in {'queued', 'running'} and code == 'storage_migration_in_progress')):
+        state, code = ('running', 'storage_migration_in_progress') if _migration_active(config) else ('blocked', 'storage_upgrade_failed')
     elif state in {'queued', 'running'}:
         alive = _alive(config, chat_id)
         if alive:
@@ -208,10 +226,13 @@ def read(config, chat_id, *, db=None):
     if state in FAILURES and not message:
         message = REASONS['pending_job' if state == 'partial' else 'operation_failed']
     if state == 'running':
-        message = '完成后会更新主线，你可以继续对话。'
+        message = ('正在无损升级存储，完成后会继续整理；大型项目首次升级可能需要数分钟。'
+                   if code == 'storage_migration_in_progress' else '完成后会更新主线，你可以继续对话。')
     elif state == 'queued':
         message = '任务已保存，正在等待后台整理。'
-    return {'chat_id': chat_id, 'state': state, 'title': TITLES[state], 'message': message,
+    from .storage_lifecycle import status as storage_status
+    return {'storage': storage_status(config if isinstance(config, dict) else {'_path': str(config)}),
+            'chat_id': chat_id, 'state': state, 'title': '正在升级项目记忆' if state == 'running' and code == 'storage_migration_in_progress' else TITLES[state], 'message': message,
             'retryable': state in FAILURES, 'waiting_for_turn': state == 'partial' and code == 'awaiting_turn_complete', 'updated_at': _stamp(data.get('updated_at')),
             'last_success_at': _stamp(data.get('last_success_at')),
             'published_version': data.get('published_version') if type(data.get('published_version')) is int else None,

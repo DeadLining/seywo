@@ -28,6 +28,8 @@ def register(db):
     db.create_function("seywo_source_text", 1, lambda data: unpack(data)["text"])
     db.create_function("seywo_source_projection", 4, projection)
     document_store.register(db)
+    from .storage_v8 import register as register_v8
+    register_v8(db)
 
 
 def payload(db, text, projection):

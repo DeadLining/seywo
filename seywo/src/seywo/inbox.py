@@ -153,7 +153,7 @@ def _prune(folder: Path) -> None:
     files = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in files[KEEP_RECORDS:]:
         item = _read(stale)
-        if item and item.get("state") in {"pending", "claimed"}:
+        if item and item.get("state") in {"pending", "claimed", "failed"}:
             continue
         stale.unlink(missing_ok=True)
 
@@ -320,7 +320,8 @@ def _prune_live(config, chat_id: str, referenced: set[str]) -> int:
     folder = root(config) / "live"
     if not folder.is_dir():
         return 0
-    files = sorted((p for p in folder.glob(f"{chat_id}*.jsonl") if str(p) not in referenced),
+    referenced = {str(Path(p).resolve()) for p in referenced}
+    files = sorted((p for p in folder.glob(f"{chat_id}*.jsonl") if str(p.resolve()) not in referenced),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     count = 0
     for stale in files[KEEP_SNAPSHOTS:]:

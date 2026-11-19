@@ -9,7 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-from seywo_protocol import PipeReader
+from seywo_protocol import PipeReader, wait_server
 import subprocess
 import tempfile
 import time
@@ -79,15 +79,14 @@ def verify(project, host_chat=None, host_binary="codex"):
             plugin_hooks = [hook for entry in hooks['data'] for hook in entry['hooks']
                             if hook.get('pluginId') == 'seywo@seywo-local']
             assert len(plugin_hooks) == 5, hooks
-            inventory = request('mcpServerStatus/list', {'threadId': thread})
-            server = next(item for item in inventory['data'] if item['name'] == 'seywo')
+            server = wait_server(request, thread)
             # Older desktop backends omit runtimeStatus. Actual calls below
             # establish connectivity rather than inferring it from inventory.
             if 'runtimeStatus' in server:
                 assert server['runtimeStatus'] == 'connected'
             assert server.get('tools'), {'fields': sorted(server)}
             tools = server['tools']
-            assert len(tools) == 18
+            assert len(tools) == 19
             metadata = tools['seywo_open']['_meta']
             assert metadata['openai/ui']['entrypoints'] == [{'type': 'thread'}]
             assert tools['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']

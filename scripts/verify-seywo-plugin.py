@@ -5,7 +5,7 @@ from datetime import date
 import json
 import os
 from pathlib import Path
-from seywo_protocol import PipeReader
+from seywo_protocol import PipeReader, wait_server
 import sqlite3
 import subprocess
 import sys
@@ -129,10 +129,9 @@ def verify(repository=REPOSITORY):
                         (thread, str(workspace / 'host-catalog-fixture.jsonl'), int(time.time()), int(time.time()),
                          'cli', 'fixture', str(workspace), 'Acceptance fixture',
                          '{"type":"workspace-write"}', 'never'))
-                inventory = request('mcpServerStatus/list', {'threadId': thread})
-                running = next(item for item in inventory['data'] if item['name'] == 'seywo')
+                running = wait_server(request, thread)
                 assert running['runtimeStatus'] == 'connected', running['runtimeStatus']
-                assert len(running['tools']) == 18
+                assert len(running['tools']) == 19
                 hook_inventory = request('hooks/list', {'cwds': [str(workspace)]})
                 plugin_hooks = [hook for entry in hook_inventory['data'] for hook in entry['hooks']
                                 if hook.get('pluginId') == 'seywo@seywo-local']
@@ -219,7 +218,7 @@ def verify(repository=REPOSITORY):
                 open_meta = running['tools']['seywo_open']['_meta']
                 assert open_meta['openai/ui']['entrypoints'] == [{'type': 'thread'}]
                 assert running['tools']['seywo_open']['title'] == 'Seywo'
-                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v7.html'
+                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v8.html'
                 assert running['tools']['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
                 opened = raw_tool('seywo_open', chat_id='plugin-acceptance')

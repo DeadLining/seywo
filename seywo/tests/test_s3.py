@@ -353,7 +353,7 @@ def test_read_only_v2_open_does_not_migrate_and_schema3_upgrade_rehearsal(tmp_pa
         assert opened.status()["schema_version"] == 2
     assert Path(config["_database"]).read_bytes() == before
     with Store(config) as opened:
-        assert opened.status()["schema_version"] == 7
+        assert opened.status()["schema_version"] == 8
         assert opened.db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 

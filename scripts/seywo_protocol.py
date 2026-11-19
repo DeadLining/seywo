@@ -32,3 +32,17 @@ class PipeReader:
         if data == b'':
             self.eof = True
         return data
+
+
+def wait_server(request, thread_id, name='seywo', timeout=60):
+    """Wait for asynchronous MCP startup, also accepting older tool-only hosts."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        inventory = request('mcpServerStatus/list', {'threadId': thread_id})
+        server = next((item for item in inventory['data'] if item['name'] == name), None)
+        if server is not None and server.get('runtimeStatus') != 'starting':
+            return server
+        if time.monotonic() >= deadline:
+            raise TimeoutError('MCP server startup did not complete')
+        time.sleep(.2)

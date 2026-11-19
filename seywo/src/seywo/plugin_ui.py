@@ -14,14 +14,15 @@ from .retrieval import Retrieval, serialize, snapshot
 from .settings import provider_status, read_provider, save_provider, use_codex, validate_endpoint
 from .transport import Transport
 from .codex_transport import CodexTransport, DEFAULT_MODEL, model_selection
-from .codex_runtime import list_models as list_codex_models, error_message, validate_reasoning_effort
+from .codex_runtime import (list_models as list_codex_models, error_message,
+                            validate_reasoning_effort, account_status as codex_account_status)
 from .store import Store
 
 # Bump the resource URI when the self-contained app shell changes materially.
 # Codex may retain an MCP App resource by URI for the lifetime of a Chat, so
 # reusing panel-v1.html would keep an already-open Chat on the previous DOM
 # even after the plugin files have been reinstalled.
-RESOURCE_URI = 'ui://seywo/panel-v7.html'
+RESOURCE_URI = 'ui://seywo/panel-v8.html'
 
 
 def register_panel(server, resolve_config):
@@ -106,6 +107,16 @@ def register_panel(server, resolve_config):
 
     @server.tool(annotations=app_only_write, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
+    async def seywo_codex_account(action: Literal['status', 'login', 'cancel'] = 'status') -> str:
+        """App-only account status or explicit browser login, without a model turn.
+
+        Codex app-server owns OAuth and credential storage. Seywo exposes only
+        state and a validated browser authorization URL, never account tokens.
+        """
+        return serialize(await asyncio.to_thread(codex_account_status, action=action))
+
+    @server.tool(annotations=app_only_write, structured_output=False,
+                 meta={'ui': {'visibility': ['app']}})
     async def seywo_model_save(endpoint: str = "", model: str = "", api_key: str = "",
                                timeout_seconds: int = 180, max_output_tokens: int = 4000,
                                backend: Literal["codex", "responses"] = "responses",
@@ -144,7 +155,7 @@ def register_panel(server, resolve_config):
         if selected == "codex":
             # Inherit Codex's model when no explicit Seywo override is saved.
             runtime = config.get("model_runtime") or {}
-            probe = CodexTransport(model=model or runtime.get("model") or "codex-default",
+            probe = CodexTransport(model=model or runtime.get("model") or DEFAULT_MODEL,
                                    timeout=max(1, min(timeout_seconds, 300)),
                                    reasoning_effort=reasoning_effort if reasoning_effort is not None
                                        else runtime.get("reasoning_effort", "auto"))

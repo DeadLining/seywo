@@ -946,3 +946,46 @@ test('switching an explicit model back to default uses the configured model rath
     model.value='codex-default';model.dispatchEvent(new f.dom.window.Event('change'));
     assert.deepEqual([...effort.options].map(o=>o.value),['auto','low','high']);
 });
+
+test('account auth failure offers browser login and explicit auth status refresh', async () => {
+    const f = fixture();
+    const calls = [];
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => ({backend:'codex', configured:true, model:'codex-default'}),
+        modelList: async () => ({models:[]}),
+        modelTest: async () => ({ok:false, error:'codex_auth_required', message:'请连接 Codex 账号。'}),
+        codexAccount: async action => {
+            calls.push(action);
+            return action === 'login' ? {state:'login_pending', auth_url:'https://auth.openai.com/authorize?fixture=1'}
+                : {state:'ready'};
+        },
+        openLink: async url => { calls.push(url); },
+    });
+    f.root.querySelector('[data-settings] summary').click(); await tick(); await tick();
+    await f.root.querySelector('[data-model-test]').onclick();
+    const login = f.root.querySelector('[data-codex-login]');
+    assert.equal(login.hidden, false);
+    await login.onclick();
+    assert.deepEqual(calls, ['login', 'https://auth.openai.com/authorize?fixture=1']);
+    await f.root.querySelector('[data-codex-account-refresh]').onclick();
+    assert.equal(calls.at(-1), 'status');
+    assert.match(f.root.querySelector('[data-model-status]').textContent, /已连接/);
+});
+
+
+test('storage reclamation warning preserves successful mainline and appears only on failure', async () => {
+    const f = fixture();
+    let failed = true;
+    const call = args => args.view === 'maintenance'
+        ? maintenance('done', args.chat_id, {storage: {state: failed ? 'failed' : 'done', error_code: 'storage_maintenance_failed'}})
+        : f.call(args);
+    const panel = await mountPanel(f.root, call, {chat_id: 'chat-a'});
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, false);
+    assert.match(f.root.querySelector('[data-maintenance]').textContent, /存储回收暂未完成/);
+    assert.match(f.root.textContent, /完成插件安装/);
+    assert.equal(f.root.querySelector('[data-maintenance-retry]'), null);
+    failed = false;
+    await panel.open({chat_id: 'chat-a'});
+    assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
+    f.dom.window.close();
+});
