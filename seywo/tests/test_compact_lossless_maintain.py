@@ -1,5 +1,6 @@
 """End-to-end source import, slicing and all-or-nothing publication."""
 import json
+from pathlib import Path
 
 from seywo import inbox, maintain
 from seywo.config import initialize, load_config
@@ -71,10 +72,14 @@ def test_later_slice_failure_publishes_nothing_then_retry_publishes_once(tmp_pat
     broken = FailSecond()
     config = setup(tmp_path, monkeypatch, broken)
     path, user, assistant = capture(tmp_path, 'retry')
-    inbox.record(config, 'retry', 'PreCompact', str(path))
+    boundary = inbox.record(config, 'retry', 'PreCompact', str(path))
     failed = maintain.run_chat(config, 'retry')
     assert failed['state'] == 'failed', failed
     assert failed['error_code'] == 'fixture_second_batch_failure'
+    # The source was durably imported before semantic extraction failed.  It is
+    # therefore complete in the source inbox and retry starts from the
+    # semantic cursor without importing the transcript again.
+    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
     with Store(config, read_only=True) as store:
         for table in ['narrative_versions', 'delta_progress', 'compact_turn_commits']:
             assert store.db.execute(f'SELECT count(*) FROM {table} WHERE chat_id=?', ('retry',)).fetchone()[0] == 0

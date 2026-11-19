@@ -70,7 +70,7 @@ def snapshot(config, source: Path, chat_id: str, unique: bool = False) -> str | 
     from .archive import content_capture
     folder = root(config) / "live"
     try:
-        target, _ = content_capture(source, folder, chat_id)
+        target, _ = content_capture(source, folder, chat_id, limit=SNAPSHOT_LIMIT)
         return str(target)
     except (OSError, ValueError):
         return None
@@ -98,6 +98,11 @@ def _record(config, chat_id: str, event: str, transcript: str) -> dict:
             "fingerprint": _fingerprint(source),
             "snapshot": snapshot(config, source, chat_id),
         }
+        if boundary["snapshot"] is None:
+            # Keep the boundary durable even when the hook cannot freeze the
+            # source.  The worker will retry from the original path and turn a
+            # persistent capture/import error into a retryable source failure.
+            boundary["snapshot_error"] = "snapshot_unavailable"
         key = digest(json.dumps(boundary, ensure_ascii=False, sort_keys=True))[:32]
         path = folder / f"{key}.json"
         retry_path = None
@@ -153,7 +158,10 @@ def _prune(folder: Path) -> None:
     files = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     for stale in files[KEEP_RECORDS:]:
         item = _read(stale)
-        if item and item.get("state") in {"pending", "claimed", "failed"}:
+        # Only active source work is unbounded.  A failed source import keeps
+        # its retry record, but it must still participate in the durable inbox
+        # budget; semantic failures are never written here.
+        if item and item.get("state") in {"pending", "claimed"}:
             continue
         stale.unlink(missing_ok=True)
 
@@ -198,7 +206,7 @@ def claim(config, item: dict) -> dict | None:
 
 @_serialized
 def requeue_failed(config, chat_id: str, *, limit: int = 5) -> int:
-    """Bound source-import retries; semantic retries have their own call budget."""
+    """Requeue only source failures, with a bounded I/O retry budget."""
     folder = root(config) / "pending"
     if not folder.is_dir():
         return 0
@@ -206,9 +214,8 @@ def requeue_failed(config, chat_id: str, *, limit: int = 5) -> int:
     for path in folder.glob("*.json"):
         item = _read(path)
         if (item and item.get("state") == "failed" and item.get("chat_id") == chat_id
-                and (item.get("imported_snapshot_id") or item.get("attempts", 0) < limit)):
-            # Imported sources need no further I/O attempt. A new worker run
-            # may retry semantics; compact_pipeline bounds its model calls.
+                and not item.get("imported_snapshot_id")
+                and item.get("attempts", 0) < limit):
             item.update(state="pending", updated_at=time.time())
             _write_atomic(path, item)
             count += 1
@@ -264,11 +271,14 @@ def imported(config, item: dict, *, snapshot_id: str, cursor) -> None:
 
 
 @_serialized
-def settle_imported(config, chat_id: str, cursor, *, error: str | None = None) -> None:
-    """Acknowledge only imported claims covered by the committed watermark.
+def settle_imported(config, chat_id: str, cursor) -> None:
+    """Finish source ingestion after the semantic transaction reaches a boundary.
 
-    Failed claims retain import identity for retry. An open trailing turn stays
-    claimed until a later boundary closes it; successful prefixes cannot ack it.
+    Source durability and semantic publication are separate state machines.  A
+    model/validation failure is recorded by ``compact_batches`` and
+    ``maintenance_status``; it must never turn an already imported source back
+    into an inbox failure.  Only claims without ``imported_snapshot_id`` can be
+    source-import failures and those are settled by the importer itself.
     """
     for path in (root(config) / "pending").glob("*.json"):
         item = _read(path)
@@ -276,8 +286,8 @@ def settle_imported(config, chat_id: str, cursor, *, error: str | None = None) -
                 or not item.get("imported_snapshot_id")):
             continue
         end = item.get("imported_cursor")
-        if error or end is None or (cursor is not None and tuple(end) <= tuple(cursor)):
-            item.update(state="failed" if error else "done", error_code=error, updated_at=time.time())
+        if end is None or (cursor is not None and tuple(end) <= tuple(cursor)):
+            item.update(state="done", error_code=None, updated_at=time.time())
             _write_atomic(path, item)
 
 

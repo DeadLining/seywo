@@ -308,10 +308,21 @@ def _import_owned(store, config, chat_id, claimed):
         inbox.finish(config, claimed, state="failed", error="source_missing")
         return False
     from .archive import content_capture
-    path, manifest = content_capture(path, inbox.root(config) / "live", chat_id)
+    try:
+        path, manifest = content_capture(path, inbox.root(config) / "live", chat_id,
+                                         limit=inbox.SNAPSHOT_LIMIT)
+    except (OSError, ValueError) as exc:
+        inbox.finish(config, claimed, state="failed",
+                     error=str(exc)[:120] or "source_capture_failed")
+        return False
     if str(path) != claimed.get("snapshot"):
         claimed = inbox.relocate(config, claimed, path)
-    store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
+    try:
+        store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
+    except (OSError, ValueError) as exc:
+        inbox.finish(config, claimed, state="failed",
+                     error=str(exc)[:120] or "source_import_failed")
+        return False
     inbox.finish(config, claimed, state="done", error=None)
     return True
 

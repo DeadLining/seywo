@@ -93,7 +93,7 @@ def test_exhausted_repair_is_failed_retryable_and_does_not_reimport_or_republish
     assert status['state'] == 'failed' and status['retryable']
     assert '阶段' in status['message']
     saved = inbox._read(Path(boundary['_path']))
-    assert saved['state'] == 'failed' and saved.get('imported_cursor')
+    assert saved['state'] == 'done' and saved.get('imported_cursor')
     before = counts(config)
     assert before['narrative_versions'] == before['compact_turn_commits'] == 0
     with Store(config, read_only=True) as store:
@@ -140,9 +140,8 @@ def test_failed_ledger_overrides_stale_done_receipt_and_retry_schedules(tmp_path
     config = setup(tmp_path, monkeypatch, transport)
     boundary = inbox.record(config, 'repair', 'PreCompact', str(make_source(tmp_path, 'repair')))
     maintain.run_chat(config, 'repair')
-    # Reproduce old releases acknowledging the source before semantic failure.
-    inbox.finish(config, boundary, state='done')
-    maintenance_status.record(config, 'repair', 'done')
+    # Source ingestion is complete even though semantic publication failed.
+    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
     with Store(config, read_only=True) as store:
         status = maintenance_status.read(config, 'repair', db=store.db)
     assert status['state'] == 'failed' and status['retryable']
@@ -336,5 +335,5 @@ def test_runtime_preflight_failure_records_zero_model_calls_and_stays_retryable(
         run = json.loads(batch['model_runs_json'])[0]
         assert run['calls'] == 0 and run['runtime'] == 'app-server'
         assert store.db.execute('SELECT count(*) FROM narrative_versions').fetchone()[0] == 0
-    assert inbox._read(Path(boundary['_path']))['state'] == 'failed'
+    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
     assert maintenance_status.read(config, 'auth')['retryable']

@@ -228,7 +228,7 @@ def _capture(source, target, *, limit=None):
     return manifest
 
 
-def content_capture(source, folder, prefix):
+def content_capture(source, folder, prefix, *, limit=None):
     """Canonical immutable locator, independent of legacy capture filenames."""
     source, folder = Path(source).resolve(), Path(folder).resolve()
     temporary = folder / f".{prefix}-{uuid4().hex}.jsonl"
@@ -241,7 +241,7 @@ def content_capture(source, folder, prefix):
                     raise ValueError("archive identity mismatch")
                 manifest = existing
             else:
-                manifest = _capture(source, temporary)
+                manifest = _capture(source, temporary, limit=limit)
             target = folder / f"{prefix}-{manifest['sha256']}.jsonl"
             if target.exists():
                 if target != source and source_digest(target) != (manifest["sha256"], manifest["bytes"]):

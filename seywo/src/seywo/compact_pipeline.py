@@ -645,7 +645,10 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
             with store.db:
                 _record(store.db, (batch_id, chat_id, encode(before), encode(after), base_head[0], None, "failed", len(turns), segment_count, calls,
                                     input_chars, output_chars, input_tokens, output_tokens, "[]", "[]", str(exc)[:120], time.time(), time.time()), model_runs)
-            inbox.settle_imported(config, chat_id, before, error=str(exc)[:120])
+            # Source ingestion already committed before semantic extraction.
+            # Keep the semantic failure in compact_batches and release the
+            # source boundary so retry can resume from the semantic cursor.
+            inbox.settle_imported(config, chat_id, after)
             report.update(state="failed", error_code=str(exc)[:120], calls=calls, pipeline=PIPELINE,
                           input_chars=input_chars, output_chars=output_chars, input_tokens=input_tokens, output_tokens=output_tokens)
             _write_state(state_path, state)
@@ -685,10 +688,21 @@ def _import_owned(store, config, chat_id, claimed):
         inbox.finish(config, claimed, state="failed", error="source_missing")
         return False
     from .archive import content_capture
-    path, manifest = content_capture(path, inbox.root(config) / "live", chat_id)
+    try:
+        path, manifest = content_capture(path, inbox.root(config) / "live", chat_id,
+                                         limit=inbox.SNAPSHOT_LIMIT)
+    except (OSError, ValueError) as exc:
+        inbox.finish(config, claimed, state="failed",
+                     error=str(exc)[:120] or "source_capture_failed")
+        return False
     if str(path) != claimed.get("snapshot"):
         claimed = inbox.relocate(config, claimed, path)
-    imported = store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
+    try:
+        imported = store._import_compact_capture(path, manifest, chat_id, claimed["transcript"])
+    except (OSError, ValueError) as exc:
+        inbox.finish(config, claimed, state="failed",
+                     error=str(exc)[:120] or "source_import_failed")
+        return False
     end = store.db.execute(
         "SELECT ordinal,record_no FROM current_sources WHERE chat_id=? ORDER BY ordinal DESC,record_no DESC LIMIT 1",
         (chat_id,)).fetchone()

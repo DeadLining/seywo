@@ -151,6 +151,22 @@ def test_gc_fails_closed_for_unknown_references(project, damage):
     assert sorted(p.name for p in obj.glob("*.z")) == before
 
 
+def test_collection_fails_closed_when_database_archive_is_missing(project):
+    from seywo.storage_lifecycle import safe_collect
+    root, cfg = project
+    raw = source(root, root / "raw.jsonl", [message("registered source")])
+    with Store(cfg) as store:
+        store.import_compact(raw, "chat", str(raw))
+        archive_path = Path(store.db.execute("SELECT path FROM source_archives LIMIT 1").fetchone()[0])
+    orphan = root / ".seywo/inbox/objects" / ("c" * 64 + ".z")
+    orphan.write_bytes(b"orphan")
+    archive_path.unlink()
+    result = safe_collect(cfg)
+    assert result["state"] == "failed"
+    assert result["error_code"] == "storage_maintenance_failed"
+    assert orphan.exists()
+
+
 def test_gc_waits_for_capture_to_publish(project, monkeypatch):
     root, cfg = project
     live = root / ".seywo/inbox/live"

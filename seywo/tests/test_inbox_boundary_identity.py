@@ -43,6 +43,30 @@ def capture_bytes(item):
         return handle.read()
 
 
+def test_failed_source_records_are_bounded(boundary, monkeypatch):
+    config, source = boundary
+    monkeypatch.setattr(inbox, "KEEP_RECORDS", 3)
+    for index in range(6):
+        path = source.parent / f"failed-{index}.jsonl"
+        write_source(path, str(index))
+        item = inbox.record(config, "chat", "PreCompact", str(path))
+        inbox.finish(config, inbox.claim(config, item), state="failed", error="source_missing")
+    records = list((inbox.root(config) / "pending").glob("*.json"))
+    assert len(records) <= 3
+    assert len(inbox.failed(config, "chat")) <= 3
+
+
+def test_snapshot_limit_is_enforced_and_failure_is_durable(boundary, monkeypatch):
+    config, source = boundary
+    monkeypatch.setattr(inbox, "SNAPSHOT_LIMIT", 1)
+    write_source(source, "more than one byte")
+    item = inbox.record(config, "chat", "PreCompact", str(source))
+    saved = inbox._read(Path(item["_path"]))
+    assert saved["snapshot"] is None
+    assert saved["snapshot_error"] == "snapshot_unavailable"
+    assert saved["state"] == "pending"
+
+
 @pytest.mark.parametrize("event", ["PreCompact", "PostCompact"])
 def test_changed_pending_boundary_keeps_the_original_record(boundary, event):
     config, source = boundary

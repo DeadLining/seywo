@@ -43,6 +43,20 @@ def _receipt(config, result):
     _atomic_write(path, json.dumps({**result, 'updated_at': time.time()}, sort_keys=True) + '\n')
 
 
+def _validate_database_archives(db):
+    """Validate every durable archive locator before any reclaim operation."""
+    rows = db.execute(
+        'SELECT a.path,ss.sha256,ss.byte_count '
+        'FROM source_archives a JOIN source_snapshots ss ON ss.id=a.snapshot_id'
+    ).fetchall()
+    for row in rows:
+        path = Path(row['path'])
+        if path.is_symlink() or not path.is_file():
+            raise ValueError('registered source archive missing')
+        if archive.source_digest(path) != (row['sha256'], row['byte_count']):
+            raise ValueError('registered source archive corrupt')
+
+
 def status(config):
     try:
         path = Path(config['_path']).parent / 'maintenance/storage.json'
@@ -73,6 +87,10 @@ def collect(config, *, force=False):
         result = {'state': 'done', 'removed_manifests': 0, 'removed_blocks': 0, 'model_calls': 0}
         with file_lock(inbox / '.lock'), file_lock(inbox / '.archive.lock'):
             with Store(config) as store:
+                # A missing/corrupt database-owned archive means the reference
+                # graph is no longer trustworthy.  Stop before deleting any
+                # manifest, block, database row, or vacuumed page.
+                _validate_database_archives(store.db)
                 bound = {str(Path(r[0]).resolve()) for r in store.db.execute('SELECT path FROM source_segments UNION SELECT path FROM source_archives')}
                 deleted = {r[0] for r in store.db.execute('SELECT chat_id FROM tombstones')}
                 # Parse/validate every pending record before deleting anything.
