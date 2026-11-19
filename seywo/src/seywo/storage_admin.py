@@ -8,8 +8,8 @@ content is hashed before and after, and only then are old raw captures removed.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-import fcntl
+
+from contextlib import closing, contextmanager
 import gzip
 import hashlib
 import json
@@ -19,6 +19,10 @@ import sqlite3
 import time
 import tempfile
 from uuid import uuid4
+
+from .runtime_platform import FileLease, replace_file, sync_directory
+
+from .sqlite_paths import sqlite_uri
 
 from .archive import archived, capture, garbage_collect, inspect_archives, publication, source_digest
 from .locking import lifecycle
@@ -37,15 +41,11 @@ def _state(config):
 def _write_json(path: Path, data: dict):
     tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     try:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-        with tmp.open("rb") as handle:
+        tmp.write_text(json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding='utf-8')
+        with tmp.open("r+b") as handle:
             os.fsync(handle.fileno())
-        os.replace(tmp, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        replace_file(tmp, path)
+        sync_directory(path.parent)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -63,14 +63,14 @@ def _backup_database(source: Path, target: Path):
                     digest.update(data)
                     size += len(data)
                     output.write(data)
-            with sqlite3.connect(restored) as db:
+            with closing(sqlite3.connect(restored)) as db:
                 if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                     raise ValueError("invalid SQLite rollback image")
         return {"path": str(target), "sha256": digest.hexdigest(), "bytes": size}
     with tempfile.TemporaryDirectory(dir=target.parent, prefix=".backup-") as temp:
         image = Path(temp) / "image.sqlite3"
-        with sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=60) as incoming:
-            with sqlite3.connect(image) as outgoing:
+        with closing(sqlite3.connect(sqlite_uri(source, mode="ro"), uri=True, timeout=60)) as incoming:
+            with closing(sqlite3.connect(image)) as outgoing:
                 incoming.backup(outgoing)
                 if outgoing.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                     raise ValueError("invalid SQLite rollback image")
@@ -81,15 +81,11 @@ def _backup_database(source: Path, target: Path):
                 digest.update(data)
                 size += len(data)
                 outgoing.write(data)
-        with compressed.open("rb") as handle:
+        with compressed.open("r+b") as handle:
             os.fsync(handle.fileno())
-        os.replace(compressed, target)
+        replace_file(compressed, target)
         os.chmod(target, 0o600)
-        fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        sync_directory(target.parent)
     return {"path": str(target), "sha256": digest.hexdigest(), "bytes": size}
 
 
@@ -114,7 +110,7 @@ def _seed_progress(config):
             head = store.db.execute("SELECT version FROM narrative_heads WHERE chat_id=?", (chat,)).fetchone()
             if not head:
                 continue
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding='utf-8'))
             cursor, version, windows = data.get("cursor"), data.get("version"), data.get("windows", 0)
             if cursor is None:
                 continue
@@ -268,12 +264,12 @@ def _read_lease(config):
     """Inspection may lock an existing inode, but never creates a file."""
     path = _state(config) / LOCK
     try:
-        handle = path.open("rb")
+        handle = FileLease(path, create=False)
     except FileNotFoundError:
         yield
         return
     with handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        handle.acquire()
         yield
 
 
@@ -329,7 +325,7 @@ def migrate(config, *, dry_run=False):
     with lifecycle(config, exclusive=True):
         guard = state / GUARD
         if guard.exists():
-            marker = json.loads(guard.read_text())
+            marker = json.loads(guard.read_text(encoding='utf-8'))
             if not isinstance(marker, dict) or not marker.get("run_id"):
                 raise ValueError("invalid migration journal; preserve it for recovery")
             receipt = maintenance / (marker["run_id"] + ".json")
@@ -382,7 +378,7 @@ def migrate(config, *, dry_run=False):
         removed = _remove_legacy(mapping)
         gc = garbage_collect(state / "inbox")
         persist("reclaimed")
-        with sqlite3.connect(config["_database"], timeout=60) as db:
+        with closing(sqlite3.connect(config["_database"], timeout=60)) as db:
             db.execute("VACUUM")
         final = _verify(config)
         if any(final["database"][k] != baseline[k] for k in ("source", "narrative")):

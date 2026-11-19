@@ -15,6 +15,8 @@ import tempfile
 import zlib
 from uuid import uuid4
 
+from .runtime_platform import replace_file, sync_directory
+
 from .locking import file_lock
 
 BLOCK_BYTES = 256 * 1024
@@ -48,12 +50,8 @@ def _atomic(path, data):
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(name, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        replace_file(name, path)
+        sync_directory(path.parent)
     finally:
         if name is not None:
             name.unlink(missing_ok=True)
@@ -61,12 +59,8 @@ def _atomic(path, data):
 
 def finalize(temporary, target):
     """Rename under publication ownership, then persist the final locator."""
-    os.replace(temporary, target)
-    fd = os.open(Path(target).parent, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    replace_file(temporary, target)
+    sync_directory(Path(target).parent)
 
 
 def _decode(blob):

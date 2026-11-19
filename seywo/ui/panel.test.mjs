@@ -276,7 +276,8 @@ test('keeps the three priority modules visually distinct on narrow screens', () 
         assert.match(narrow, /\.side-column \.open-questions\{[^}]*border-top:1px solid var\(--line\)/);
         assert.match(narrow, /\.side-column \.open-questions \.group-label\{[^}]*color:#b06b32/);
         assert.match(narrow, /\.side-column \.next-steps\{[^}]*border-top:1px solid var\(--line\)/);
-        assert.match(narrow, /\.side-column \.next-steps \.focus-node\{[^}]*background:var\(--accent\)/);
+        assert.match(source, /\.next-steps \.focus-node\{[^}]*background:var\(--accent\)/);
+        assert.match(narrow, /\.side-column \.next-steps \.focus-node\{[^}]*min-height:49px/);
     }
 });
 
@@ -842,4 +843,106 @@ test('waiting for a compact turn remains retryable and polls through publication
     t.mock.timers.tick(4000); await flush();
     assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
     assert.equal(mainlines, 2);
+});
+
+test('lists host models on demand and sends selected Codex model to test and save', async () => {
+    const f = fixture(); let reads = 0, tested, saved;
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => ({ backend: 'codex', configured: true, model: 'codex-default' }),
+        modelList: async () => { reads++; return { models: [{ model: 'available-model', label: 'Available' }], model_calls: 0 }; },
+        modelTest: async args => { tested = args; return { ok: true }; },
+        modelSave: async args => { saved = args; return { saved: true }; },
+    });
+    assert.equal(reads, 0);
+    f.root.querySelector('[data-settings] summary').click(); await tick(); await tick();
+    assert.equal(reads, 1);
+    const selector = f.root.querySelector('[data-codex-model]');
+    assert.ok(selector);
+    assert.equal(selector.value, 'codex-default');
+    assert.ok([...selector.options].some(o => o.value === 'available-model'));
+    selector.value = 'available-model';
+    await f.root.querySelector('[data-model-test]').onclick();
+    f.root.querySelector('[data-model-save]').click(); await tick();
+    assert.equal(tested.model, 'available-model');
+    assert.equal(saved.model, 'available-model');
+});
+
+test('shows safe actionable Codex failure message and preserves unavailable saved model', async () => {
+    const f = fixture();
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => ({ backend: 'codex', configured: true, model: 'saved-model' }),
+        modelList: async () => ({ models: [], error: 'codex_timeout', message: '读取模型列表超时，请重试。' }),
+        modelTest: async () => ({ ok: false, error: 'codex_auth_required', message: '请先在本机 Codex 登录后重试。' }),
+    });
+    f.root.querySelector('[data-settings] summary').click(); await tick(); await tick();
+    assert.equal(f.root.querySelector('[data-codex-model]').value, 'saved-model');
+    assert.match(f.root.textContent, /读取模型列表超时/);
+    await f.root.querySelector('[data-model-test]').onclick();
+    assert.match(f.root.querySelector('[data-model-status]').textContent, /本机 Codex 登录/);
+});
+
+test('reasoning picker follows model capabilities and sends the same effort to test and save', async () => {
+    const f = fixture(); let tested, saved;
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => ({backend:'codex', configured:true, model:'codex-default', effective_model:'configured', reasoning_effort:'high'}),
+        modelList: async () => ({models:[
+            {model:'catalog-default', is_default:true, reasoning_efforts:['none']},
+            {model:'configured', reasoning_efforts:['low','high']},
+            {model:'second', reasoning_efforts:['minimal','medium']}
+        ]}),
+        modelTest: async args => {tested=args;return {ok:true, model_info:{selected_model:'configured', reasoning_effort:args.reasoning_effort}};},
+        modelSave: async args => {saved=args;return {saved:true};},
+    });
+    f.root.querySelector('[data-settings] summary').click(); await tick(); await tick();
+    const effort=f.root.querySelector('[data-codex-reasoning]');
+    assert.ok(effort);
+    assert.equal(effort.value, 'high');
+    assert.deepEqual([...effort.options].map(o=>o.value), ['auto','low','high']);
+    effort.value='low';
+    await f.root.querySelector('[data-model-test]').onclick();
+    assert.match(f.root.querySelector('[data-model-status]').textContent, /low|低/);
+    f.root.querySelector('[data-model-save]').click(); await tick();
+    assert.equal(tested.reasoning_effort, 'low');
+    assert.equal(saved.reasoning_effort, 'low');
+    const model=f.root.querySelector('[data-codex-model]');
+    model.value='second';model.dispatchEvent(new f.dom.window.Event('change'));
+    assert.deepEqual([...effort.options].map(o=>o.value), ['auto','minimal','medium']);
+    assert.equal(effort.value, 'auto');
+});
+
+test('failed model catalog preserves saved effort and retries without generation', async () => {
+    const f=fixture();let reads=0, tests=0, saved;
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus:async()=>({backend:'codex',configured:true,model:'chosen',reasoning_effort:'high'}),
+        modelList:async()=>{reads++;return reads===1?{error:'codex_network_error'}:{models:[{model:'chosen',reasoning_efforts:['low','high']}]};},
+        modelTest:async()=>{tests++;return {ok:true};},
+        modelSave:async args=>{saved=args;return {saved:true};},
+    });
+    f.root.querySelector('[data-settings] summary').click();await tick();await tick();
+    const effort=f.root.querySelector('[data-codex-reasoning]');
+    assert.equal(effort.value,'high');
+    assert.match(f.root.querySelector('[data-reasoning-status]').textContent,/未确认/);
+    f.root.querySelector('[data-model-list-refresh]').click();await tick();await tick();
+    assert.equal(effort.value,'high');
+    assert.deepEqual([...effort.options].map(o=>o.value),['auto','low','high']);
+    f.root.querySelector('[data-model-save]').click();await tick();
+    assert.equal(saved.reasoning_effort,'high');
+    assert.equal(tests,0);
+});
+
+test('switching an explicit model back to default uses the configured model rather than the catalog default', async () => {
+    const f=fixture();
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus:async()=>({backend:'codex',configured:true,model:'explicit',effective_model:'explicit',reasoning_effort:'auto'}),
+        modelList:async()=>({default_model:'configured',models:[
+            {model:'catalog-default',is_default:true,reasoning_efforts:['none']},
+            {model:'configured',reasoning_efforts:['low','high']},
+            {model:'explicit',reasoning_efforts:['medium']}
+        ]}),
+    });
+    f.root.querySelector('[data-settings] summary').click();await tick();await tick();
+    const model=f.root.querySelector('[data-codex-model]'),effort=f.root.querySelector('[data-codex-reasoning]');
+    assert.deepEqual([...effort.options].map(o=>o.value),['auto','medium']);
+    model.value='codex-default';model.dispatchEvent(new f.dom.window.Event('change'));
+    assert.deepEqual([...effort.options].map(o=>o.value),['auto','low','high']);
 });

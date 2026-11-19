@@ -14,6 +14,8 @@ from pathlib import Path
 import time
 from uuid import uuid4
 
+from .runtime_platform import replace_file, sync_directory
+
 from .locking import file_lock, lifecycle
 from .store import digest
 
@@ -33,12 +35,8 @@ def _write_atomic(path: Path, payload: dict) -> None:
             stream.write(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode())
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        replace_file(temporary, path)
+        sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -1,6 +1,4 @@
 #!/bin/sh
-# Repository entrypoint, usable from an absolute MCP registration.
-HERE=$(cd -- "$(dirname -- "$0")/.." && pwd)
-PYTHON=${SEYWO_PYTHON:-python3}
-PYTHONPATH="$HERE/src${PYTHONPATH:+:$PYTHONPATH}" PYTHONDONTWRITEBYTECODE=1 \
-  exec "$PYTHON" -B -m seywo "$@"
+# Optional POSIX shortcut; the installed plugin uses uv directly on every OS.
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec uv run --no-config --no-project --python '>=3.11' python -B "$HERE/bin/seywo-launch.py" --cli "$@"

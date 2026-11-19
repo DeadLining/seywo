@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-import select
+from seywo_protocol import PipeReader
 import subprocess
 import tempfile
 import time
@@ -14,6 +14,7 @@ def verify(binary, project):
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen([binary, 'app-server', '--stdio'], cwd=project,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        reader = PipeReader(process.stdout)
         buffer = b''
         def request(identity, method, params):
             nonlocal buffer
@@ -28,8 +29,10 @@ def verify(binary, project):
                         if 'error' in row:
                             raise RuntimeError(str(row['error']))
                         return row['result']
-                elif select.select([process.stdout], [], [], 0.5)[0]:
-                    chunk = os.read(process.stdout.fileno(), 65536)
+                else:
+                    chunk = reader.read(0.5)
+                    if chunk is None:
+                        continue
                     if not chunk:
                         raise RuntimeError('host closed')
                     buffer += chunk

@@ -7,15 +7,15 @@ the existing Seywo payload is sent on stdin; no project source is discovered.
 import json
 import os
 from pathlib import Path
-import shutil
 import re
-import signal
 import subprocess
 import tempfile
 import time
 import tomllib
 
 from .plugin_context import catalog_home
+from .runtime_platform import ProcessScope, find_codex
+from .codex_runtime import classify_error, list_models, validate_reasoning_effort
 
 DEFAULT_MODEL = 'codex-default'
 MAX_OUTPUT_BYTES = 65536
@@ -23,13 +23,7 @@ MAX_LOG_BYTES = 2 * 1024 * 1024
 
 
 def codex_command():
-    found = shutil.which('codex')
-    if found:
-        return [found]
-    bundled = Path('/Applications/Codex.app/Contents/Resources/codex')
-    if bundled.is_file() and os.access(bundled, os.X_OK):
-        return [str(bundled)]
-    return None
+    return find_codex()
 
 
 def disabled_mcp(home):
@@ -79,15 +73,16 @@ def model_selection(home, requested):
 
 
 class CodexTransport:
-    def __init__(self, *, model=DEFAULT_MODEL, timeout=420, command=None, home=None):
+    def __init__(self, *, model=DEFAULT_MODEL, timeout=420, command=None, home=None, reasoning_effort="auto"):
         self.model = model
+        self.reasoning_effort = validate_reasoning_effort(reasoning_effort)
         self.timeout = timeout
         self.command = command if command is not None else codex_command()
         self.home = Path(home) if home is not None else catalog_home()
 
     def _execute(self, instructions, payload, schema, *, model=None):
         started = time.monotonic()
-        result = {'output': None, 'finish': 'error', 'error': None, 'usage': None}
+        result = {'output': None, 'finish': 'error', 'error': None, 'usage': None, 'model_calls': 0}
 
         def failed(code):
             return {**result, 'error': code, 'seconds': round(time.monotonic() - started, 3)}
@@ -95,9 +90,31 @@ class CodexTransport:
         if not self.command:
             return failed('codex_not_available')
         try:
-            overrides = disabled_mcp(self.home)
-            info = model_selection(self.home, model or self.model)
+            try:
+                overrides = disabled_mcp(self.home)
+                info = model_selection(self.home, model or self.model)
+            except (OSError, ValueError, TypeError):
+                return failed('codex_config_invalid')
             result["model_info"] = info
+            # Choose a cheap effort only when this exact host catalog advertises
+            # it for the target. Unknown catalogs retain native Codex behavior.
+            catalog = list_models(command=self.command, home=self.home, timeout=min(self.timeout, 10))
+            target = next((row for row in catalog['models'] if
+                row['model'] == info['selected_model'] or
+                (info['selected_model'] is None and row.get('is_default'))), {})
+            efforts = target.get('reasoning_efforts') or []
+            if self.reasoning_effort != 'auto':
+                if catalog.get('error'):
+                    return failed(catalog['error'])
+                if self.reasoning_effort not in efforts:
+                    return failed('codex_reasoning_unsupported')
+                effort = self.reasoning_effort
+            else:
+                effort = next((value for value in ('low', 'minimal', 'none') if value in efforts),
+                              target.get('default_reasoning_effort'))
+            if effort:
+                overrides.append('model_reasoning_effort=' + json.dumps(effort))
+                info['reasoning_effort'] = effort
             with tempfile.TemporaryDirectory(prefix='seywo-model-') as directory:
                 root = Path(directory)
                 schema_path = root / 'schema.json'
@@ -115,7 +132,7 @@ class CodexTransport:
                 args += ['--enable', 'skip_host_skill_discovery']
                 for override in ['project_doc_max_bytes=0', 'web_search="disabled"',
                                  'memories.use_memories=false', 'memories.generate_memories=false',
-                                 'model_reasoning_effort="low"', 'developer_instructions=""',
+                                 'developer_instructions=""',
                                  f'model_instructions_file={json.dumps(str(instructions_path))}', disabled_skills(self.home), *overrides]:
                     args += ['-c', override]
                 if info['selected_model']:
@@ -124,22 +141,39 @@ class CodexTransport:
                 args += ['-']
                 prompt = instructions + '\n' + json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
                 env = {**os.environ, 'CODEX_HOME': str(self.home), 'SEYWO_INTERNAL_MODEL': '1'}
-                with tempfile.TemporaryFile() as log:
-                    process = subprocess.Popen(args, cwd=root, env=env, stdin=subprocess.PIPE,
-                                               stdout=log, stderr=subprocess.DEVNULL, start_new_session=True)
+                with tempfile.TemporaryFile() as log, tempfile.TemporaryFile() as stderr, ProcessScope() as scope:
+                    result['model_calls'] = 1
+                    process = scope.start(args, cwd=root, env=env, stdin=subprocess.PIPE,
+                                               stdout=log, stderr=stderr)
                     try:
                         process.communicate(prompt.encode('utf-8'), timeout=self.timeout)
                     except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
+                        scope.terminate()
                         process.wait()
-                        return failed('codex_timeout')
-                    if process.returncode:
-                        return failed('codex_execution_failed')
+                        stderr.seek(0)
+                        diagnostic = stderr.read(65536).decode('utf-8', errors='replace')
+                        if log.tell() <= MAX_LOG_BYTES:
+                            log.seek(0)
+                            for raw in log:
+                                try:
+                                    event = json.loads(raw)
+                                except (ValueError, UnicodeError):
+                                    continue
+                                if isinstance(event, dict) and event.get('type') in {'error', 'turn.failed'}:
+                                    diagnostic += json.dumps(event)[:8192]
+                        code = classify_error(diagnostic)
+                        return failed(code if code != 'codex_execution_failed' else 'codex_timeout')
                     if log.tell() > MAX_LOG_BYTES:
                         return failed('codex_output_limit')
                     log.seek(0)
+                    errors = []
                     for line in log:
-                        event = json.loads(line)
+                        try:
+                            event = json.loads(line)
+                        except (ValueError, UnicodeError):
+                            continue
+                        if not isinstance(event, dict):
+                            continue
                         if event.get('type') == 'turn.completed':
                             usage = event.get('usage') or {}
                             if all(type(usage.get(k)) is int for k in ('input_tokens', 'output_tokens')):
@@ -147,10 +181,14 @@ class CodexTransport:
                                 cached = usage.get('cached_input_tokens', 0)
                                 result['cached_input_tokens'] = cached if type(cached) is int and cached >= 0 else 0
                         if event.get('type') in {'turn.failed', 'error'}:
-                            return failed('codex_execution_failed')
+                            errors.append(json.dumps(event)[:8192])
                         item = event.get('item') or {}
                         if item.get('type') in {'command_execution', 'mcp_tool_call', 'web_search', 'file_change'}:
                             return failed('codex_unexpected_tool_use')
+                    if process.returncode or errors:
+                        stderr.seek(0)
+                        diagnostic = stderr.read(65536).decode('utf-8', errors='replace')
+                        return failed(classify_error('\n'.join(errors) + '\n' + diagnostic))
                 if not output_path.is_file() or output_path.stat().st_size > MAX_OUTPUT_BYTES:
                     return failed('codex_output_missing_or_large')
                 output = json.loads(output_path.read_text(encoding='utf-8'))
@@ -160,6 +198,8 @@ class CodexTransport:
                         'seconds': round(time.monotonic() - started, 3)}
         except (ValueError, UnicodeError):
             return failed('invalid_json')
+        except FileNotFoundError:
+            return failed('codex_not_available')
         except OSError:
             return failed('codex_execution_failed')
 

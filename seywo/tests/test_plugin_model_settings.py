@@ -115,7 +115,7 @@ def test_uninitialized_project_can_test_and_select_codex_without_writes(tmp_path
     calls = []
 
     class FakeTransport:
-        def __init__(self, *, model, timeout):
+        def __init__(self, *, model, timeout, reasoning_effort="auto"):
             calls.append((model, timeout))
 
         def probe(self):
@@ -173,3 +173,109 @@ def test_settings_preserve_other_changes_with_stale_config(tmp_path):
     assert current['hook']['enabled']
     assert current['provider']['model'] == 'test'
     assert current['unrelated_preference'] == 'keep'
+
+
+def test_model_catalog_is_app_only_and_zero_generation(tmp_path, monkeypatch):
+    import asyncio
+    from seywo import plugin_ui
+    monkeypatch.setattr(plugin_ui, 'list_codex_models', lambda **kwargs: {
+        'models': [{'model': 'fixture-model', 'label': 'Fixture'}], 'error': None, 'model_calls': 0})
+    home = tmp_path / 'host'
+    home.mkdir()
+    (home / 'config.toml').write_text('model="host-configured-model"\n')
+    monkeypatch.setenv('CODEX_HOME', str(home))
+    server = create_plugin_server(tmp_path)
+    data = json.loads(asyncio.run(server.call_tool('seywo_model_list', {}))[0].text)
+    assert data['default_model'] == 'host-configured-model'
+    assert data['models'][0]['model'] == 'fixture-model'
+    assert data['model_calls'] == 0
+    tools = {tool.name: tool for tool in asyncio.run(server.list_tools())}
+    assert tools['seywo_model_list'].meta['ui']['visibility'] == ['app']
+    assert not (tmp_path / '.seywo').exists()
+
+
+def test_codex_probe_reports_safe_reason_and_actual_selection(tmp_path, monkeypatch):
+    import asyncio
+    from seywo import plugin_ui
+
+    class Failure:
+        def __init__(self, **kwargs): pass
+        def probe(self):
+            return {'output': None, 'finish': 'error', 'error': 'codex_auth_required',
+                    'model_info': {'selected_model': 'fixture', 'provider': 'openai'}, 'seconds': .01}
+
+    monkeypatch.setattr(plugin_ui, 'CodexTransport', Failure)
+    data = json.loads(asyncio.run(create_plugin_server(tmp_path).call_tool(
+        'seywo_model_test', {'backend': 'codex', 'model': 'fixture'}))[0].text)
+    assert not data['ok']
+    assert '登录' in data['message']
+    assert data['model_info']['selected_model'] == 'fixture'
+
+
+def test_explicit_codex_model_is_not_silently_discarded_before_initialization(tmp_path):
+    import asyncio
+    import pytest
+    from mcp.server.fastmcp.exceptions import ToolError
+    with pytest.raises(ToolError, match='initialization_required'):
+        asyncio.run(create_plugin_server(tmp_path).call_tool('seywo_model_save', {
+            'backend': 'codex', 'model': 'explicit-model'}))
+    assert not (tmp_path / '.seywo').exists()
+
+
+def test_codex_selection_persists_and_default_removes_previous_override(tmp_path):
+    import asyncio
+    initialize(tmp_path)
+    server = create_plugin_server(tmp_path)
+    asyncio.run(server.call_tool('seywo_model_save', {'backend': 'codex', 'model': 'chosen-model'}))
+    assert read_provider(load_config(tmp_path / '.seywo/config.json'))['model'] == 'chosen-model'
+    asyncio.run(server.call_tool('seywo_model_save', {'backend': 'codex', 'model': 'codex-default'}))
+    assert load_config(tmp_path / '.seywo/config.json')['model_runtime'] == {'backend': 'codex'}
+
+
+def test_codex_reasoning_round_trip_and_auto_reset(tmp_path):
+    import asyncio
+    initialize(tmp_path)
+    path = tmp_path / '.seywo/config.json'
+    server = create_plugin_server(tmp_path)
+    saved = json.loads(asyncio.run(server.call_tool('seywo_model_save', {
+        'backend': 'codex', 'model': 'chosen', 'reasoning_effort': 'high'}))[0].text)
+    assert saved['reasoning_effort'] == 'high'
+    assert read_provider(load_config(path))['reasoning_effort'] == 'high'
+    asyncio.run(server.call_tool('seywo_model_save', {
+        'backend': 'codex', 'model': 'chosen', 'reasoning_effort': 'auto'}))
+    assert load_config(path)['model_runtime'] == {'backend': 'codex', 'model': 'chosen'}
+    assert read_provider(load_config(path))['reasoning_effort'] == 'auto'
+
+
+def test_codex_probe_uses_entered_effort_or_saved_effort_without_saving(tmp_path, monkeypatch):
+    import asyncio
+    from seywo import plugin_ui
+    from seywo.settings import use_codex
+    initialize(tmp_path)
+    path = tmp_path / '.seywo/config.json'
+    use_codex(load_config(path), model='chosen', reasoning_effort='medium')
+    before = path.read_bytes()
+    calls = []
+
+    class Probe:
+        def __init__(self, **kwargs): calls.append(kwargs)
+        def probe(self): return {'output': {'ok': True}, 'finish': 'complete'}
+
+    monkeypatch.setattr(plugin_ui, 'CodexTransport', Probe)
+    server = create_plugin_server(tmp_path)
+    for args in ({'backend': 'codex'}, {'backend': 'codex', 'reasoning_effort': 'high'},
+                 {'backend': 'codex', 'reasoning_effort': 'auto'}):
+        asyncio.run(server.call_tool('seywo_model_test', args))
+    assert [c['reasoning_effort'] for c in calls] == ['medium', 'high', 'auto']
+    assert path.read_bytes() == before
+
+
+def test_invalid_reasoning_does_not_mutate_configuration(tmp_path):
+    import pytest
+    from seywo.settings import use_codex
+    initialize(tmp_path)
+    path = tmp_path / '.seywo/config.json'
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match='invalid_reasoning_selection'):
+        use_codex(load_config(path), reasoning_effort='extreme')
+    assert path.read_bytes() == before

@@ -8,6 +8,8 @@ import tempfile
 import tomllib
 
 
+from .runtime_platform import replace_file
+
 def install(config, *, python=None):
     root = Path(config["project_root"])
     entry = Path(__file__).resolve().parents[1] / "seywo" / "__main__.py"
@@ -16,7 +18,7 @@ def install(config, *, python=None):
     path = root / ".codex" / "config.toml"
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("unsafe_codex_config")
-    original = path.read_text() if path.exists() else ""
+    original = path.read_text(encoding='utf-8') if path.exists() else ""
     data = tomllib.loads(original)
     server = {
         "command": python,
@@ -53,7 +55,7 @@ def install(config, *, python=None):
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

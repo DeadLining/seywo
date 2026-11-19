@@ -62,3 +62,9 @@ seywo/bin/seywo --config "/absolute/project/.seywo/config.json" mcp
 每个 Chat 只保留一份小状态文件，不追加 Compact 记录或对话副本。后台中断由本地
 进程锁识别。失败还会在下一次启动或提交消息时，通过 Hook 的原生提示提醒一次；
 不重复刷屏、不展示原始异常。Hook 运行时尚未启动便发生的命令错误由 Codex 自身提示。
+
+## 面板模型选择
+
+`seywo_model_list` 仅向 App 暴露，通过本机 Codex 的 `model/list` 读取模型目录，支持分页和有界超时，不创建 Chat 或调用模型生成内容。列表按需读取，读取失败可重试，已有模型选择不会被清空。模型目录不代表账户权限验证；`seywo_model_test` 使用所选模型执行一次显式测试，并返回安全错误代码、固定原因、耗时和所请求的模型身份。该接口不增加模型可见的历史工具。
+
+`seywo_model_save` 和 `seywo_model_test` 接受 Codex 的 `reasoning_effort`。`auto` 保持低消耗策略；手选档位须由当前目标模型目录确认支持，未确认时在生成前返回错误。测试未提供该参数时沿用已保存值；保存 `auto` 会清除项目覆盖。`seywo_model_status` 返回已保存档位和解析后的 `effective_model`；`seywo_model_list.default_model` 提供宿主实际默认目标，面板据此显示跟随默认模型时的对应档位。

@@ -9,18 +9,19 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from .config import initialize, load_config
 from .panel import Panel
 from .plugin_binding import ProjectRequired
-from .plugin_context import current_chat, host_thread_id
+from .plugin_context import current_chat, host_thread_id, catalog_home
 from .retrieval import Retrieval, serialize, snapshot
 from .settings import provider_status, read_provider, save_provider, use_codex, validate_endpoint
 from .transport import Transport
-from .codex_transport import CodexTransport
+from .codex_transport import CodexTransport, DEFAULT_MODEL, model_selection
+from .codex_runtime import list_models as list_codex_models, error_message, validate_reasoning_effort
 from .store import Store
 
 # Bump the resource URI when the self-contained app shell changes materially.
 # Codex may retain an MCP App resource by URI for the lifetime of a Chat, so
 # reusing panel-v1.html would keep an already-open Chat on the previous DOM
 # even after the plugin files have been reinstalled.
-RESOURCE_URI = 'ui://seywo/panel-v3.html'
+RESOURCE_URI = 'ui://seywo/panel-v7.html'
 
 
 def register_panel(server, resolve_config):
@@ -92,19 +93,34 @@ def register_panel(server, resolve_config):
             return serialize(provider_status())
         return serialize(provider_status(load_config(path)))
 
+    @server.tool(annotations=app_only_read, structured_output=False,
+                 meta={'ui': {'visibility': ['app']}})
+    async def seywo_model_list() -> str:
+        """Read this host's Codex model catalog without generating model output."""
+        catalog = await asyncio.to_thread(list_codex_models)
+        try:
+            default_model = model_selection(catalog_home(), DEFAULT_MODEL)['selected_model']
+        except (OSError, ValueError, TypeError):
+            default_model = None
+        return serialize({**catalog, 'default_model': default_model})
+
     @server.tool(annotations=app_only_write, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
     async def seywo_model_save(endpoint: str = "", model: str = "", api_key: str = "",
                                timeout_seconds: int = 180, max_output_tokens: int = 4000,
-                               backend: Literal["codex", "responses"] = "responses") -> str:
+                               backend: Literal["codex", "responses"] = "responses",
+                               reasoning_effort: str = "auto") -> str:
         """Select Codex or save a custom provider; keys never enter config.json."""
         path = await resolve_config(server.get_context())
         if backend == "codex":
             # Codex is a host-level runtime. Selecting it does not need a
             # project database and must work before Seywo initialization.
+            validate_reasoning_effort(reasoning_effort)
             if not path.exists():
+                if reasoning_effort != "auto" or model.strip() not in {'', 'codex-default'}:
+                    raise ValueError('initialization_required')
                 return serialize({"saved": True, "persisted": False, **provider_status()})
-            return serialize(use_codex(load_config(path), model=model))
+            return serialize(use_codex(load_config(path), model=model, reasoning_effort=reasoning_effort))
         if not path.exists():
             raise ValueError('initialization_required')
         result = save_provider(load_config(path), endpoint=endpoint, model=model, api_key=api_key,
@@ -115,7 +131,8 @@ def register_panel(server, resolve_config):
                  meta={'ui': {'visibility': ['app']}})
     async def seywo_model_test(endpoint: str = "", model: str = "", api_key: str = "",
                                timeout_seconds: int = 60,
-                               backend: Literal["codex", "responses"] | None = None) -> str:
+                               backend: Literal["codex", "responses"] | None = None,
+                               reasoning_effort: str | None = None) -> str:
         """Make one explicit connectivity call using the entered or saved provider."""
         path = await resolve_config(server.get_context())
         # Codex uses the host login/provider and can be tested before Seywo
@@ -128,7 +145,9 @@ def register_panel(server, resolve_config):
             # Inherit Codex's model when no explicit Seywo override is saved.
             runtime = config.get("model_runtime") or {}
             probe = CodexTransport(model=model or runtime.get("model") or "codex-default",
-                                   timeout=max(1, min(timeout_seconds, 300)))
+                                   timeout=max(1, min(timeout_seconds, 300)),
+                                   reasoning_effort=reasoning_effort if reasoning_effort is not None
+                                       else runtime.get("reasoning_effort", "auto"))
             result = await asyncio.to_thread(probe.probe)
         else:
             saved_config = {**config, "model_runtime": {"backend": "responses"}}
@@ -144,7 +163,9 @@ def register_panel(server, resolve_config):
                 instructions='Return a JSON object with ok=true.', payload={"probe": "seywo"}, max_output_tokens=256)
         return serialize({'ok': result.get('output') == {'ok': True} and result.get('finish', 'complete') == 'complete' and result.get('error') is None,
                           'error': result.get('error'), 'usage': result.get('usage'),
-                          'seconds': result.get('seconds'), 'model_calls': 1})
+                          'seconds': result.get('seconds'), 'model_calls': result.get('model_calls', 1),
+                          'model_info': result.get('model_info'),
+                          'message': error_message(result.get('error')) if result.get('error') else None})
 
     def maintenance_chat(store, requested):
         # Current unimported chat may already have a queued/failed Compact.

@@ -74,7 +74,8 @@ def test_repeated_compact_copy_preserves_old_binding_and_resumes(
         new_path = Path(rows[-1]["path"])
         assert new_path != old and new_path != stable
         assert open_source(new_path).read() == live.read_bytes()
-        assert stat.S_IMODE(new_path.stat().st_mode) == 0o600
+        from seywo.runtime_platform import private_owner
+        assert private_owner(new_path.stat(), 0o600)
         assert old.read_bytes() == old_bytes
         saved = json.loads(Path(item["_path"]).read_text())
         assert saved["state"] == "done" and saved["snapshot"] == str(new_path)

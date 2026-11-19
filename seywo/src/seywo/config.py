@@ -1,11 +1,14 @@
 """Project initialization; no host registration or legacy configuration discovery."""
 
-import fcntl
 import json
 import os
 import tempfile
 from pathlib import Path
 from uuid import uuid4
+
+from .runtime_platform import replace_file
+
+from .locking import file_lock
 
 DEFAULT_IGNORE = "*\n!.gitignore\n"
 
@@ -48,7 +51,7 @@ def _atomic_write(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -116,9 +119,7 @@ def initialize(root: Path, *, plugin_hook: bool = False, skip_existing: bool = F
     lock = state / ".init.lock"
     if lock.is_symlink():
         raise ValueError("initialization lock must not be a symlink")
-    fd = os.open(lock, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with file_lock(lock):
         return _initialize_locked(root, state, plugin_hook=plugin_hook, skip_existing=skip_existing)
 
 

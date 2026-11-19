@@ -21,6 +21,7 @@ from .admission import NonHumanSource, require_human, transcript_meta
 from .config import load_config
 from .retrieval import Retrieval
 from .store import Store
+from .runtime_platform import process_options
 
 BOUNDARY_EVENTS = {"PreCompact", "PostCompact"}
 INJECTION_EVENTS = {"SessionStart", "UserPromptSubmit"}
@@ -170,7 +171,7 @@ def spawn(config: Path, chat_id: str) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=env,
-            start_new_session=True,
+            **process_options(detached=True),
             close_fds=True,
         )
         return True

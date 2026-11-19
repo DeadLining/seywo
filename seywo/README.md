@@ -55,4 +55,4 @@ python3 -m pytest -q -c seywo/pyproject.toml seywo/tests
 python3 -m compileall -q seywo/src
 ```
 
-发布包由 `scripts/package-seywo-plugin.py` 生成。插件运行时需要 macOS/Linux、Python 3.11+ 或 `uv`；Node/npm 只用于开发和构建 UI。完整安装、Hook 信任、模型、存储和验收边界见 [`docs/PLUGIN.md`](docs/PLUGIN.md) 与 [`docs/seywo-mcp.md`](docs/seywo-mcp.md)。
+发布包由 `scripts/package-seywo-plugin.py` 生成。Windows、macOS、Linux 共用 `uv` 启动入口，首次运行由其私有缓存准备 Python 和 MCP SDK，Hook 离线复用；Node/npm 只用于开发和构建 UI。完整安装、Hook 信任、模型、存储和验收边界见 [`docs/PLUGIN.md`](docs/PLUGIN.md) 与 [`docs/seywo-mcp.md`](docs/seywo-mcp.md)。

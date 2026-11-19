@@ -1,0 +1,33 @@
+name: Portable Seywo runtime
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Full native Python suite and declared launcher smoke
+        run: uv run --no-config --no-project --python 3.12 --with mcp==1.28.1 --with pytest python -m pytest seywo/tests -q
+      - name: Install UI development dependencies
+        run: npm ci --prefix tools/seywo-ui
+      - name: UI contracts
+        run: node --test seywo/ui/panel.test.mjs
+      - name: Build relocatable marketplace archive
+        run: uv run --no-config --no-project --python 3.12 python scripts/package-seywo-plugin.py --output dist

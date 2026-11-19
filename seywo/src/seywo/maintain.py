@@ -9,7 +9,6 @@ Every model request is a claim/submit pair on the durable outbox, so a kill at
 any point leaves a resumable state instead of a partial version.
 """
 
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -17,6 +16,8 @@ import shutil
 import sys
 import time
 from uuid import uuid4
+
+from .runtime_platform import FileLease, replace_file
 
 from . import inbox, maintenance_status
 from .admission import NonHumanSource
@@ -63,7 +64,7 @@ def _read_state(path):
 def _write_state(path, state):
     temporary = path.with_name("." + path.name + ".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-    os.replace(temporary, path)
+    replace_file(temporary, path)
 
 
 def _after(cursor):
@@ -109,7 +110,6 @@ def run_chat(config, chat_id):
                         receipt_state = 'partial'
                     maintenance_status.safe_record(config, chat_id, receipt_state,
                                                    error_code=completed.get('error_code'), report=completed)
-                    fcntl.flock(handle, fcntl.LOCK_UN)
                     handle.close()
                     handle = None
                     return completed
@@ -118,7 +118,6 @@ def run_chat(config, chat_id):
             raise
         finally:
             if handle is not None:
-                fcntl.flock(handle, fcntl.LOCK_UN)
                 handle.close()
 
 
@@ -136,7 +135,8 @@ def _run_chat(config, chat_id):
     if native:
         if (config.get("hook") or {}).get("pipeline") != "seywo-compact-v1":
             return {"state": "blocked", "error_code": "codex_requires_compact_pipeline", "calls": 0}
-        transport = CodexTransport(model=model, timeout=timeout)
+        transport = CodexTransport(model=model, timeout=timeout,
+                                   reasoning_effort=provider["reasoning_effort"])
     else:
         key = provider.get("_api_key", "")
         if not key:
@@ -880,10 +880,8 @@ def _run_job(engine, service, transport, job, options, report):
 def _lock(config, chat_id):
     folder = Path(config["_path"]).parent / "maintain"
     folder.mkdir(parents=True, exist_ok=True)
-    handle = (folder / f"{chat_id}.lock").open("a+")
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    handle = FileLease(folder / f"{chat_id}.lock")
+    if not handle.acquire(blocking=False):
         handle.close()
         return None
     return handle

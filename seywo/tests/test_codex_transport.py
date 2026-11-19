@@ -23,7 +23,7 @@ def test_plugin_enable_selects_codex_and_preserves_existing_provider(tmp_path):
 
 def fake_cli(tmp_path, body):
     script = tmp_path / 'fake-codex.py'
-    script.write_text('import json,sys,time\nfrom pathlib import Path\n' + body)
+    script.write_text('import json,sys,time\nfrom pathlib import Path\nif sys.argv[1:2] == ["app-server"]: sys.exit(0)\n' + body)
     return [sys.executable, str(script)]
 
 
@@ -67,22 +67,30 @@ def test_codex_failure_does_not_publish_output_or_echo_process_text(tmp_path, bo
     assert 'secret-token' not in json.dumps(result)
 
 
-def test_maintainer_routes_compact_through_codex_without_provider_credentials(tmp_path, monkeypatch):
+@pytest.mark.parametrize("effort", ["auto", "high"])
+def test_maintainer_routes_compact_through_codex_without_provider_credentials(tmp_path, monkeypatch, effort):
     from seywo import inbox, maintain
     from test_compact_maintain import CompactTransport, make_source
     initialize(tmp_path)
     path = tmp_path / '.seywo/config.json'
     enable_plugin_hook(path)
+    from seywo.settings import use_codex
+    use_codex(load_config(path), reasoning_effort=effort)
     config = load_config(path)
     fake = CompactTransport()
     fake.model = 'codex-default'
-    monkeypatch.setattr(maintain, 'CodexTransport', lambda **kwargs: fake)
+    runtime_options = []
+    def factory(**kwargs):
+        runtime_options.append(kwargs)
+        return fake
+    monkeypatch.setattr(maintain, 'CodexTransport', factory)
     chat = 'native-compact-fixture'
     inbox.record(config, chat, 'PreCompact', str(make_source(tmp_path, chat)))
     report = maintain.run_chat(config, chat)
     assert report['state'] == 'done', report
     assert report['calls'] == 1
     assert len(fake.payloads[0]['turns']) == 2
+    assert runtime_options[0]['reasoning_effort'] == effort
 
 
 def test_native_model_is_frozen_and_auditable_without_duplicate_schema_prompt(tmp_path):
@@ -119,7 +127,7 @@ def test_model_subprocess_excludes_skill_catalog_without_editing_user_configurat
 args=sys.argv[1:]
 overrides=[args[i+1] for i,a in enumerate(args[:-1]) if a=='-c']
 skills=next(v for v in overrides if v.startswith('skills.config='))
-assert 'private-skill/SKILL.md' in skills and 'enabled=false' in skills
+assert 'private-skill' in skills and 'SKILL.md' in skills and 'enabled=false' in skills
 assert 'view_image' in args and 'image_generation' in args
 Path(args[args.index('--output-last-message')+1]).write_text('{}')
 ''')

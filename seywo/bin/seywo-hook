@@ -1,5 +1,4 @@
 #!/bin/sh
-# Lifecycle entrypoint resolves the same Python runtime as the plugin MCP.
+# Compatibility shortcut; hooks.json uses the portable Python entry directly.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-[ "${SEYWO_INTERNAL_MODEL:-}" = 1 ] && exit 0
 exec "$HERE/bin/seywo-runtime" "$@"

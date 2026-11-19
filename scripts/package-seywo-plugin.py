@@ -4,7 +4,6 @@ import argparse
 import json
 from pathlib import Path
 import shutil
-import stat
 import zipfile
 
 REPO = Path(__file__).resolve().parents[1]
@@ -52,7 +51,9 @@ codex plugin add seywo@seywo-local
 Enable Seywo in the current project and review/trust its five Hooks in Codex.
 Default extraction reuses the installed Codex login and global model configuration.
 No standalone Seywo/SessionGraph application or extra API key is required.
-macOS/Linux needs Python 3.11+ or uv. First SDK provisioning requires network access.
+Windows, macOS and Linux share the same uv entrypoint. Install uv on PATH once.
+uv provisions Python 3.11+ and the pinned MCP SDK in its own cache; first provisioning
+requires network access. Hooks reuse that prepared runtime offline.
 Existing chat MCP connections may need to reconnect after installing/updating.
 See seywo/docs/PLUGIN.md for settings, storage and verification boundaries.
 '''.replace('VERSION', version))
@@ -63,7 +64,7 @@ See seywo/docs/PLUGIN.md for settings, storage and verification boundaries.
                 bundle.write(path, Path(package.name) / path.relative_to(package))
     return {'version': version, 'directory': str(package), 'archive': str(archive),
             'bytes': archive.stat().st_size, 'file_count': sum(p.is_file() for p in package.rglob('*')),
-            'executable_entrypoint': bool((package / 'seywo/bin/seywo-runtime').stat().st_mode & stat.S_IXUSR)}
+            'portable_entrypoint': (package / 'seywo/bin/seywo-launch.py').is_file()}
 
 
 if __name__ == '__main__':

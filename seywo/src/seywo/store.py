@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from .sqlite_paths import sqlite_uri
 from .admission import require_human, transcript_meta
 from .projection import VERSION, assistant_body_hash, compact_body_hash, project, search_tokens
 
@@ -87,7 +88,7 @@ class Store:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             os.close(fd)
         mode = "ro" if read_only else "rw"
-        self.db = sqlite3.connect(path.as_uri() + f"?mode={mode}", uri=True, timeout=10)
+        self.db = sqlite3.connect(sqlite_uri(path, mode=mode), uri=True, timeout=10)
         self.db.row_factory = sqlite3.Row
         from .storage_schema import register
         register(self.db)

@@ -9,7 +9,7 @@ import argparse
 import json
 import os
 from pathlib import Path
-import select
+from seywo_protocol import PipeReader
 import subprocess
 import tempfile
 import time
@@ -30,12 +30,14 @@ def verify(project, host_chat=None, host_binary="codex"):
     assert len(registered) == 1
     transport = registered[0]['transport']
     installed = Path(transport['cwd'])
-    assert transport['command'] == 'sh'
-    assert transport['args'] == ['./bin/seywo-runtime', '--mcp']
+    expected = json.loads((Path(__file__).resolve().parents[1] / 'seywo/mcp.json').read_text())['mcpServers']['seywo']
+    assert transport['command'] == expected['command']
+    assert transport['args'] == expected['args']
     assert Path(transport['cwd']) == installed
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen([host_binary, 'app-server', '--stdio'], cwd=project,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        reader = PipeReader(process.stdout)
         buffered = b''
         next_id = 0
 
@@ -49,9 +51,9 @@ def verify(project, host_chat=None, host_binary="codex"):
             deadline = time.monotonic() + 60
             while time.monotonic() < deadline:
                 if b'\n' not in buffered:
-                    if not select.select([process.stdout], [], [], 0.5)[0]:
+                    chunk = reader.read(0.5)
+                    if chunk is None:
                         continue
-                    chunk = os.read(process.stdout.fileno(), 65536)
                     if not chunk:
                         raise RuntimeError('Codex host closed the connection')
                     buffered += chunk
@@ -85,7 +87,7 @@ def verify(project, host_chat=None, host_binary="codex"):
                 assert server['runtimeStatus'] == 'connected'
             assert server.get('tools'), {'fields': sorted(server)}
             tools = server['tools']
-            assert len(tools) == 17
+            assert len(tools) == 18
             metadata = tools['seywo_open']['_meta']
             assert metadata['openai/ui']['entrypoints'] == [{'type': 'thread'}]
             assert tools['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']

@@ -19,14 +19,15 @@ def test_plugin_declares_compact_lifecycle_hooks_in_package():
         command_hooks = entries[0]["hooks"]
         assert len(command_hooks) == 1
         hook = command_hooks[0]
-        assert hook == {"type": "command", 'command': '"${PLUGIN_ROOT}/bin/seywo-hook"'}
+        assert hook['type'] == 'command'
+        assert '--offline' in hook['command']
+        assert '"${PLUGIN_ROOT}/bin/seywo-launch.py" --hook' in hook['command']
 
 
-def test_plugin_hook_entrypoint_is_bundled_and_executable():
-    entry = ROOT / "bin" / "seywo-hook"
+def test_plugin_hook_entrypoint_is_bundled_and_interpreted():
+    entry = ROOT / "bin" / "seywo-launch.py"
     assert entry.is_file()
-    assert entry.stat().st_mode & 0o111
-    assert "seywo-runtime" in entry.read_text(encoding="utf-8")
+    assert "--hook" in entry.read_text(encoding="utf-8")
 
 
 def test_plugin_manifest_describes_owned_compact_trigger():
@@ -43,12 +44,12 @@ def test_agent_plugins_manifest_registers_hooks_and_uses_absolute_plugin_entry()
     assert manifest['hooks'] == './hooks.json'
     hooks = json.loads((ROOT / 'hooks.json').read_text())['hooks']
     assert set(hooks) == {'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
-    assert all(entry['hooks'][0]['command'] == '"${PLUGIN_ROOT}/bin/seywo-hook"'
+    assert all('"${PLUGIN_ROOT}/bin/seywo-launch.py" --hook' in entry['hooks'][0]['command']
                for entries in hooks.values() for entry in entries)
 
 
 def test_first_run_has_time_to_provision_private_runtime():
     config = json.loads((ROOT / 'mcp.json').read_text())['mcpServers']['seywo']
     assert config['startup_timeout_sec'] >= 180
-    assert config['command'] == 'sh'
+    assert config['command'] == 'uv'
     assert config['cwd'] == '.'

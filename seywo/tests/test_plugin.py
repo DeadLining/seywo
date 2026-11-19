@@ -21,7 +21,7 @@ def test_startup_and_listing_do_not_create_project_data(tmp_path):
     names = {tool.name for tool in asyncio.run(server.list_tools())}
     assert 'seywo_initialize_project' in names
     assert 'seywo_search' in names
-    assert len(names) == 17
+    assert len(names) == 18
     assert not (tmp_path / '.seywo').exists()
 
 
@@ -92,7 +92,7 @@ def test_installed_copy_stdio_preserves_workspace_and_serves_history(tmp_path):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                assert len(tools.tools) == 17
+                assert len(tools.tools) == 18
                 assert not (workspace / '.seywo').exists()
                 setup = await session.call_tool('seywo_initialize_project', {})
                 assert not setup.isError

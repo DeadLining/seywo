@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-hook\""
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
           }
         ]
       }
@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-hook\""
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
           }
         ]
       }
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-hook\""
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
           }
         ]
       }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-hook\""
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
           }
         ]
       }
@@ -45,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-hook\""
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
           }
         ]
       }

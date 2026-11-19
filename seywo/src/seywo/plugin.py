@@ -1,6 +1,6 @@
 """Plugin binding uses host workspace roots, not the plugin process directory."""
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from .runtime_platform import local_file_path
 
 from .config import enable_plugin_hook, initialize, load_config, project_directory, state_dir
 from .mcp_server import create_server
@@ -25,10 +25,7 @@ def _config_path(root):
 def workspace_from_roots(roots):
     if len(roots) != 1:
         raise ValueError('Seywo requires exactly one selected workspace root')
-    uri = urlsplit(str(roots[0].uri))
-    if uri.scheme != 'file' or uri.netloc not in ('', 'localhost') or uri.query or uri.fragment:
-        raise ValueError('Seywo requires a local file workspace root')
-    return Path(unquote(uri.path))
+    return local_file_path(roots[0].uri)
 
 
 def create_plugin_server(project_root: Path | None = None):

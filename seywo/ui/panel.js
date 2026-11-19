@@ -155,33 +155,114 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         const sourceLabel = el('label', '模型来源'); sourceLabel.append(source);
         const fields = el('div', undefined, 'model-settings-fields'); fields.dataset.apiFields = '';
         for (const [label, input] of [['端点', endpoint], ['模型', model], ['API KEY', key]]) { const l = el('label', label); l.append(input); fields.append(l); }
-        const nativeInfo = el('p', '沿用 Codex 的默认模型、提供方和登录信息，无需 API KEY。', 'muted');
+        const nativeInfo = el('p', '沿用本机 Codex 的提供方和登录信息，模型和思考强度可单独设置。', 'muted');
+        const nativeFields = el('div', undefined, 'model-settings-fields');
+        const nativeModel = el('select'); nativeModel.dataset.codexModel = '';
+        const inherit = el('option', '跟随 Codex 默认模型'); inherit.value = 'codex-default'; nativeModel.append(inherit);
+        const savedModel = data.backend === 'codex' && data.model ? data.model : 'codex-default';
+        if (savedModel !== 'codex-default') {
+            const saved = el('option', savedModel + '（已保存）'); saved.value = savedModel; nativeModel.append(saved);
+        }
+        nativeModel.value = savedModel;
+        const nativeLabel = el('label', '模型'); nativeLabel.append(nativeModel);
+        const nativeReasoning = el('select'); nativeReasoning.dataset.codexReasoning = '';
+        const reasoningLabel = el('label', '思考强度'); reasoningLabel.append(nativeReasoning);
+        const reasoningInfo = el('p', '', 'muted'); reasoningInfo.dataset.reasoningStatus = '';
+        const effortLabels = {auto:'自动（优先低消耗）', none:'关闭 · none', minimal:'最低 · minimal',
+            low:'低 · low', medium:'中 · medium', high:'高 · high', xhigh:'更高 · xhigh', max:'最高 · max', ultra:'极高 · ultra'};
+        const savedEffort = data.backend === 'codex' ? data.reasoning_effort || 'auto' : 'auto';
+        let modelRows = [], catalogLoading = false, catalogLoaded = false;
+        let defaultModel = savedModel === 'codex-default' ? data.effective_model : null;
+        function updateEfforts(resetUnsupported = false) {
+            let selected = nativeReasoning.value || savedEffort;
+            const targetModel = nativeModel.value === 'codex-default' ? defaultModel : nativeModel.value;
+            const target = targetModel ? modelRows.find(row => row.model === targetModel)
+                : modelRows.find(row => row.is_default);
+            const supported = Object.keys(effortLabels).filter(value => value !== 'auto' && target?.reasoning_efforts?.includes(value));
+            let reset = false;
+            if (resetUnsupported && selected !== 'auto' && !supported.includes(selected)) {
+                selected = 'auto'; reset = true;
+            }
+            nativeReasoning.replaceChildren();
+            for (const value of ['auto', ...supported]) {
+                const option = el('option', effortLabels[value]); option.value = value; nativeReasoning.append(option);
+            }
+            if (selected !== 'auto' && !supported.includes(selected)) {
+                const option = el('option', `${effortLabels[selected] || selected}（待确认支持）`);
+                option.value = selected; nativeReasoning.append(option);
+            }
+            nativeReasoning.value = selected;
+            reasoningInfo.textContent = reset ? '新模型未声明支持原档位，已切换为自动（优先低消耗）。'
+                : selected === 'auto' ? '自动优先使用当前模型支持的低强度档位。'
+                : supported.includes(selected) ? '测试和后台整理均使用所选思考强度。'
+                : '当前列表未确认支持已保存的档位，请重新读取模型或选择自动。';
+        }
+        nativeModel.onchange = () => updateEfforts(true);
+        nativeReasoning.onchange = () => updateEfforts();
+        updateEfforts();
+        const catalogStatus = el('p', '', 'muted'); catalogStatus.dataset.modelListStatus = '';
+        const refreshModels = button('重新读取模型', () => void loadModels());
+        refreshModels.dataset.modelListRefresh = '';
+        refreshModels.hidden = !actions.modelList;
+        nativeFields.append(nativeLabel, reasoningLabel, reasoningInfo, catalogStatus, refreshModels);
+        async function loadModels() {
+            if (!actions.modelList || catalogLoading) return;
+            catalogLoading = true; refreshModels.disabled = true;
+            catalogStatus.textContent = '正在读取本机 Codex 模型列表…';
+            try {
+                const result = await actions.modelList();
+                if (result.error) { catalogStatus.textContent = result.message || '模型列表暂不可用，可继续测试默认模型。'; return; }
+                if (Object.hasOwn(result, 'default_model')) defaultModel = result.default_model;
+                modelRows = Array.isArray(result.models) ? result.models.filter(row => row && typeof row.model === 'string') : [];
+                const selected = nativeModel.value;
+                nativeModel.replaceChildren(inherit);
+                const seen = new Set(['codex-default']);
+                for (const row of result.models || []) {
+                    if (!row || typeof row.model !== 'string' || !row.model || seen.has(row.model)) continue;
+                    seen.add(row.model);
+                    const option = el('option', row.label && row.label !== row.model ? `${row.label} · ${row.model}` : row.model);
+                    option.value = row.model; nativeModel.append(option);
+                }
+                if (!seen.has(selected)) {
+                    const saved = el('option', selected + '（未在当前列表中）'); saved.value = selected; nativeModel.append(saved);
+                }
+                nativeModel.value = selected;
+                catalogLoaded = true; updateEfforts();
+                catalogStatus.textContent = seen.size > 1 ? '列表来自本机 Codex，实际可用性以测试结果为准。' : 'Codex 未提供可选模型，仍可使用默认配置。';
+            } catch { catalogStatus.textContent = '读取模型列表失败，请重试；仍可测试默认配置。'; }
+            finally { catalogLoading = false; refreshModels.disabled = false; }
+        }
         const showFields = () => {
             const native = source.value === 'codex';
-            fields.hidden = native; nativeInfo.hidden = !native;
+            fields.hidden = native; nativeInfo.hidden = nativeFields.hidden = !native;
+            if (native && !catalogLoaded) void loadModels();
             endpoint.required = model.required = !native;
         };
         source.onchange = showFields; showFields();
         const actionRow = el('div', undefined, 'model-settings-actions');
         const test = button('测试模型', undefined); test.dataset.modelTest = '';
         const save = button('保存配置', undefined); save.dataset.modelSave = ''; save.type = 'submit';
-        actionRow.append(test, save); form.append(sourceLabel, nativeInfo, fields, actionRow);
+        actionRow.append(test, save); form.append(sourceLabel, nativeInfo, nativeFields, fields, actionRow);
         const status = el('p', data.backend === 'codex'
             ? (data.configured ? '正在使用 Codex。' : '请先安装并登录 Codex 命令行。')
             : (data.configured ? (data.credential_configured ? '已配置，可供 Compact 使用。' : '还没有 API KEY。') : '尚未配置模型。'), 'muted');
         status.dataset.modelStatus = ''; settingsBody.replaceChildren(status, form);
         const run = async kind => {
-            test.disabled = save.disabled = source.disabled = true;
+            test.disabled = save.disabled = source.disabled = nativeModel.disabled = nativeReasoning.disabled = true;
             try {
                 const native = source.value === 'codex';
-                const args = { backend: source.value, endpoint: native ? '' : endpoint.value.trim(), model: native ? '' : model.value.trim(), api_key: native ? '' : key.value };
+                const args = { backend: source.value, endpoint: native ? '' : endpoint.value.trim(), model: native ? nativeModel.value : model.value.trim(), api_key: native ? '' : key.value, ...(native ? {reasoning_effort: nativeReasoning.value} : {}) };
                 status.textContent = kind === 'test' ? '正在测试模型…' : '正在保存…';
                 const result = kind === 'test' ? await actions.modelTest?.(args) : await actions.modelSave?.(args);
                 if (!result) throw Error('unavailable');
-                if (kind === 'test') status.textContent = result.ok ? '连接成功，本次仅调用 1 次模型。' : '连接失败，请检查模型配置或 Codex 登录状态。';
+                if (kind === 'test') {
+                    const selected = result.model_info?.selected_model;
+                    const effort = result.model_info?.reasoning_effort;
+                    status.textContent = result.ok ? `连接成功${selected ? ' · ' + selected : ''}${effort ? ' · 思考强度：' + (effortLabels[effort] || effort) : ''}，本次仅调用 1 次模型。` : (result.message || '连接失败，请检查模型配置或 Codex 登录状态。');
+                }
                 else { status.textContent = result.persisted === false ? '已使用 Codex 当前配置，无需写入项目。' : '已保存，后续 Compact 将使用该配置。'; key.value = ''; key.placeholder = '已保存，留空沿用'; }
             } catch { status.textContent = '模型设置暂时不可用，请稍后重试。'; }
-            finally { test.disabled = save.disabled = source.disabled = false; }
+            finally { test.disabled = save.disabled = source.disabled = nativeModel.disabled = nativeReasoning.disabled = false; }
         };
         test.onclick = () => void run('test');
         form.onsubmit = event => { event.preventDefault(); void run('save'); };

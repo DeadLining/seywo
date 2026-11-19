@@ -10,8 +10,12 @@ import json
 import os
 from pathlib import Path
 import stat
+
 import tempfile
+from .runtime_platform import private_owner, protect_credential, replace_file, reveal_credential
+
 from .locking import file_lock
+from .codex_runtime import validate_reasoning_effort
 from urllib.parse import urlsplit
 
 
@@ -64,8 +68,7 @@ def _read_credential(config: dict, endpoint: str) -> str:
     folder = _credential_dir(config)
     if not folder.is_dir() or folder.is_symlink():
         return ""
-    mode = stat.S_IMODE(folder.stat().st_mode)
-    if mode != 0o700 or folder.stat().st_uid != os.getuid():
+    if not private_owner(folder.stat(), 0o700):
         raise ValueError("unsafe_credentials")
     path = folder / _credential_name(endpoint)
     try:
@@ -74,13 +77,13 @@ def _read_credential(config: dict, endpoint: str) -> str:
         return ""
     with os.fdopen(fd, "r", encoding="utf-8") as handle:
         info = os.fstat(handle.fileno())
-        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid != os.getuid() or info.st_size > 65536):
+        if (not stat.S_ISREG(info.st_mode) or not private_owner(info, 0o600)
+                or info.st_size > 65536):
             raise ValueError("unsafe_credentials")
         data = json.loads(handle.read(65537))
     if not isinstance(data, dict) or data.get("endpoint") != endpoint:
         raise ValueError("credential_endpoint_mismatch")
-    key = data.get("api_key") or ""
+    key = reveal_credential(data, endpoint)
     if not isinstance(key, str):
         raise ValueError("unsafe_credentials")
     return key
@@ -93,7 +96,7 @@ def _write_credential(config: dict, endpoint: str, api_key: str) -> None:
     path = folder / _credential_name(endpoint)
     if path.is_symlink():
         raise ValueError("Seywo credential must not be a symlink")
-    payload = json.dumps({"endpoint": endpoint, "api_key": api_key}, ensure_ascii=False) + "\n"
+    payload = json.dumps({"endpoint": endpoint, **protect_credential(api_key, endpoint)}, ensure_ascii=False) + "\n"
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
@@ -103,7 +106,7 @@ def _write_credential(config: dict, endpoint: str, api_key: str) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
         os.chmod(path, 0o600)
     finally:
         if temporary is not None:
@@ -120,7 +123,7 @@ def _write_config(config: dict, data: dict) -> None:
             handle.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        replace_file(temporary, path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -134,7 +137,8 @@ def read_provider(config=None) -> dict:
     if runtime.get("backend") == "codex":
         from .codex_transport import DEFAULT_MODEL
         return {"backend": "codex", "model": runtime.get("model") or DEFAULT_MODEL,
-                "timeout": 420, "max_output_tokens": 768}
+                "timeout": 420, "max_output_tokens": 768,
+                "reasoning_effort": validate_reasoning_effort(runtime.get("reasoning_effort", "auto"))}
     if not runtime:
         raise ValueError("provider_not_configured")
     if runtime.get("backend") != "responses":
@@ -168,9 +172,15 @@ def provider_status(config: dict | None = None) -> dict:
     config = config if isinstance(config, dict) else {}
     runtime = config.get("model_runtime") or {"backend": "codex"}
     if runtime.get("backend") == "codex":
-        from .codex_transport import codex_command, DEFAULT_MODEL
+        from .codex_transport import codex_command, DEFAULT_MODEL, model_selection
+        from .plugin_context import catalog_home
+        try:
+            effective_model = model_selection(catalog_home(), runtime.get("model") or DEFAULT_MODEL)['selected_model']
+        except (OSError, ValueError, TypeError):
+            effective_model = None
         return {"configured": bool(codex_command()), "backend": "codex", "endpoint": "",
-                "model": runtime.get("model") or DEFAULT_MODEL, "credential_required": False,
+                "model": runtime.get("model") or DEFAULT_MODEL, "effective_model": effective_model,
+                "reasoning_effort": runtime.get("reasoning_effort", "auto"), "credential_required": False,
                 "credential_configured": False, "model_calls": 0}
     local = config.get("provider") or {}
     if not isinstance(local, dict) or not local.get("endpoint") or not local.get("model"):
@@ -218,12 +228,19 @@ def save_provider(config: dict, *, endpoint: str, model: str, api_key: str = "",
             "credential_configured": True, "model_calls": 0}
 
 
-def use_codex(config: dict, *, model: str = "") -> dict:
+def use_codex(config: dict, *, model: str = "", reasoning_effort: str = "auto") -> dict:
     from .config import load_config
+    reasoning_effort = validate_reasoning_effort(reasoning_effort)
+    model = model.strip()
+    if model == "codex-default":
+        model = ""
+    if len(model) > 200:
+        raise ValueError("invalid_model_selection")
     with file_lock(_project_state(config) / ".init.lock"):
         fresh = load_config(Path(config["_path"]))
         data = {k: v for k, v in fresh.items() if not k.startswith("_")}
-        data["model_runtime"] = {"backend": "codex", **({"model": model.strip()} if model.strip() else {})}
+        data["model_runtime"] = {"backend": "codex", **({"model": model} if model else {}),
+                                 **({"reasoning_effort": reasoning_effort} if reasoning_effort != "auto" else {})}
         data["hook"] = {**(data.get("hook") or {}), "pipeline": "seywo-compact-v1"}
         _write_config(fresh, data)
     return {"saved": True, **provider_status({**fresh, "model_runtime": data["model_runtime"]})}

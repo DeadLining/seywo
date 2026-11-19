@@ -11,6 +11,8 @@ import re
 import sqlite3
 from uuid import UUID
 
+from .sqlite_paths import sqlite_uri
+
 
 def host_thread_id(context):
     try:
@@ -64,7 +66,7 @@ def host_workspace(context, *, home=None):
         return None
     path = max(catalogs, key=lambda item: item[0])[1]
     try:
-        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1)) as db:
+        with closing(sqlite3.connect(sqlite_uri(path.resolve(), mode='ro'), uri=True, timeout=1)) as db:
             db.execute('PRAGMA query_only=ON')
             row = db.execute('SELECT cwd FROM threads WHERE id=?', (thread,)).fetchone()
     except (sqlite3.Error, OSError):

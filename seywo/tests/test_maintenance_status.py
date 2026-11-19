@@ -44,11 +44,11 @@ def test_dead_worker_is_interrupted_and_retryable(config):
 
 
 def test_live_lock_keeps_running_state(config):
-    import fcntl
+    from seywo.runtime_platform import FileLease
     path = Path(config['_path']).parent / 'maintain/chat.lock'
     path.parent.mkdir(exist_ok=True)
-    with path.open('a+') as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    with FileLease(path) as handle:
+        assert handle.acquire(blocking=False)
         status.record(config, 'chat', 'running')
         assert status.read(config, 'chat')['state'] == 'running'
 

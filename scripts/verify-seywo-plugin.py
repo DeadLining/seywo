@@ -5,9 +5,10 @@ from datetime import date
 import json
 import os
 from pathlib import Path
-import select
+from seywo_protocol import PipeReader
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -35,7 +36,8 @@ def verify(repository=REPOSITORY):
         servers = json.loads(cli('mcp', 'list', '--json'))
         server = next(item for item in servers if item['name'] == 'seywo')
         transport = server['transport']
-        assert transport['command'] == 'sh' and transport['args'] == ['./bin/seywo-runtime', '--mcp']
+        expected = json.loads((repository / 'seywo/mcp.json').read_text())['mcpServers']['seywo']
+        assert transport['command'] == expected['command'] and transport['args'] == expected['args']
         installed = Path(transport['cwd'])
         assert installed != repository / 'seywo'
         assert Path(transport['cwd']) == installed
@@ -44,7 +46,7 @@ def verify(repository=REPOSITORY):
         batch_roots = [base / 'batch first project', base / 'batch second project']
         for root in batch_roots:
             root.mkdir()
-        batch_command = ['sh', str(installed / 'bin/seywo'), 'init-batch', *map(str, batch_roots)]
+        batch_command = [sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli', 'init-batch', *map(str, batch_roots)]
         def batch_cli(*extra, answer=''):
             result = subprocess.run([*batch_command, *extra], input=answer, env=env,
                                     capture_output=True, text=True, timeout=30)
@@ -64,6 +66,7 @@ def verify(repository=REPOSITORY):
         with (base / 'host.stderr').open('wb') as error_log:
             process = subprocess.Popen(['codex', 'app-server', '--stdio', '--enable', 'hooks'], env=env, cwd=workspace,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error_log)
+            reader = PipeReader(process.stdout)
             buffered = b''
             next_id = 0
             notifications = []
@@ -78,9 +81,9 @@ def verify(repository=REPOSITORY):
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if b'\n' not in buffered:
-                        if not select.select([process.stdout], [], [], 0.5)[0]:
+                        chunk = reader.read(0.5)
+                        if chunk is None:
                             continue
-                        chunk = os.read(process.stdout.fileno(), 65536)
                         if not chunk:
                             raise RuntimeError('Codex host closed the connection')
                         buffered += chunk
@@ -129,7 +132,7 @@ def verify(repository=REPOSITORY):
                 inventory = request('mcpServerStatus/list', {'threadId': thread})
                 running = next(item for item in inventory['data'] if item['name'] == 'seywo')
                 assert running['runtimeStatus'] == 'connected', running['runtimeStatus']
-                assert len(running['tools']) == 17
+                assert len(running['tools']) == 18
                 hook_inventory = request('hooks/list', {'cwds': [str(workspace)]})
                 plugin_hooks = [hook for entry in hook_inventory['data'] for hook in entry['hooks']
                                 if hook.get('pluginId') == 'seywo@seywo-local']
@@ -140,6 +143,7 @@ def verify(repository=REPOSITORY):
                 assert running['tools']['seywo_model_status']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_model_save']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_model_test']['_meta']['ui']['visibility'] == ['app']
+                assert running['tools']['seywo_model_list']['_meta']['ui']['visibility'] == ['app']
                 assert not (workspace / '.seywo').exists(), 'startup wrote project data'
 
                 def raw_tool(name, **arguments):
@@ -188,8 +192,8 @@ def verify(repository=REPOSITORY):
                 ]
                 fixture.write_text(''.join(json.dumps(item) + '\n' for item in events))
                 # Import a fixture only; never scan the user's Codex history.
-                # bin/seywo is a shell script, so invoke it through sh for portability.
-                result = subprocess.run(['sh', str(installed / 'bin/seywo'),
+                # Exercise the shared Python CLI without a platform shell.
+                result = subprocess.run([sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli',
                                          '--config', first['config'], 'import', str(fixture),
                                          '--chat', 'plugin-acceptance', '--order', '0'],
                                         cwd=workspace, capture_output=True, text=True, timeout=20)
@@ -199,7 +203,7 @@ def verify(repository=REPOSITORY):
                 host_events[0]['payload']['id'] = thread
                 host_events[1]['payload']['content'][0]['text'] = 'host current chat fixture'
                 host_fixture.write_text(''.join(json.dumps(item) + '\n' for item in host_events))
-                imported = subprocess.run(['sh', str(installed / 'bin/seywo'), '--config', first['config'],
+                imported = subprocess.run([sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli', '--config', first['config'],
                                            'import', str(host_fixture), '--chat', thread, '--order', '0'],
                                           cwd=workspace, capture_output=True, text=True, timeout=20)
                 assert imported.returncode == 0, imported.stderr
@@ -215,7 +219,7 @@ def verify(repository=REPOSITORY):
                 open_meta = running['tools']['seywo_open']['_meta']
                 assert open_meta['openai/ui']['entrypoints'] == [{'type': 'thread'}]
                 assert running['tools']['seywo_open']['title'] == 'Seywo'
-                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v3.html'
+                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v7.html'
                 assert running['tools']['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
                 opened = raw_tool('seywo_open', chat_id='plugin-acceptance')
@@ -259,7 +263,7 @@ with Store(load_config(Path(sys.argv[2]))) as store:
     service.edit('plugin-acceptance',base_version=1,override_revision=0,actor='fixture',
                  patch={'entity':'item','id':item['id'],'fields':{'title':'已验证插件主线'}})
 """
-                seeded = subprocess.run(['python3', '-c', seed_code, str(installed), first['config']],
+                seeded = subprocess.run([sys.executable, '-c', seed_code, str(installed), first['config']],
                                         cwd=workspace, capture_output=True, text=True, timeout=20)
                 assert seeded.returncode == 0, seeded.stderr
                 narrative = tool('seywo_panel_data', view='narrative', chat_id='plugin-acceptance')
@@ -294,8 +298,12 @@ with Store(load_config(Path(sys.argv[2]))) as store:
                     if b'\n' in buffered:
                         line, buffered = buffered.split(b'\n', 1)
                         notifications.append(json.loads(line))
-                    elif select.select([process.stdout], [], [], 0.2)[0]:
-                        buffered += os.read(process.stdout.fileno(), 65536)
+                    else:
+                        chunk = reader.read(0.2)
+                        if chunk == b'':
+                            raise RuntimeError('Codex host closed the connection')
+                        if chunk is not None:
+                            buffered += chunk
                 completed_hooks = [notice['params']['run'] for notice in notifications
                                    if notice.get('method') == 'hook/completed']
                 assert {'sessionStart', 'userPromptSubmit'} <= {

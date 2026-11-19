@@ -23,9 +23,9 @@ def _compact(args):
     from . import inbox, maintain
     config = load_config(args.config)
     if args.compact_command == "enable":
-        data = json.loads(Path(config["_path"]).read_text())
+        data = json.loads(Path(config["_path"]).read_text(encoding='utf-8'))
         data["hook"] = {"enabled": not args.disable}
-        Path(config["_path"]).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        Path(config["_path"]).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
         return {"config": config["_path"], "hook": data["hook"]}
     if args.compact_command == "status":
         return {"pending": [{k: i[k] for k in ("id", "chat_id", "event", "state", "attempts", "error_code")}

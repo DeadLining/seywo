@@ -4,7 +4,6 @@ No transcript, model response or raw exception is stored here. Reads never write
 or call a model. Kernel writer locks distinguish an interrupted worker from a
 long model call without heartbeat writes or an extra background service.
 """
-import fcntl
 import json
 import math
 from pathlib import Path
@@ -12,14 +11,20 @@ import re
 import time
 from uuid import uuid4
 
+from .runtime_platform import FileLease
+
 from .config import _atomic_write
 from .locking import file_lock
+from .codex_runtime import ERROR_MESSAGES
 
 CHAT = re.compile(r'[A-Za-z0-9_-]{1,128}')
 START_GRACE_SECONDS = 60
 STATES = {'idle', 'queued', 'running', 'done', 'partial', 'failed', 'blocked', 'interrupted', 'disabled'}
 FAILURES = {'partial', 'failed', 'blocked', 'interrupted'}
 REASONS = {
+    **{code: ERROR_MESSAGES[code] for code in (
+        'codex_cli_incompatible', 'codex_auth_required', 'codex_model_unavailable',
+        'codex_reasoning_unsupported', 'codex_rate_limited', 'codex_network_error', 'codex_config_invalid')},
     'compact_new_phase_requires_user_objective': '新阶段缺少本段用户目标的有效定位，模型修正后仍未通过校验。可以重试整理。',
     'provider_not_configured': '模型尚未配置，请检查模型设置。',
     'missing_provider_credential': '模型凭据不可用，请检查模型设置。',
@@ -135,12 +140,8 @@ def _alive(config, chat_id):
     try:
         if path.is_symlink():
             return False
-        with path.open('r') as stream:
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True
-        return False
+        with FileLease(path, create=False) as lease:
+            return not lease.acquire(blocking=False)
     except OSError:
         return False
 

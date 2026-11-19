@@ -2,9 +2,10 @@
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-import fcntl
-import os
 from pathlib import Path
+
+
+from .runtime_platform import FileLease
 
 _held = ContextVar("seywo_locks", default={})
 
@@ -24,16 +25,13 @@ def file_lock(path, *, exclusive=True):
         yield
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    with FileLease(path) as lease:
+        lease.acquire(exclusive=exclusive)
         token = _held.set({**held, key: "exclusive" if exclusive else "shared"})
         try:
             yield
         finally:
             _held.reset(token)
-    finally:
-        os.close(fd)
 
 
 def lifecycle(config, *, exclusive=False):
