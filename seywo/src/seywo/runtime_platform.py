@@ -115,6 +115,7 @@ class ProcessScope:
                 self.job.assign_and_resume(process.pid)
             except BaseException:
                 process.kill()
+                self.job.terminate()
                 self.job.close()
                 self.job = None
                 raise
@@ -143,6 +144,7 @@ class ProcessScope:
             return
         self._terminated = True
         if self.job:
+            self.job.terminate()
             self.job.close()
             self.job = None
         elif self.process and os.name != "nt":

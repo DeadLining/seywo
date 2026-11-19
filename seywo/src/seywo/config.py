@@ -113,13 +113,16 @@ def initialize(root: Path, *, plugin_hook: bool = False, skip_existing: bool = F
         if skip_existing:
             return {"skipped": True, "config": str(path)}
         load_config(path)
-    # Panel setup preserves an existing custom ignore file verbatim.
-    if not plugin_hook or not (state / ".gitignore").exists():
-        ensure_ignore(state)  # Must precede every configuration/database write.
     lock = state / ".init.lock"
     if lock.is_symlink():
         raise ValueError("initialization lock must not be a symlink")
     with file_lock(lock):
+        # Panel setup preserves an existing custom ignore file verbatim. Keep
+        # this publication inside the project lock: Windows cannot replace an
+        # open target concurrently, and concurrent initializers otherwise race
+        # before they reach the lock-protected config/database writes.
+        if not plugin_hook or not (state / ".gitignore").exists():
+            ensure_ignore(state)  # Must precede every configuration/database write.
         return _initialize_locked(root, state, plugin_hook=plugin_hook, skip_existing=skip_existing)
 
 

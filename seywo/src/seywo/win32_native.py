@@ -48,6 +48,7 @@ _unlock = api('UnlockFileEx', w.BOOL, [w.HANDLE, w.DWORD, w.DWORD, w.DWORD, c.PO
 _close = api('CloseHandle', w.BOOL, [w.HANDLE])
 _create_job = api('CreateJobObjectW', w.HANDLE, [c.c_void_p, w.LPCWSTR])
 _set_job = api('SetInformationJobObject', w.BOOL, [w.HANDLE, c.c_int, c.c_void_p, w.DWORD])
+_terminate_job = api('TerminateJobObject', w.BOOL, [w.HANDLE, w.UINT])
 _assign = api('AssignProcessToJobObject', w.BOOL, [w.HANDLE, w.HANDLE])
 _open_process = api('OpenProcess', w.HANDLE, [w.DWORD, w.BOOL, w.DWORD])
 _snapshot = api('CreateToolhelp32Snapshot', w.HANDLE, [w.DWORD, w.DWORD])
@@ -121,6 +122,10 @@ class Job:
         if self.handle:
             checked(_close(self.handle))
             self.handle = None
+
+    def terminate(self, exit_code=1):
+        if self.handle:
+            checked(_terminate_job(self.handle, exit_code))
 
 
 class DATA_BLOB(c.Structure):

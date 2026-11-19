@@ -18,6 +18,12 @@ def roots(tmp_path, *names):
     return result
 
 
+def planned_project(preview, root):
+    data = json.loads(preview)
+    return next(project for project in data['projects']
+                if project['project_root'] == str(root))
+
+
 def test_preview_and_cancel_never_write_and_do_not_discover_projects(tmp_path, monkeypatch, capsys):
     first, second, parent = roots(tmp_path, 'first', 'second', 'parent')
     child = parent / 'hidden child'
@@ -30,8 +36,9 @@ def test_preview_and_cancel_never_write_and_do_not_discover_projects(tmp_path, m
     assert main(['init-batch', str(first), str(second), '--dry-run']) == 0
     preview = capsys.readouterr().out
     for root in (first, second):
+        plan = planned_project(preview, root)
         for name in ('.gitignore', 'config.json', 'index.sqlite3', '.init.lock', 'storage-migration.lock'):
-            assert str(root / '.seywo' / name) in preview
+            assert str(root / '.seywo' / name) in plan['create']
         assert not (root / '.seywo').exists()
     assert 'modify' in preview
     monkeypatch.setattr('builtins.input', lambda _: 'no')
@@ -45,8 +52,8 @@ def test_confirmation_happens_after_preview_then_initializes_each_project(tmp_pa
     first, second = roots(tmp_path, 'first project', 'second project')
     def confirm(_):
         preview = capsys.readouterr().out
-        assert str(first / '.seywo/config.json') in preview
-        assert str(second / '.seywo/index.sqlite3') in preview
+        assert str(first / '.seywo/config.json') in planned_project(preview, first)['create']
+        assert str(second / '.seywo/index.sqlite3') in planned_project(preview, second)['create']
         assert not (first / '.seywo').exists()
         assert not (second / '.seywo').exists()
         return 'yes'

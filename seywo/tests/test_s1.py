@@ -446,13 +446,16 @@ def test_initialization_failure_preserves_custom_ignore_and_no_runtime_data(tmp_
     before = custom.read_bytes()
     def fail(*_):
         raise PermissionError("cannot publish ignore")
-    monkeypatch.setattr(config.os, "replace", fail)
+    monkeypatch.setattr(config, "replace_file", fail)
     with pytest.raises(PermissionError):
         initialize(tmp_path)
     assert custom.read_bytes() == before
     assert not (state / "config.json").exists()
     assert not (state / "index.sqlite3").exists()
-    assert sorted(p.name for p in state.iterdir()) == [".gitignore"]
+    # The initialization lock is created before the guarded publication so
+    # concurrent Windows initializers cannot race on the ignore file. It is
+    # the only control artifact allowed after this pre-config failure.
+    assert sorted(p.name for p in state.iterdir()) == [".gitignore", ".init.lock"]
 
 
 def test_historical_tool_pairing_does_not_use_later_results(project):
