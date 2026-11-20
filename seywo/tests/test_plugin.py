@@ -165,7 +165,7 @@ def test_plugin_setup_enables_its_bundled_compact_hook_on_existing_project(tmp_p
     saved = json.loads(config.read_text())
     assert saved['hook']['enabled'] is True
     assert saved['hook']['pipeline'] == 'seywo-compact-v1'
-    assert saved['model_runtime'] == {'backend': 'codex'}
+    assert 'model_runtime' not in saved
 
 
 @pytest.mark.parametrize('kind', ['root', 'state', 'config', 'dangling_config', 'database'])

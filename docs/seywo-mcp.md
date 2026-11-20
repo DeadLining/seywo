@@ -27,7 +27,7 @@ codex plugin marketplace add https://github.com/DeadLining/seywo.git
 codex plugin add seywo@seywo-local
 ```
 
-安装或更新后重新连接 Codex MCP。插件全局安装一次后，每个项目首次打开 Seywo 面板时自动按需初始化，无需输入“启用 Seywo”。`seywo_open` 只初始化当前 Chat 明确绑定的项目根目录，创建 `.seywo/.gitignore`、配置和空索引数据库并启用项目 Hook；已有配置、project_id、数据库与 provider/model 设置保持不变。初始化不导入历史、不调用模型、不扫描磁盘或读取其他项目。项目不明确时显示项目选择器，`seywo_select_project` 仍只绑定而不写入；选择后面板自动打开并初始化。失败显示原因并提供重试，成功继续加载当前 Chat；尚未导入的 Chat 保持空状态。`seywo_initialize_project` 保留原有调用参数，供显式初始化使用。
+安装或更新后重新连接 Codex MCP。插件全局安装一次后，每个项目首次打开 Seywo 面板时自动按需初始化，无需输入“启用 Seywo”。`seywo_open` 只初始化当前 Chat 明确绑定的项目根目录，创建 `.seywo/.gitignore`、配置和空索引数据库并启用项目 Hook；已有配置、project_id 和数据库保持不变；模型来源、模型、思考强度与 provider 凭据统一保存在当前用户的 Seywo 设置中，不写入项目配置。初始化不导入历史、不调用模型、不扫描磁盘或读取其他项目。项目不明确时显示项目选择器，`seywo_select_project` 仍只绑定而不写入；选择后面板自动打开并初始化。失败显示原因并提供重试，成功继续加载当前 Chat；尚未导入的 Chat 保持空状态。`seywo_initialize_project` 保留原有调用参数，供显式初始化使用。
 
 ## 显式批量初始化
 
@@ -67,4 +67,4 @@ seywo/bin/seywo --config "/absolute/project/.seywo/config.json" mcp
 
 `seywo_model_list` 仅向 App 暴露，通过本机 Codex 的 `model/list` 读取模型目录，支持分页和有界超时，不创建 Chat 或调用模型生成内容。列表按需读取，读取失败可重试，已有模型选择不会被清空。模型目录不代表账户权限验证；`seywo_model_test` 使用所选模型执行一次显式测试，并返回安全错误代码、固定原因、耗时和所请求的模型身份。该接口不增加模型可见的历史工具。
 
-`seywo_model_save` 和 `seywo_model_test` 接受 Codex 的 `reasoning_effort`。`auto` 保持低消耗策略；手选档位须由当前目标模型目录确认支持，未确认时在生成前返回错误。测试未提供该参数时沿用已保存值；保存 `auto` 会清除项目覆盖。`seywo_model_status` 返回已保存档位和解析后的 `effective_model`；`seywo_model_list.default_model` 提供宿主实际默认目标，面板据此显示跟随默认模型时的对应档位。
+`seywo_model_save` 和 `seywo_model_test` 接受 Codex 的 `reasoning_effort`。`auto` 保持低消耗策略；手选档位须由当前目标模型目录确认支持，未确认时在生成前返回错误。测试未提供该参数时沿用已保存值；保存 `auto` 会清除当前用户的强度覆盖，并对本机所有项目生效。`seywo_model_status` 返回已保存档位和解析后的 `effective_model`；`seywo_model_list.default_model` 提供宿主实际默认目标，面板据此显示跟随默认模型时的对应档位。

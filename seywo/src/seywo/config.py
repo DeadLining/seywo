@@ -85,12 +85,7 @@ def enable_plugin_hook(config_path: Path) -> dict:
         data = {k: v for k, v in current.items() if not k.startswith("_")}
         hook = data.get("hook") if isinstance(data.get("hook"), dict) else {}
         data["hook"] = {**hook, "enabled": True,
-                        "pipeline": hook.get("pipeline") or "seywo-compact-v1"}
-        # Existing explicitly configured providers retain their backend. New
-        # plugin projects use the compact engine and the host's Codex model.
-        if "model_runtime" not in data:
-            data["model_runtime"] = {"backend": "codex"}
-            data["hook"]["pipeline"] = "seywo-compact-v1"
+                        "pipeline": "seywo-compact-v1"}
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         return data["hook"]
 
@@ -141,7 +136,6 @@ def _initialize_locked(root: Path, state: Path, *, plugin_hook: bool = False, sk
                 "automatic_maintenance": False, "storage_v2": True, "hook": {"enabled": False}}
         if plugin_hook:
             data["hook"] = {"enabled": True, "pipeline": "seywo-compact-v1"}
-            data["model_runtime"] = {"backend": "codex"}
         # The project lock serializes creators; atomic publication prevents partial JSON.
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     config = load_config(path)

@@ -65,7 +65,7 @@ def test_confirmation_happens_after_preview_then_initializes_each_project(tmp_pa
     for root in (first, second):
         config = load_config(root / '.seywo/config.json')
         assert config['hook']['enabled'] is True
-        assert config['model_runtime'] == {'backend': 'codex'}
+        assert 'model_runtime' not in config
         assert Path(config['_database']).is_file()
     assert 'initialized' in capsys.readouterr().out
 

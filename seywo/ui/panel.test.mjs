@@ -989,3 +989,30 @@ test('storage reclamation warning preserves successful mainline and appears only
     assert.equal(f.root.querySelector('[data-maintenance]').hidden, true);
     f.dom.window.close();
 });
+
+test('model settings explain user scope and reload the shared selection when reopened', async () => {
+    const f = fixture(); let model = 'first', reads = 0;
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => { reads++; return {backend:'codex', configured:true, scope:'user', model}; },
+    });
+    const summary = f.root.querySelector('[data-settings] summary');
+    summary.click(); await tick();
+    assert.match(f.root.querySelector('[data-settings-body]').textContent, /本机所有项目和对话/);
+    assert.equal(f.root.querySelector('[data-codex-model]').value, 'first');
+    summary.click(); await tick();
+    model = 'second';
+    summary.click(); await tick();
+    assert.equal(f.root.querySelector('[data-codex-model]').value, 'second');
+    assert.equal(reads, 2);
+});
+
+test('saving a model confirms its global effect', async () => {
+    const f = fixture();
+    await mountPanel(f.root, f.call, {}, {
+        modelStatus: async () => ({backend:'codex', configured:true, model:'chosen'}),
+        modelSave: async () => ({saved:true, persisted:true, scope:'user'}),
+    });
+    f.root.querySelector('[data-settings] summary').click(); await tick();
+    f.root.querySelector('[data-model-save]').click(); await tick();
+    assert.match(f.root.querySelector('[data-model-status]').textContent, /本机所有项目/);
+});

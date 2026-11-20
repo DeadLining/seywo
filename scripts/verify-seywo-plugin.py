@@ -218,7 +218,7 @@ def verify(repository=REPOSITORY):
                 open_meta = running['tools']['seywo_open']['_meta']
                 assert open_meta['openai/ui']['entrypoints'] == [{'type': 'thread'}]
                 assert running['tools']['seywo_open']['title'] == 'Seywo'
-                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v8.html'
+                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v9.html'
                 assert running['tools']['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
                 opened = raw_tool('seywo_open', chat_id='plugin-acceptance')

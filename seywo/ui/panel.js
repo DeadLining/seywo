@@ -12,7 +12,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
     const chatSwitcher = root.querySelector('[data-chat-switcher]');
     const drawer = root.querySelector('[data-drawer]'), detail = root.querySelector('[data-detail]');
     const settings = root.querySelector('[data-settings]'), settingsBody = root.querySelector('[data-settings-body]');
-    let settingsLoaded = false, settingsLoading = false;
+    let settingsLoading = false;
     const clearNotice = () => notice.replaceChildren();
     function error(retry) { notice.replaceChildren(el('p', '暂时无法读取这部分记录。你可以重试。')); const b = button('重试', retry); b.dataset.retry = ''; notice.append(b); }
     // Maintenance has its own lifecycle: a failed update must never replace a published view.
@@ -247,7 +247,9 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         const save = button('保存配置', undefined); save.dataset.modelSave = ''; save.type = 'submit';
         const login = button('连接 Codex 账号', undefined); login.dataset.codexLogin = ''; login.hidden = true;
         const accountRefresh = button('检查授权', undefined); accountRefresh.dataset.codexAccountRefresh = ''; accountRefresh.hidden = true;
-        actionRow.append(test, save, login, accountRefresh); form.append(sourceLabel, nativeInfo, nativeFields, fields, actionRow);
+        actionRow.append(test, save, login, accountRefresh); const scope = el('p', '适用于本机所有项目和对话的 Seywo 整理任务。', 'muted');
+        scope.dataset.modelScope = '';
+        form.append(scope, sourceLabel, nativeInfo, nativeFields, fields, actionRow);
         const status = el('p', data.backend === 'codex'
             ? (data.configured ? '正在使用 Codex。' : '请更新并重新打开 Codex App。')
             : (data.configured ? (data.credential_configured ? '已配置，可供 Compact 使用。' : '还没有 API KEY。') : '尚未配置模型。'), 'muted');
@@ -285,7 +287,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                     const effort = result.model_info?.reasoning_effort;
                     status.textContent = result.ok ? `连接成功${selected ? ' · ' + selected : ''}${effort ? ' · 思考强度：' + (effortLabels[effort] || effort) : ''}，本次仅调用 1 次模型。` : (result.message || '连接失败，请检查模型配置或 Codex 登录状态。');
                 }
-                else { status.textContent = result.persisted === false ? '已使用 Codex 当前配置，无需写入项目。' : '已保存，后续 Compact 将使用该配置。'; key.value = ''; key.placeholder = '已保存，留空沿用'; }
+                else { status.textContent = '已保存，本机所有项目后续的 Seywo 整理将使用该配置。'; key.value = ''; key.placeholder = '已保存，留空沿用'; }
             } catch { status.textContent = '模型设置暂时不可用，请稍后重试。'; }
             finally { test.disabled = save.disabled = source.disabled = nativeModel.disabled = nativeReasoning.disabled = false; }
         };
@@ -293,10 +295,10 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         form.onsubmit = event => { event.preventDefault(); void run('save'); };
     }
     async function loadSettings() {
-        if (!actions.modelStatus || settingsLoaded || settingsLoading) return;
+        if (!actions.modelStatus || settingsLoading) return;
         settingsLoading = true;
         settingsBody.replaceChildren(el('p', '正在读取模型设置…', 'muted'));
-        try { renderSettingsStatus(await actions.modelStatus()); settingsLoaded = true; }
+        try { renderSettingsStatus(await actions.modelStatus()); }
         catch { settingsBody.replaceChildren(el('p', '模型设置暂时不可用。', 'muted')); }
         finally { settingsLoading = false; }
     }

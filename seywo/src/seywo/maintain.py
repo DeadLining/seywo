@@ -152,7 +152,7 @@ def _run_chat(config, chat_id):
     except (OSError, ValueError):
         return {"state": "blocked", "error_code": "provider_not_configured", "calls": 0}
     native = provider.get("backend") == "codex"
-    model = provider["model"] if native else ((config.get("hook") or {}).get("model") or provider["model"])
+    model = provider["model"]
     timeout = max(provider["timeout"], 420)
     if native:
         if (config.get("hook") or {}).get("pipeline") != "seywo-compact-v1":
@@ -227,7 +227,7 @@ def _run_chat(config, chat_id):
         # is parked. Base the window on the current model instead of retrying a
         # dead alias to the ceiling and keeping the chat stuck forever.
         job = state.get("job")
-        if job and _model_moved(store, job) and _job_state(store, job) in OPEN_STATES:
+        if job and _model_moved(store, job, model) and _job_state(store, job) in OPEN_STATES:
             # If it never published, hand its window back to the planner instead
             # of silently skipping rows the dead alias was supposed to read.
             after = _retire_model(store, job)
@@ -450,13 +450,9 @@ def _job_state(store, job):
     return row["state"] if row else None
 
 
-def _model_moved(store, job):
+def _model_moved(store, job, model):
     row = store.db.execute("SELECT options_json FROM understanding_jobs WHERE id=?", (job,)).fetchone()
-    return bool(row) and json.loads(row["options_json"]).get("model") != _current_model(store)
-
-
-def _current_model(store):
-    return (store.config.get("hook") or {}).get("model") or read_provider(store.config)["model"]
+    return bool(row) and json.loads(row["options_json"]).get("model") != model
 
 
 def _retire_model(store, job):

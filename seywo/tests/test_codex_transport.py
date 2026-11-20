@@ -17,9 +17,9 @@ def test_plugin_enable_selects_codex_and_preserves_existing_provider(tmp_path):
     path.write_text(json.dumps(data))
     enable_plugin_hook(path)
     saved = load_config(path)
-    assert saved['model_runtime'] == {'backend': 'codex'}
+    assert 'model_runtime' not in saved
     assert saved['provider'] == data['provider']
-    assert read_provider(saved)['backend'] == 'codex'
+    assert read_provider()['backend'] == 'codex'
 
 
 def fake_app_server(tmp_path, *, mode='ok', model='fixture'):
@@ -131,7 +131,7 @@ def test_maintainer_routes_compact_through_codex_without_provider_credentials(tm
     path = tmp_path / '.seywo/config.json'
     enable_plugin_hook(path)
     from seywo.settings import use_codex
-    use_codex(load_config(path), reasoning_effort=effort)
+    use_codex(reasoning_effort=effort)
     config = load_config(path)
     fake = CompactTransport()
     fake.model = 'codex-default'

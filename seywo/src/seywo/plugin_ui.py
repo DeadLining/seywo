@@ -15,14 +15,14 @@ from .settings import provider_status, read_provider, save_provider, use_codex, 
 from .transport import Transport
 from .codex_transport import CodexTransport, DEFAULT_MODEL, model_selection
 from .codex_runtime import (list_models as list_codex_models, error_message,
-                            validate_reasoning_effort, account_status as codex_account_status)
+                            account_status as codex_account_status)
 from .store import Store
 
 # Bump the resource URI when the self-contained app shell changes materially.
 # Codex may retain an MCP App resource by URI for the lifetime of a Chat, so
 # reusing panel-v1.html would keep an already-open Chat on the previous DOM
 # even after the plugin files have been reinstalled.
-RESOURCE_URI = 'ui://seywo/panel-v8.html'
+RESOURCE_URI = 'ui://seywo/panel-v9.html'
 
 
 def register_panel(server, resolve_config):
@@ -85,14 +85,8 @@ def register_panel(server, resolve_config):
     @server.tool(annotations=app_only_read, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
     async def seywo_model_status() -> str:
-        """Read the project-local model configuration without calling a model."""
-        path = await resolve_config(server.get_context())
-        # The model setting is host-level by default. It must remain readable
-        # before Seywo is initialized because initialization controls storage
-        # and hooks, not access to the Codex login/provider.
-        if not path.exists():
-            return serialize(provider_status())
-        return serialize(provider_status(load_config(path)))
+        """Read user-level model settings without resolving or initializing a project."""
+        return serialize(provider_status())
 
     @server.tool(annotations=app_only_read, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
@@ -121,22 +115,11 @@ def register_panel(server, resolve_config):
                                timeout_seconds: int = 180, max_output_tokens: int = 4000,
                                backend: Literal["codex", "responses"] = "responses",
                                reasoning_effort: str = "auto") -> str:
-        """Select Codex or save a custom provider; keys never enter config.json."""
-        path = await resolve_config(server.get_context())
+        """Save this user's Seywo model choice for all projects and chats."""
         if backend == "codex":
-            # Codex is a host-level runtime. Selecting it does not need a
-            # project database and must work before Seywo initialization.
-            validate_reasoning_effort(reasoning_effort)
-            if not path.exists():
-                if reasoning_effort != "auto" or model.strip() not in {'', 'codex-default'}:
-                    raise ValueError('initialization_required')
-                return serialize({"saved": True, "persisted": False, **provider_status()})
-            return serialize(use_codex(load_config(path), model=model, reasoning_effort=reasoning_effort))
-        if not path.exists():
-            raise ValueError('initialization_required')
-        result = save_provider(load_config(path), endpoint=endpoint, model=model, api_key=api_key,
-                               timeout_seconds=timeout_seconds, max_output_tokens=max_output_tokens)
-        return serialize(result)
+            return serialize(use_codex(model=model, reasoning_effort=reasoning_effort))
+        return serialize(save_provider(endpoint=endpoint, model=model, api_key=api_key,
+                                       timeout_seconds=timeout_seconds, max_output_tokens=max_output_tokens))
 
     @server.tool(annotations=app_only_write, structured_output=False,
                  meta={'ui': {'visibility': ['app']}})
@@ -145,26 +128,23 @@ def register_panel(server, resolve_config):
                                backend: Literal["codex", "responses"] | None = None,
                                reasoning_effort: str | None = None) -> str:
         """Make one explicit connectivity call using the entered or saved provider."""
-        path = await resolve_config(server.get_context())
-        # Codex uses the host login/provider and can be tested before Seywo
-        # creates project-local storage. Custom providers still use saved
-        # project settings when available.
-        config = load_config(path) if path.exists() else {}
-        current = provider_status(config)
-        selected = backend or ("responses" if endpoint or api_key else current.get("backend"))
+        current = read_provider()
+        selected = backend or ("responses" if endpoint or api_key else current["backend"])
         if selected == "codex":
-            # Inherit Codex's model when no explicit Seywo override is saved.
-            runtime = config.get("model_runtime") or {}
+            runtime = current if current["backend"] == "codex" else {}
             probe = CodexTransport(model=model or runtime.get("model") or DEFAULT_MODEL,
                                    timeout=max(1, min(timeout_seconds, 300)),
                                    reasoning_effort=reasoning_effort if reasoning_effort is not None
                                        else runtime.get("reasoning_effort", "auto"))
             result = await asyncio.to_thread(probe.probe)
         else:
-            saved_config = {**config, "model_runtime": {"backend": "responses"}}
-            saved_status = provider_status(saved_config)
-            saved = read_provider(saved_config) if saved_status["configured"] and saved_status["credential_configured"] else {}
-            endpoint = validate_endpoint(endpoint or saved.get("endpoint") or saved_status.get("endpoint"))
+            try:
+                saved = current if current['backend'] == 'responses' else read_provider(backend='responses')
+            except ValueError as exc:
+                if str(exc) != 'provider_not_configured':
+                    raise
+                saved = {}
+            endpoint = validate_endpoint(endpoint or saved.get("endpoint"))
             model = model or saved.get("model")
             key = api_key or (saved.get("_api_key") if endpoint == saved.get("endpoint") else None)
             if not endpoint or not model or not key:
