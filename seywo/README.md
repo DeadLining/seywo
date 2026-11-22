@@ -1,6 +1,6 @@
 # Seywo — See Your Work
 
-**Seywo 0.5.1** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
+**Seywo 0.5.2** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
 
 Seywo 包含本地内核、STDIO MCP、Codex MCP App 面板和 Compact Hook。默认使用 Codex 当前登录、提供方和模型配置，不需要独立应用或额外 API Key；可选的 Responses API 配置保存在项目自己的 `.seywo/` 中。
 
@@ -13,7 +13,7 @@ codex plugin marketplace add https://github.com/DeadLining/seywo.git
 codex plugin add seywo@seywo-local
 ```
 
-安装或更新后重新连接 Codex MCP。插件只需全局安装一次，每个项目首次打开 Seywo 面板时自动按需初始化，无需在对话中输入“启用 Seywo”。初始化只在当前 Chat 明确绑定的项目中创建 `.seywo/.gitignore`、`config.json` 和空索引数据库，并启用项目 Hook；不会导入历史对话、调用模型或扫描其他项目。已有配置、project_id、数据库及 provider/model 设置直接复用。无法确定当前项目时仍显示项目选择器；失败时显示原因并提供重试。原生 Hook 仍遵守宿主的信任机制。
+安装或更新后重新连接 Codex MCP。插件只需全局安装一次，每个项目首次打开 Seywo 面板时自动按需初始化，无需在对话中输入“启用 Seywo”。初始化只在当前 Chat 明确绑定的项目中创建 `.seywo/.gitignore`、`config.json` 和空索引数据库，并启用项目 Hook；不会导入历史对话、调用模型或扫描其他项目。已有配置、project_id 和数据库直接复用；模型选择统一读取用户级设置。无法确定当前项目时仍显示项目选择器；失败时显示原因并提供重试。原生 Hook 仍遵守宿主的信任机制。
 
 ## 使用
 
@@ -41,7 +41,7 @@ seywo/bin/seywo init-batch "/absolute/project-a" "/absolute/project-b"
 
 Compact 使用同一套 `maintain → compact_pipeline`。规则先去除工具调用和工具结果，再把用户问题与助手回答按完整轮次送入一次有界模型请求；模型只返回短标题、状态变化、关系操作和来源索引，程序负责校验、合并、版本化和落库。过大的输入按既有边界分批处理。
 
-Codex 是默认模型后端，直接复用宿主的登录和全局模型。自定义 Responses API 只能通过面板保存到当前项目的 `.seywo/credentials/`，凭据不会进入 Git，也不会写进 `config.json`。项目运行数据、索引、凭据和 Compact 记录都留在项目自己的 `.seywo/` 中。
+Codex 是默认模型后端，直接复用宿主的登录和全局模型。模型来源、模型与思考强度通过面板保存到当前 Codex 用户目录的 `seywo/settings.json`，本机所有项目和 Chat 共用。自定义 Responses API 凭据保存在用户目录的 `seywo/credentials/`，不会进入项目仓库。项目运行数据、索引和 Compact 记录留在项目自己的 `.seywo/` 中。升级后重新连接已有 Chat 的 MCP，并在新版面板保存一次模型设置。
 
 Seywo 是独立的新存储和新索引，不兼容或融合 SessionGraph 旧数据。卸载插件不会删除项目数据；删除项目数据前请先按项目需要备份 `.seywo/`。
 

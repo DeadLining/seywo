@@ -1,6 +1,6 @@
 # Seywo Codex 插件
 
-当前版本 **0.5.1**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。
+当前版本 **0.5.2**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。
 
 ## 安装和首次启用
 
@@ -65,3 +65,12 @@ seywo/bin/seywo --config "$PWD/.seywo/config.json" storage verify
 ```
 
 每次成功升级保留一份 `.seywo/maintenance/storage-migration/*.sqlite3.gz` 回滚映像；重复运行当前版本不会重复备份。备份计入实际磁盘占用，但与活跃数据分别报告，不通过删除备份美化压缩率。原始 Codex 对话和共享数据库不在回收范围；可检索历史本身仍会随真实新增对话增长。
+
+
+## 0.5.2 用户级模型设置
+
+模型来源、模型和思考强度保存到当前 Codex 用户目录的 `seywo/settings.json`，所有项目共享。自定义 API 凭据保存到同目录的 `credentials/`。项目配置不再覆盖模型选择，模型设置不需要项目初始化。
+
+从旧版升级时，先更新插件安装，再重新连接已有 Chat 的 MCP；已加载的旧进程不会因 Git 拉取自动变成新代码。旧版项目里的选择不自动迁移：在新版面板保存一次即可统一生效。新版设置面板显示“适用于本机所有项目和对话”。已打开的模型设置关闭后重新打开，会读取最新保存值。
+
+安装验收执行 `python3 scripts/verify-installed-seywo-plugin.py --project /absolute/project`，逐文件核对运行时、面板与入口和当前源码一致，避免仅凭版本号通过验收。该检查不调用模型。

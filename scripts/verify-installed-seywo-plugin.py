@@ -15,6 +15,26 @@ import tempfile
 import time
 
 
+def verify_installed_payload(repository, installed):
+    """Verify deployed bytes, not just the manifest's version label.
+
+    Reusing a version leaves Codex free to reuse its existing cached payload.
+    This check fails before starting a host or reading project data.
+    """
+    source = Path(repository) / 'seywo'
+    files = [source / name for name in (
+        '.codex-plugin/plugin.json', 'pyproject.toml', 'mcp.json', 'hooks.json', 'ui/panel.html')]
+    for folder in ('src/seywo', 'bin', 'skills'):
+        files.extend(path for path in (source / folder).rglob('*')
+                     if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
+    for path in files:
+        relative = path.relative_to(source)
+        target = Path(installed) / relative
+        assert (not target.is_symlink() and target.is_file() and target.read_bytes() == path.read_bytes()), (
+            f'installed_payload_mismatch: {relative}; update the installed plugin and reconnect existing chats')
+    return len(files)
+
+
 def verify(project, host_chat=None, host_binary="codex"):
     def cli(*arguments):
         result = subprocess.run([host_binary, *arguments], cwd=project, capture_output=True,
@@ -34,6 +54,7 @@ def verify(project, host_chat=None, host_binary="codex"):
     assert transport['command'] == expected['command']
     assert transport['args'] == expected['args']
     assert Path(transport['cwd']) == installed
+    payload_files = verify_installed_payload(Path(__file__).resolve().parents[1], installed)
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen([host_binary, 'app-server', '--stdio'], cwd=project,
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
@@ -122,6 +143,7 @@ def verify(project, host_chat=None, host_binary="codex"):
             assert selected['initialized'], 'Existing project must already be initialized'
             status = tool('seywo_status')
             model = tool('seywo_model_status')
+            assert model.get('scope') == 'user', 'Installed plugin is not using user-level model settings'
             opened = raw_tool('seywo_open')
             resource = request('mcpServer/resource/read', {
                 'threadId': thread, 'server': 'seywo', 'uri': metadata['ui']['resourceUri']})
@@ -140,6 +162,7 @@ def verify(project, host_chat=None, host_binary="codex"):
             assert not (installed / '.seywo').exists()
             return {'passed': True, 'project': str(project), 'plugin_version': plugin['version'],
                     'installed_path': str(installed), 'host': host, 'tools': len(tools),
+                    'installed_payload_files_verified': payload_files,
                     'model_backend': model.get('backend'),
                     'hooks': [{'event': hook['eventName'], 'trust': hook['trustStatus']} for hook in plugin_hooks],
                     'entrypoint_preserved': True, 'app_only_visibility': True,
