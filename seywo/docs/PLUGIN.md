@@ -1,6 +1,6 @@
 # Seywo Codex plugin
 
-Version **0.5.2** packages the existing local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
+Version **0.5.3** packages the existing local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
 
 ## Runtime prerequisites
 
@@ -38,6 +38,8 @@ codex plugin add seywo@seywo-local
 Reconnect MCP/start a new chat if tools are stale. An existing independent `seywo` registration must be reconciled before global migration; the acceptance script uses isolated configuration.
 
 The host starts the process in its installation directory. Request metadata identifies the current Chat and project automatically; unambiguous MCP roots are another supported binding. Only if both are unavailable call `seywo_select_project` with the current project's known absolute path. Selection does not write or scan. A process cannot switch to another project; reconnect to change projects. The installation directory cannot be selected.
+
+Verified Git linked worktrees of a primary checkout with a local `.git` directory share that checkout's Seywo project. The Hook, plugin binding and source admission use the same ownership rule; moving a Chat to or from a linked worktree does not reset its mainline. Git repository boundaries and separately initialized nested scopes stay independent. Existing worktree-root indexes from older versions are left intact, not merged or deleted; use the standalone CLI with an explicit `--config` to read one separately. No checkout scanning, Git subprocess, or model call is needed to resolve ownership.
 
 After one global plugin installation, the first `seywo_open` in each bound project automatically initializes project memory. It creates `.seywo/.gitignore`, `.seywo/config.json` and the empty index database, with the bundled project Hook enabled. No “enable Seywo” chat instruction is needed. Later projects initialize only when their own panel is first opened; installation and MCP connection/listing do not initialize projects.
 
@@ -157,6 +159,6 @@ After successful/no-op maintenance and explicit deletion, one nonblocking collec
 Rollback images remain under `.seywo/maintenance/storage-migration/`; repeated current-schema migrations create no new image. Count rollback bytes separately from active bytes when measuring total disk use. Source history still grows with genuinely new conversations; native Codex transcripts and shared Codex runtime databases are outside Seywo reclamation. This runtime does not promise zero disk writes by its host.
 
 
-## Upgrading to 0.5.2
+## Upgrading the plugin
 
 Updating Git source alone does not replace an installed plugin cache or reload an existing MCP process. Install the new plugin version, then reconnect existing chats (or restart Codex). The new model settings show that the choice applies to all local projects and chats. `scripts/verify-installed-seywo-plugin.py` compares installed runtime, entrypoint, Skill and UI bytes against the current checkout before testing a fresh host connection; a matching manifest version alone is insufficient.

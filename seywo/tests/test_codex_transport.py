@@ -116,9 +116,12 @@ def test_codex_app_server_uses_structured_turn_and_disables_discovery(tmp_path, 
 def test_codex_app_server_failure_does_not_publish_or_echo_process_text(tmp_path, monkeypatch, mode, error):
     from seywo.codex_transport import CodexTransport
     cli = configure_fake(monkeypatch, tmp_path, mode=mode)
-    result = CodexTransport(command=cli, home=tmp_path, timeout=.1).complete_compact(
+    # The deadline includes process startup and the handshake, not just turn execution.
+    result = CodexTransport(command=cli, home=tmp_path, timeout=3).complete_compact(
         model='codex-default', instructions='test', payload={}, max_output_tokens=768)
     assert result['error'] == error, result
+    if mode == 'hang':
+        assert any(row['method'] == 'turn/start' for row in requests(tmp_path))
     assert result['output'] is None
     assert 'secret-token' not in json.dumps(result)
 

@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .sqlite_paths import sqlite_uri
 from .admission import require_human, transcript_meta
+from .project_scope import source_belongs_to_project
 from .projection import VERSION, assistant_body_hash, compact_body_hash, project, search_tokens
 
 APPLICATION_ID = 0x5345574F
@@ -252,7 +253,8 @@ class Store:
                     if record.get("type") != "session_meta" or not isinstance(meta, dict) or meta.get("id") != chat_id:
                         raise ValueError("first record must identify the explicitly selected chat")
                     require_human(meta)
-                    if meta.get("cwd") and str(Path(meta["cwd"]).expanduser().resolve()) != self.config["project_root"]:
+                    cwd = meta.get("cwd")
+                    if cwd and not source_belongs_to_project(cwd, self.config["project_root"]):
                         raise ValueError("source cwd differs from the bound project root")
                     metadata_seen = True
                 elif record.get("type") == "session_meta":

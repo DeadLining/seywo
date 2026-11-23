@@ -65,7 +65,7 @@ for raw in sys.stdin:
 ])
 def test_catalog_errors_are_safe_and_bounded(tmp_path, body, expected):
     from seywo.codex_runtime import list_models
-    result = list_models(command=cli(tmp_path, body), home=tmp_path, timeout=0.2)
+    result = list_models(command=cli(tmp_path, body), home=tmp_path, timeout=2)
     assert result['error'] == expected, result
     assert result['models'] == []
     assert result['model_calls'] == 0

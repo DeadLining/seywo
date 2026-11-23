@@ -1,6 +1,6 @@
 # Seywo Codex 插件
 
-当前版本 **0.5.2**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。
+当前版本 **0.5.3**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，分发时无需拷贝 SessionGraph/Seywo 独立应用，也不要求另外填写 API Key。版本变更见[更新日志](../CHANGELOG.md)。
 
 ## 安装和首次启用
 

@@ -17,6 +17,8 @@ Seywo 插件自带本地内核、MCP、面板和 Compact Hook，默认复用用�
 
 详细安装、项目绑定、Hook 信任、模型和存储边界见 [`seywo/docs/PLUGIN.md`](seywo/docs/PLUGIN.md)。
 
+版本变更见[更新日志](CHANGELOG.md)。
+
 ## 仓库结构
 
 - `.agents/plugins/marketplace.json`：Codex 插件市场清单

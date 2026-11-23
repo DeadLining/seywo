@@ -29,6 +29,8 @@ codex plugin add seywo@seywo-local
 
 安装或更新后重新连接 Codex MCP。插件全局安装一次后，每个项目首次打开 Seywo 面板时自动按需初始化，无需输入“启用 Seywo”。`seywo_open` 只初始化当前 Chat 明确绑定的项目根目录，创建 `.seywo/.gitignore`、配置和空索引数据库并启用项目 Hook；已有配置、project_id 和数据库保持不变；模型来源、模型、思考强度与 provider 凭据统一保存在当前用户的 Seywo 设置中，不写入项目配置。初始化不导入历史、不调用模型、不扫描磁盘或读取其他项目。项目不明确时显示项目选择器，`seywo_select_project` 仍只绑定而不写入；选择后面板自动打开并初始化。失败显示原因并提供重试，成功继续加载当前 Chat；尚未导入的 Chat 保持空状态。`seywo_initialize_project` 保留原有调用参数，供显式初始化使用。
 
+主检出目录使用本地 `.git` 目录时，经过 Git 注册关系验证的 linked worktree 与主检出目录共用项目记忆。切换 worktree 不改变 Chat 的项目归属；项目已启用且 Hook 已获信任后，compact 不需要打开面板即可触发。独立仓库与显式初始化的子项目保持隔离。旧版在 worktree 根目录另建的索引不会迁移、合并或删除，可通过独立 CLI 的 `--config` 显式读取。
+
 ## 显式批量初始化
 
 CLI 提供 `seywo init-batch /absolute/project-a /absolute/project-b`（仓库内也可使用 `seywo/bin/seywo`）。先输出逐项目待创建、待修改文件和目录清单，再输入 `yes` 确认；`--dry-run` 只预览。只接受明确列出的现有绝对目录，不默认使用当前目录，不递归扫描或从父目录推断项目。已有 `.seywo/config.json` 的项目跳过，重复路径去重，单项错误不阻断其余项目。确认后重新检查配置和文件计划；未确认、EOF 或确认时取消不会写入项目。该入口复用项目初始化和 Hook 默认配置，不导入历史、不调用模型，也不增加或改变 MCP 工具。

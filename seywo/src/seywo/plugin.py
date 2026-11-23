@@ -6,6 +6,7 @@ from .config import enable_plugin_hook, initialize, load_config, project_directo
 from .mcp_server import create_server
 from .plugin_binding import ProjectRequired
 from .plugin_context import host_workspace
+from .project_scope import resolve_project_root
 from .retrieval import serialize
 
 
@@ -13,10 +14,11 @@ def _config_path(root):
     root = project_directory(root, strict=True)
     if not root.is_dir():
         raise ValueError('Seywo requires a project directory')
-    path = state_dir(root) / 'config.json'
+    owner = resolve_project_root(root)
     plugin_root = Path(__file__).resolve().parents[2]
-    if root == plugin_root or root.is_relative_to(plugin_root):
+    if root.is_relative_to(plugin_root) or owner.is_relative_to(plugin_root):
         raise ValueError('select a workspace outside the plugin installation')
+    path = state_dir(owner) / 'config.json'
     if path.exists() or path.is_symlink():
         load_config(path)
     return path

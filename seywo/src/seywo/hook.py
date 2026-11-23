@@ -19,6 +19,7 @@ import sys
 from . import inbox, maintenance_status
 from .admission import NonHumanSource, require_human, transcript_meta
 from .config import load_config
+from .project_scope import CONFIG, resolve_project_root
 from .retrieval import Retrieval
 from .store import Store
 from .runtime_platform import process_options
@@ -27,22 +28,15 @@ BOUNDARY_EVENTS = {"PreCompact", "PostCompact"}
 INJECTION_EVENTS = {"SessionStart", "UserPromptSubmit"}
 EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS | {"Stop"}
 MAX_CONTEXT_CHARS = 6000
-BOUNDARY = Path(".seywo/config.json")
 CHAT = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 
 def find_config(cwd: str) -> Path | None:
     try:
-        current = Path(cwd).expanduser().resolve()
-    except (OSError, TypeError, ValueError):
+        config = resolve_project_root(Path(cwd), discover_config=True) / CONFIG
+        return config if config.is_file() else None
+    except (OSError, TypeError, ValueError, RuntimeError):
         return None
-    for candidate in [current, *current.parents]:
-        config = candidate / BOUNDARY
-        if config.is_file():
-            return config
-        if (candidate / ".git").exists():
-            break
-    return None
 
 
 def chat_identity(transcript: str, fallback: str) -> str:
