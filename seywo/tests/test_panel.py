@@ -127,7 +127,7 @@ def test_open_uninitialized_project_initializes_and_enables_hook(tmp_path, monke
     from seywo.config import load_config
     from seywo.store import Store
     config = load_config(tmp_path / '.seywo/config.json')
-    assert config['hook'] == {'enabled': True, 'pipeline': 'seywo-compact-v1'}
+    assert config['hook'] == {'enabled': True}
     assert 'model_runtime' not in config
     assert (tmp_path / '.seywo/.gitignore').read_text() == '*\n!.gitignore\n'
     with Store(config, read_only=True) as store:

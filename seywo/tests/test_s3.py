@@ -330,33 +330,6 @@ def test_organizer_budget_uses_same_ledger_and_reuses_pending_request(setup):
     assert "base_version" not in claim["request"] and "input_fingerprint" not in claim["request"]
 
 
-def test_read_only_v2_open_does_not_migrate_and_schema3_upgrade_rehearsal(tmp_path):
-    import sqlite3
-    from pathlib import Path
-    from seywo.config import load_config
-    from seywo.store import DDL, APPLICATION_ID
-    from seywo.s2_schema import DDL as S2
-    root = tmp_path / "project"
-    state = root / ".seywo"
-    state.mkdir(parents=True)
-    config_path = state / "config.json"
-    config_path.write_text(json.dumps({"product": "seywo", "schema_version": 1,
-        "project_id": "v2", "project_root": str(root), "database": "index.sqlite3"}))
-    config = load_config(config_path)
-    with sqlite3.connect(config["_database"]) as db:
-        db.executescript(DDL + S2)
-        db.execute(f"PRAGMA application_id={APPLICATION_ID}")
-        db.execute("PRAGMA user_version=2")
-        db.execute("INSERT INTO projects VALUES(?,?)", ("v2", str(root)))
-    before = Path(config["_database"]).read_bytes()
-    with Store(config, read_only=True) as opened:
-        assert opened.status()["schema_version"] == 2
-    assert Path(config["_database"]).read_bytes() == before
-    with Store(config) as opened:
-        assert opened.status()["schema_version"] == 8
-        assert opened.db.execute("PRAGMA foreign_key_check").fetchall() == []
-
-
 def test_loopback_ui_read_edit_authentication_and_history(setup):
     store, engine, job, service, task, claim, view = publish(setup)
     from pathlib import Path

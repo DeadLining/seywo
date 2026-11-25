@@ -71,10 +71,8 @@ def main(argv=None):
     search.add_argument("--limit", type=int, default=20)
     status = sub.add_parser("status")
     status.add_argument("--chat")
-    storage = sub.add_parser("storage", help="verify or migrate Seywo storage")
+    storage = sub.add_parser("storage", help="verify or reclaim Seywo storage")
     storage_actions = storage.add_subparsers(dest="storage_command", required=True)
-    storage_migrate = storage_actions.add_parser("migrate")
-    storage_migrate.add_argument("--dry-run", action="store_true")
     storage_actions.add_parser("verify")
     storage_actions.add_parser("gc")
     compact = sub.add_parser("compact", help="automatic compact maintenance")
@@ -166,8 +164,13 @@ def main(argv=None):
         elif args.command == "compact":
             result = _compact(args)
         elif args.command == "storage":
-            from .storage_admin import run
-            result = run(args.config, args.storage_command, dry_run=getattr(args, "dry_run", False))
+            config = load_config(args.config)
+            if args.storage_command == "verify":
+                from .storage_verify import verify
+                result = verify(config)
+            else:
+                from .storage_lifecycle import collect
+                result = collect(config, force=True, retire_dialogue=True)
         else:
             with Store(load_config(args.config), read_only=args.command in {"events", "read", "search", "status"} or (args.command == "understand" and args.understand_command == "show") or (args.command == "narrative" and args.narrative_command == "show")) as store:
                 if args.command == "import":

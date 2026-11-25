@@ -1,7 +1,7 @@
-"""Exact raw sources: immutable compressed blocks and atomic small manifests.
+"""Immutable compressed streams and atomic small manifests.
 
 Only managed captures are manifests. Native files remain untouched. The manifest
-filename is a source locator; byte offsets always refer to the logical raw file.
+filename is a source locator, not a native transcript path.
 """
 
 from contextlib import contextmanager
@@ -23,6 +23,7 @@ BLOCK_BYTES = 256 * 1024
 MAX_MANIFEST = 4 * 1024 * 1024
 MAX_CHUNKS = 32768  # Preserve the legacy 1 GiB capacity at the new 32 KiB minimum.
 HASH = re.compile(r"[a-f0-9]{64}")
+DIALOGUE_FORMAT = "dialogue-v1"
 
 
 def _sha(data):
@@ -139,7 +140,8 @@ def _manifest(handle):
         raise ValueError("oversized archive manifest")
     manifest = record if record is not None else json.load(handle)
     if (not isinstance(manifest, dict)
-            or set(manifest) != {"seywo_archive", "bytes", "sha256", "chunks"}
+            or set(manifest) - {"format"} != {"seywo_archive", "bytes", "sha256", "chunks"}
+            or "format" in manifest and manifest["format"] != DIALOGUE_FORMAT
             or type(manifest["seywo_archive"]) is not int or manifest["seywo_archive"] != 1
             or type(manifest["bytes"]) is not int or manifest["bytes"] < 0
             or not isinstance(manifest["sha256"], str) or not HASH.fullmatch(manifest["sha256"])
@@ -177,13 +179,13 @@ def publication(target):
         yield
 
 
-def capture(source, target, *, limit=None):
+def capture(source, target):
     with publication(target):
-        return _capture(source, target, limit=limit)
+        return _capture(source, target)
 
 
-def _capture(source, target, *, limit=None):
-    """Stream once; publish only after every referenced raw block is durable."""
+def _capture(source, target, *, dialogue=False):
+    """Stream once; publish only after every referenced block is durable."""
     source, target = Path(source), Path(target)
     folder = _objects(target)
     if target.is_symlink():
@@ -198,37 +200,58 @@ def _capture(source, target, *, limit=None):
         return previous
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     size, digest, chunks = 0, hashlib.sha256(), []
-    with open_source(source) as incoming:
-        before = os.fstat(incoming.fileno())
-        from .archive_chunks import chunks as content_chunks
-        for data in content_chunks(incoming):
-            size += len(data)
-            if limit is not None and size > limit:
-                raise ValueError("snapshot_too_large")
-            digest.update(data)
-            identity = _sha(data)
-            block = folder / (identity + ".z")
-            if block.exists():
-                # Verify reusable data rather than trusting a filename alone.
-                if _block(folder, identity) != data:
-                    raise ValueError("archive block collision")
+    created = []
+    try:
+        with open_source(source) as incoming:
+            before = os.fstat(incoming.fileno())
+            from .archive_chunks import chunks as content_chunks
+            if dialogue:
+                from .dialogue_capture import records
+                parts = content_chunks(records(incoming))
             else:
-                _atomic(block, zlib.compress(data, level=3))
-            chunks.append(identity)
-            if len(chunks) > MAX_CHUNKS:
-                raise ValueError("oversized archive manifest")
-        after = os.fstat(incoming.fileno())
-        if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
-            raise ValueError("changing archive source")
-    manifest = {"seywo_archive": 1, "bytes": size, "sha256": digest.hexdigest(), "chunks": chunks}
-    body = json.dumps(manifest, separators=(",", ":")).encode()
-    if len(body) > MAX_MANIFEST:
-        raise ValueError("oversized archive manifest")
-    _atomic(target, body)
-    return manifest
+                parts = content_chunks(incoming)
+            for data in parts:
+                if len(chunks) == MAX_CHUNKS:
+                    raise ValueError("source_archive_capacity")
+                size += len(data)
+                digest.update(data)
+                identity = _sha(data)
+                block = folder / (identity + ".z")
+                if block.exists():
+                    # Verify reusable data rather than trusting a filename alone.
+                    if _block(folder, identity) != data:
+                        raise ValueError("archive block collision")
+                else:
+                    _atomic(block, zlib.compress(data, level=3))
+                    created.append(block)
+                chunks.append(identity)
+            after = os.fstat(incoming.fileno())
+            if (before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns):
+                raise ValueError("changing archive source")
+        manifest = {"seywo_archive": 1, "bytes": size, "sha256": digest.hexdigest(), "chunks": chunks}
+        if dialogue or is_dialogue(source):
+            manifest["format"] = DIALOGUE_FORMAT
+        body = json.dumps(manifest, separators=(",", ":")).encode()
+        if len(body) > MAX_MANIFEST:
+            raise ValueError("source_archive_capacity")
+        _atomic(target, body)
+        return manifest
+    except BaseException:
+        # A failed capture has no manifest and therefore cannot reference newly
+        # written blocks. Remove only blocks created by this capture; shared
+        # blocks from earlier captures remain intact.
+        for block in created:
+            block.unlink(missing_ok=True)
+        raise
 
 
-def content_capture(source, folder, prefix, *, limit=None):
+def is_dialogue(path):
+    with Path(path).open("rb") as handle:
+        manifest = _manifest(handle)
+    return manifest is not None and manifest.get("format") == DIALOGUE_FORMAT
+
+
+def content_capture(source, folder, prefix, *, dialogue=False):
     """Canonical immutable locator, independent of legacy capture filenames."""
     source, folder = Path(source).resolve(), Path(folder).resolve()
     temporary = folder / f".{prefix}-{uuid4().hex}.jsonl"
@@ -236,15 +259,20 @@ def content_capture(source, folder, prefix, *, limit=None):
         try:
             with source.open("rb") as handle:
                 existing = _manifest(handle)
-            if existing is not None and source.parent == folder:
+            projected = existing is not None and existing.get("format") == DIALOGUE_FORMAT
+            if existing is not None and source.parent == folder and (not dialogue or projected):
                 if source_digest(source) != (existing["sha256"], existing["bytes"]):
                     raise ValueError("archive identity mismatch")
                 manifest = existing
             else:
-                manifest = _capture(source, temporary, limit=limit)
-            target = folder / f"{prefix}-{manifest['sha256']}.jsonl"
+                manifest = _capture(source, temporary, dialogue=dialogue and not projected)
+            if dialogue and manifest["bytes"] == 0:
+                raise ValueError("empty dialogue capture")
+            tag = "-dialogue" if manifest.get("format") == DIALOGUE_FORMAT else ""
+            target = folder / f"{prefix}{tag}-{manifest['sha256']}.jsonl"
             if target.exists():
-                if target != source and source_digest(target) != (manifest["sha256"], manifest["bytes"]):
+                if target != source and (source_digest(target) != (manifest["sha256"], manifest["bytes"])
+                        or is_dialogue(target) != bool(tag)):
                     raise ValueError("immutable capture locator collision")
             elif temporary.exists():
                 finalize(temporary, target)

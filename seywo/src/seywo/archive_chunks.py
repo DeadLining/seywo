@@ -21,16 +21,15 @@ def _cut(data):
 
 
 def chunks(handle):
+    parts = iter(lambda: handle.read(MAX_BYTES), b'') if hasattr(handle, 'read') else iter(handle)
     buffer = b''
-    while True:
-        part = handle.read(MAX_BYTES)
-        if not part:
-            break
-        buffer += part
-        while len(buffer) >= MAX_BYTES:
-            end = _cut(buffer)
-            yield buffer[:end]
-            buffer = buffer[end:]
+    for part in parts:
+        for start in range(0, len(part), MAX_BYTES):
+            buffer += part[start:start + MAX_BYTES]
+            while len(buffer) >= MAX_BYTES:
+                end = _cut(buffer)
+                yield buffer[:end]
+                buffer = buffer[end:]
     while buffer:
         end = _cut(buffer)
         yield buffer[:end]

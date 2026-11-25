@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from test_s2 import message
 from seywo import inbox, maintain
 from seywo.config import initialize, load_config
@@ -72,6 +74,74 @@ def test_compact_route_calls_model_once_for_one_multi_turn_compact(tmp_path, mon
     assert len(transport.payloads) == 1
     assert len(transport.payloads[0]["turns"]) == 2
     assert report["compact_segments"] == 1
+
+
+@pytest.mark.parametrize("previously_failed", [False, True])
+def test_large_compact_capture_and_retry_preserve_original_evidence(tmp_path, monkeypatch, previously_failed):
+    import hashlib
+
+    from seywo.archive import open_source
+    from seywo.retrieval import Retrieval
+    from seywo.store import Store
+
+    root = tmp_path / "project"
+    config = load_config(Path(initialize(root)["config"]))
+    config["hook"] = {"enabled": True, "pipeline": "seywo-compact-v1"}
+    transport = CompactTransport()
+    monkeypatch.setattr(maintain, "read_provider", lambda *_: {
+        "endpoint": "http://127.0.0.1:1/responses", "model": transport.model,
+        "timeout": 5, "max_output_tokens": 1200, "_api_key": "fixture",
+    })
+    monkeypatch.setattr(maintain, "Transport", lambda *_args, **_kwargs: transport)
+    chat = "large-compact"
+    source = make_source(root, chat)
+    image = "data:image/png;base64," + "VGVzdEltYWdl" * (512 * 1024)
+    with source.open("a", encoding="utf-8") as stream:
+        for index in range(6):
+            tool = {"type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": str(index), "output": image,
+            }}
+            for row in (tool, {"type": "compacted", "payload": {"replacement_history": [tool["payload"]]}}):
+                stream.write(json.dumps(row) + "\n")
+    size = source.stat().st_size
+    assert size > 64 * 1024 * 1024
+    with source.open("rb") as stream:
+        sha = hashlib.file_digest(stream, "sha256").hexdigest()
+
+    if previously_failed:
+        path = inbox.root(config) / "pending" / "legacy-oversized.json"
+        path.parent.mkdir(parents=True)
+        inbox._write_atomic(path, {"id": path.stem, "chat_id": chat, "event": "PreCompact",
+            "transcript": str(source), "snapshot": None, "state": "failed", "attempts": 1,
+            "error_code": "snapshot_too_large"})
+    else:
+        boundary = inbox.record(config, chat, "PreCompact", str(source))
+        assert boundary["snapshot"]
+        with open_source(boundary["snapshot"]) as stream:
+            saved = stream.read(32768)
+            assert stream.read(1) == b""
+        assert b"VGVzdEltYWdl" not in saved and b"replacement_history" not in saved
+        assert "先整理当前对话" in saved.decode()
+        # The worker must use the frozen boundary, not whatever is now at the live path.
+        source.write_text('{"type":"rewritten"}\n')
+
+    report = maintain.run_chat(config, chat)
+    assert report["state"] == "done", report
+    assert report["calls"] == 1
+    assert "先整理当前对话" in json.dumps(transport.payloads, ensure_ascii=False)
+    assert "VGVzdEltYWdl" not in json.dumps(transport.payloads)
+    assert not inbox.failed(config, chat)
+    assert not inbox.pending(config, chat)
+    assert maintain.run_chat(config, chat)["calls"] == 0
+    with Store(config, read_only=True) as store:
+        assert store.db.execute("SELECT count(*) FROM source_archives").fetchone()[0] == 0
+        assert not list((inbox.root(config) / "objects").glob("*.z"))
+        hit = Retrieval(store).search("先整理当前对话")["results"][0]
+        assert Retrieval(store).expand(hit["id"])["text"] == "先整理当前对话"
+        assert store.db.execute("SELECT count(*) FROM narrative_versions").fetchone()[0] == 1
+    if previously_failed:
+        with source.open("rb") as stream:
+            assert hashlib.file_digest(stream, "sha256").hexdigest() == sha
 
 
 class FailingCompactTransport(CompactTransport):

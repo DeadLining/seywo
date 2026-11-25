@@ -118,8 +118,6 @@ def fingerprint(request):
 class Understanding:
     def __init__(self, store, *, clock=time.time):
         self.store, self.db, self.clock = store, store.db, clock
-        if self.db.execute("PRAGMA user_version").fetchone()[0] < 2:
-            raise ValueError("S2 requires writable schema migration")
 
     def _job(self, job_id):
         row = self.db.execute("SELECT * FROM understanding_jobs WHERE id=?", (job_id,)).fetchone()

@@ -1,8 +1,8 @@
 """Compact boundary inbox: every hook writes a small durable record, then exits.
 
-No database, no model and no source rewriting happen in a hook process. A record
+No database writes, model calls or source rewriting happen in a hook process. A record
 only names a chat, an event and a source; a PreCompact event may additionally
-carry a bounded verbatim snapshot, because compaction can rewrite the source
+carry an immutable dialogue capture, because compaction can rewrite the source
 after the hook returns. Duplicate delivery coalesces on the immutable capture
 and source fingerprint within the same chat, event and transcript path.
 """
@@ -20,7 +20,6 @@ from .locking import file_lock, lifecycle
 from .store import digest
 
 EVENTS = {"PreCompact", "PostCompact", "SessionEnd", "Stop"}
-SNAPSHOT_LIMIT = 64 * 1024 * 1024
 KEEP_RECORDS = 200
 
 
@@ -66,20 +65,21 @@ def _serialized(function):
 
 
 def snapshot(config, source: Path, chat_id: str, unique: bool = False) -> str | None:
-    """Capture exact shared blocks and return an immutable content locator."""
-    from .archive import content_capture
-    folder = root(config) / "live"
+    """Freeze only dialogue and provenance, using shared immutable blocks."""
     try:
-        target, _ = content_capture(source, folder, chat_id, limit=SNAPSHOT_LIMIT)
+        target, _ = capture_dialogue(config, source, chat_id)
         return str(target)
     except (OSError, ValueError):
         return None
 
 
+def capture_dialogue(config, source, chat_id):
+    from .archive import content_capture
+    return content_capture(source, snapshot_dir(config), chat_id, dialogue=True)
+
+
 def record(config, chat_id: str, event: str, transcript: str) -> dict:
     with lifecycle(config):
-        if (Path(config["_path"]).parent / "storage-migration.pending").exists():
-            raise ValueError("storage migration pending")
         return _record(config, chat_id, event, transcript)
 
 
@@ -91,6 +91,10 @@ def _record(config, chat_id: str, event: str, transcript: str) -> dict:
     folder = root(config) / "pending"
     folder.mkdir(parents=True, exist_ok=True)
     with file_lock(root(config) / ".lock"):
+        from .store import Store
+        with Store(config, read_only=True) as store:
+            if store.chat_deleted(chat_id):
+                return {"chat_id": chat_id, "state": "excluded", "error_code": "chat_deleted"}
         # Capture before deduplication: metadata can be restored after a rewrite,
         # and a source path alone identifies neither the bytes nor the boundary.
         boundary = {

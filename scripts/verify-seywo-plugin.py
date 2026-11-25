@@ -109,7 +109,9 @@ def verify(repository=REPOSITORY):
                 discovered = request('hooks/list', {'cwds': [str(workspace)]})
                 reviewed = [hook for entry in discovered['data'] for hook in entry['hooks']
                             if hook.get('pluginId') == 'seywo@seywo-local']
-                assert len(reviewed) == 5
+                declared = json.loads((installed / 'hooks.json').read_text())['hooks']
+                expected_events = sorted(name[0].lower() + name[1:] for name in declared)
+                assert sorted(hook['eventName'] for hook in reviewed) == expected_events
                 for hook in reviewed:
                     request('config/value/write', {
                         'keyPath': 'hooks.state.' + json.dumps(hook['key']) + '.trusted_hash',
@@ -135,8 +137,7 @@ def verify(repository=REPOSITORY):
                 hook_inventory = request('hooks/list', {'cwds': [str(workspace)]})
                 plugin_hooks = [hook for entry in hook_inventory['data'] for hook in entry['hooks']
                                 if hook.get('pluginId') == 'seywo@seywo-local']
-                assert len(plugin_hooks) == 5, hook_inventory
-                assert {hook['eventName'] for hook in plugin_hooks} == {'preCompact', 'postCompact', 'sessionStart', 'userPromptSubmit', 'stop'}
+                assert sorted(hook['eventName'] for hook in plugin_hooks) == expected_events
                 assert all(hook['trustStatus'] == 'trusted' for hook in plugin_hooks), plugin_hooks
                 assert all(not entry['errors'] for entry in hook_inventory['data']), hook_inventory
                 assert running['tools']['seywo_model_status']['_meta']['ui']['visibility'] == ['app']

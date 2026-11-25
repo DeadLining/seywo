@@ -14,7 +14,7 @@ from seywo.compact_pipeline import apply_compact, _turn_packets, _batch_turns, _
 from seywo.narrative import Narrative, empty  # noqa: E402
 from seywo.config import initialize, load_config  # noqa: E402
 from seywo.store import Store, encode  # noqa: E402
-from seywo.delta_pipeline import _fresh_rows  # noqa: E402
+from seywo.compact_sources import _fresh_rows  # noqa: E402
 
 
 def source(i, text, *, role='user', channel='final'):

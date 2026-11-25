@@ -1,6 +1,6 @@
 # Seywo Codex plugin
 
-Version **0.5.3** packages the existing local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
+Version **0.5.5** packages the local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
 
 ## Runtime prerequisites
 
@@ -10,7 +10,7 @@ One plugin and one `uv` entrypoint target Windows, macOS and Linux. Install `uv`
 
 The native CI matrix is `.github/workflows/portable-runtime.yml`. It runs all Python tests (including real declared UV STDIO and offline Hook smoke), UI contracts and archive building on all three OSes. A macOS run alone does not establish native Windows acceptance; preserve that distinction when reporting results.
 
-The `.codex-plugin/plugin.json` manifest keeps the Codex loader entrypoint and the five native Hooks at the plugin root. The loader resolves the MCP `cwd`, shell entrypoint and bundled resources relative to the installed plugin directory. Five native Hooks remain subject to host review/trust. The plugin never grants its own trust or installs global Hook fallbacks.
+The `.codex-plugin/plugin.json` manifest keeps the Codex loader entrypoint and native Hooks at the plugin root. The loader resolves the MCP `cwd`, shell entrypoint and bundled resources relative to the installed plugin directory. Native Hooks remain subject to host review/trust. The plugin never grants its own trust or installs global Hook fallbacks.
 
 ## Default model
 
@@ -148,15 +148,19 @@ A process that fails before Seywo's Hook runtime starts is outside these receipt
 Codex owns that command-execution error.
 
 
-## Storage lifecycle (0.5.1 / schema 8)
+## Storage lifecycle (schema 8)
 
-Stable event/snapshot identities and exact source ranges reference shared compressed descriptors. Legacy task request/result documents are content-addressed with checksum-verified delta chains of at most 32 documents; original SQL task reads reconstruct exact bytes. External-content FTS derives tokens from compressed source payloads and retains the original unicode61 tokenizer and phrase positions. User, assistant and tool grep coverage is retained. Raw archives use bounded content-defined chunks to share unchanged histories without removing original bytes.
+Stable event/snapshot identities and exact source ranges reference shared compressed descriptors. Legacy task request/result documents are content-addressed with checksum-verified delta chains of at most 32 documents; original SQL task reads reconstruct exact bytes. External-content FTS derives tokens from compressed source payloads and retains the original unicode61 tokenizer and phrase positions. Explicit imports and existing indexes retain their tool-search coverage.
 
-The detached maintainer upgrades an older store before taking writer leases. It creates one compressed rollback image, journals durable boundaries, checks logical source/narrative/task hashes and integrity, then reclaims obsolete representation bytes. Interrupted migrations resume using the same backup; failures remain blocked/retryable with a safe panel explanation. Read-only retrieval never starts migration. Explicit maintenance is `seywo/bin/seywo --config /absolute/project/.seywo/config.json storage migrate` (or `verify` for read-only validation). One-time upgrades can take minutes on large stores.
+Automatic captures freeze dialogue before the background worker starts, so a subsequent Codex rewrite cannot change the input being processed or retried. They keep user/assistant text, turn metadata, and original record hashes and ranges, but omit attachment payloads, tool arguments/results and Compact replacement histories before writing any archive block. The original Codex log is never edited. Projected archive locators are not native rollout paths: evidence ranges marked `byte_space=original_transcript` describe the original bytes, and evidence excerpts read the safe indexed text instead. Explicit raw import APIs still retain their existing behavior.
+
+New indexes are created directly at schema 8. Existing schema 8 indexes open without rewriting; other schemas are refused without modifying the index. The runtime does not migrate storage or make full database backups. `seywo/bin/seywo --config /absolute/project/.seywo/config.json storage verify` performs read-only database and archive validation.
 
 After successful/no-op maintenance and explicit deletion, one nonblocking collector protects database references and pending/claimed/failed boundaries before removing detached captures, payloads, descriptors and unreachable task document chains. Archive GC and VACUUM are thresholded; use `storage gc` for explicit forced reclamation. Active writers defer collection. One small storage receipt replaces previous results; reclamation failure is visible separately from successful narrative publication and is retried after subsequent successful maintenance.
 
-Rollback images remain under `.seywo/maintenance/storage-migration/`; repeated current-schema migrations create no new image. Count rollback bytes separately from active bytes when measuring total disk use. Source history still grows with genuinely new conversations; native Codex transcripts and shared Codex runtime databases are outside Seywo reclamation. This runtime does not promise zero disk writes by its host.
+After successful Compact maintenance, the collector detaches projected archives that are no longer needed by the inbox. Indexed dialogue and native coordinates serve evidence reads and append recognition without the capture. Existing archive files that the current index still references are retained.
+
+Session hooks and the Compact worker reconcile confirmed Desktop deletions for the bound project. A local Desktop deletion marker and absence from the backend thread catalog are both required. Archive or SessionEnd alone cannot authorize cleanup. Without a lifecycle event, a deletion is reconciled on the project's next activity; there is no polling daemon or model call. The original transcripts and host databases remain outside Seywo reclamation.
 
 
 ## Upgrading the plugin

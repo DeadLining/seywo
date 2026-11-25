@@ -83,9 +83,7 @@ def enable_plugin_hook(config_path: Path) -> dict:
     with file_lock(path.parent / ".init.lock"):
         current = load_config(path)
         data = {k: v for k, v in current.items() if not k.startswith("_")}
-        hook = data.get("hook") if isinstance(data.get("hook"), dict) else {}
-        data["hook"] = {**hook, "enabled": True,
-                        "pipeline": "seywo-compact-v1"}
+        data["hook"] = {"enabled": True}
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
         return data["hook"]
 
@@ -133,9 +131,9 @@ def _initialize_locked(root: Path, state: Path, *, plugin_hook: bool = False, sk
                              "restore the project configuration before retrying")
         data = {"product": "seywo", "schema_version": 1, "project_id": uuid4().hex,
                 "project_root": str(root), "database": "index.sqlite3",
-                "automatic_maintenance": False, "storage_v2": True, "hook": {"enabled": False}}
+                "automatic_maintenance": False, "hook": {"enabled": False}}
         if plugin_hook:
-            data["hook"] = {"enabled": True, "pipeline": "seywo-compact-v1"}
+            data["hook"] = {"enabled": True}
         # The project lock serializes creators; atomic publication prevents partial JSON.
         _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     config = load_config(path)
@@ -146,7 +144,7 @@ def _initialize_locked(root: Path, state: Path, *, plugin_hook: bool = False, sk
             pass
     else:
         # Readers may observe config.json before initialization finishes. Publish
-        # the database only after every schema migration is committed and closed.
+        # the database only after its complete schema is committed and closed.
         temporary = state / f'.index-{uuid4().hex}.sqlite3'
         try:
             with Store({**config, '_database': str(temporary)}, create=True):

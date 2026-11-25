@@ -9,6 +9,7 @@ import sqlite3
 from uuid import uuid4
 
 from .sqlite_paths import sqlite_uri
+from .current_schema import DDL
 from .admission import require_human, transcript_meta
 from .project_scope import source_belongs_to_project
 from .projection import VERSION, assistant_body_hash, compact_body_hash, project, search_tokens
@@ -16,42 +17,6 @@ from .projection import VERSION, assistant_body_hash, compact_body_hash, project
 APPLICATION_ID = 0x5345574F
 SCHEMA_VERSION = 8
 MAX_LINE_BYTES = 16 * 1024 * 1024
-DDL = """
-CREATE TABLE projects(id TEXT PRIMARY KEY, root TEXT NOT NULL);
-CREATE TABLE chats(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id));
-CREATE TABLE tombstones(chat_id TEXT PRIMARY KEY);
-CREATE TABLE source_segments(
- id TEXT PRIMARY KEY, chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
- path TEXT NOT NULL UNIQUE, ordinal INTEGER NOT NULL, head_snapshot TEXT,
- UNIQUE(chat_id,ordinal));
-CREATE TABLE source_snapshots(
- id TEXT PRIMARY KEY, segment_id TEXT NOT NULL REFERENCES source_segments(id) ON DELETE CASCADE,
- sha256 TEXT NOT NULL, byte_count INTEGER NOT NULL, records INTEGER NOT NULL,
- projection_version TEXT NOT NULL, UNIQUE(segment_id,sha256,projection_version));
-CREATE TABLE source_events(
- id TEXT PRIMARY KEY, segment_id TEXT NOT NULL REFERENCES source_segments(id) ON DELETE CASCADE,
- record_no INTEGER NOT NULL, UNIQUE(segment_id,record_no));
-CREATE TABLE source_fragments(
- row_id INTEGER PRIMARY KEY, event_id TEXT NOT NULL REFERENCES source_events(id) ON DELETE CASCADE,
- snapshot_id TEXT NOT NULL REFERENCES source_snapshots(id) ON DELETE CASCADE,
- byte_start INTEGER NOT NULL, byte_end INTEGER NOT NULL, raw_sha256 TEXT NOT NULL,
- kind TEXT NOT NULL, role TEXT NOT NULL, channel TEXT, call_id TEXT, tool TEXT,
- occurred_at TEXT, safe_text TEXT NOT NULL, safe_sha256 TEXT NOT NULL,
- projection_json TEXT NOT NULL, UNIQUE(event_id,snapshot_id));
-CREATE TABLE coverage_ranges(
- fragment_id INTEGER PRIMARY KEY REFERENCES source_fragments(row_id) ON DELETE CASCADE,
- state TEXT NOT NULL CHECK(state IN ('projected','excluded_mechanical','pending','unavailable')),
- reason TEXT NOT NULL);
-CREATE INDEX fragments_call ON source_fragments(call_id);
-CREATE INDEX fragments_snapshot ON source_fragments(snapshot_id,byte_start);
-CREATE INDEX segments_chat ON source_segments(chat_id,ordinal);
-CREATE VIRTUAL TABLE source_fts USING fts5(tokens,tokenize='unicode61');
-CREATE VIEW current_sources AS
- SELECT f.*,e.record_no,s.chat_id,s.ordinal,s.path,s.id AS segment_id,c.state,c.reason
- FROM source_fragments f JOIN source_events e ON e.id=f.event_id
- JOIN source_segments s ON s.id=e.segment_id AND s.head_snapshot=f.snapshot_id
- JOIN coverage_ranges c ON c.fragment_id=f.row_id;
-"""
 
 
 def digest(data: bytes | str) -> str:
@@ -62,17 +27,18 @@ def encode(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+class UnsupportedStorage(ValueError):
+    pass
+
+
 class Store:
     def __init__(self, config: dict, *, create=False, read_only=False):
-        from .locking import lifecycle, owns_exclusive
+        from .locking import lifecycle
         self._lease = None
         if not read_only:
             self._lease = lifecycle(config)
             self._lease.__enter__()
         try:
-            state = Path(config["_path"]).parent
-            if not read_only and (state / "storage-migration.pending").exists() and not owns_exclusive(state / "storage-migration.lock"):
-                raise ValueError("storage migration pending; resume migration before writing")
             self._open(config, create=create, read_only=read_only)
         except BaseException:
             if self._lease is not None:
@@ -102,37 +68,17 @@ class Store:
             if create and not tables and app_id == 0:
                 self.db.executescript("BEGIN IMMEDIATE;" + DDL)
                 self.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
-                self.db.execute("PRAGMA user_version=1")
+                self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
                 self.db.execute("INSERT INTO projects VALUES(?,?)",
                                 (config["project_id"], config["project_root"]))
                 self.db.commit()
-            if (self.db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-                    or self.db.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION)):
-                raise ValueError("not a supported Seywo database; no legacy fallback")
+            if self.db.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
+                raise ValueError("not a Seywo database")
+            if self.db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+                raise UnsupportedStorage("unsupported Seywo storage schema")
             owner = self.db.execute("SELECT id,root FROM projects").fetchall()
             if len(owner) != 1 or tuple(owner[0]) != (config["project_id"], config["project_root"]):
                 raise ValueError("database belongs to a different project")
-            if not read_only:
-                from .locking import owns_exclusive
-                version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                if (version < SCHEMA_VERSION
-                        and self.db.execute("SELECT 1 FROM source_fragments LIMIT 1").fetchone()
-                        and not owns_exclusive(Path(config["_path"]).parent / "storage-migration.lock")):
-                    raise ValueError("storage upgrade requires 'seywo storage migrate' with a durable backup")
-                from .s2_schema import migrate
-                migrate(self.db)
-                from .s3_schema import migrate as migrate_narrative
-                migrate_narrative(self.db)
-                from .model_schema import migrate as migrate_model
-                migrate_model(self.db)
-                from .turn_schema import migrate as migrate_turns
-                migrate_turns(self.db)
-                from .storage_schema import migrate as migrate_storage
-                migrate_storage(self.db)
-                from .progress_schema import migrate as migrate_progress
-                migrate_progress(self.db)
-                from .storage_v8 import migrate as migrate_shared
-                migrate_shared(self.db)
         except BaseException:
             self.db.rollback()
             self.db.close()
@@ -174,14 +120,15 @@ class Store:
         with self._transaction():
             return self._import_source(path, chat_id, ordinal, stream=stream)
 
-    def _import_source(self, path: Path, chat_id: str, ordinal: int, *, stream=None, identity=None) -> dict:
+    def _import_source(self, path: Path, chat_id: str, ordinal: int, *, stream=None, identity=None, preserve_prefix=0) -> dict:
         """Import exact source identity, sharing unchanged revisions before indexing.
 
         Explicit imports retain physical coverage. Compact ingress may discard an
-        already-represented leading prefix across segments; its exact bytes remain
-        available through the raw archive, while original evidence retains its IDs.
+        already-represented leading prefix across segments. Automatic captures
+        retain dialogue and original coordinates, not exact native bytes.
         """
-        from .archive import open_source, source_digest
+        from .archive import is_dialogue, open_source, source_digest
+        from .dialogue_capture import MIRROR, coordinates
         from .storage_schema import membership, payload
         if not chat_id or type(ordinal) is not int or ordinal < 0:
             raise ValueError("chat and non-negative segment order are required")
@@ -189,6 +136,7 @@ class Store:
         if path.suffix != ".jsonl":
             raise ValueError("only explicit Codex .jsonl source records are supported")
         expected_hash, expected_size = identity or source_digest(path)
+        dialogue = is_dialogue(path)
         with open_source(path) as handle:
             if self.db.execute("SELECT 1 FROM tombstones WHERE chat_id=?", (chat_id,)).fetchone():
                 raise ValueError("chat was deleted; implicit reimport is prohibited")
@@ -230,6 +178,7 @@ class Store:
                     turns[r["turn_id"]] = r["turn_seq"]
             turn_seq = max((n or 0 for n in turns.values()), default=0)
             prefix_hash, offset, count, metadata_seen = hashlib.sha256(), 0, 0, False
+            origin_end = 0
             row_ids, inserted, prior_assistant = [], 0, None
             new_payloads = set()
             while True:
@@ -237,7 +186,7 @@ class Store:
                 if not raw:
                     break
                 if len(raw) > MAX_LINE_BYTES:
-                    raise ValueError("source record exceeds 16 MiB; import rolled back without truncation")
+                    raise ValueError("source_record_too_large: import rolled back without truncation")
                 count += 1
                 start, offset = offset, offset + len(raw)
                 prefix_hash.update(raw)
@@ -248,6 +197,10 @@ class Store:
                         raise ValueError("non-object record")
                 except (ValueError, UnicodeDecodeError):
                     record = {"type": "unparsed"}
+                complete, end = raw.endswith(b"\n"), offset
+                if dialogue:
+                    start, end, raw_hash, complete = coordinates(record, origin_end)
+                    origin_end = end
                 if count == 1:
                     meta = record.get("payload", {})
                     if record.get("type") != "session_meta" or not isinstance(meta, dict) or meta.get("id") != chat_id:
@@ -260,6 +213,11 @@ class Store:
                 elif record.get("type") == "session_meta":
                     raise ValueError("multiple session identities in one physical source")
                 projection = project(record)
+                if dialogue:
+                    projection["source_byte_space"] = "original_transcript"
+                    if projection["kind"] in {"function_call", "custom_tool_call", "function_call_output",
+                                             "custom_tool_call_output", "tool_result", "tool_response"} or projection["role"] == "tool":
+                        projection.update(state="excluded_mechanical", reason="tool_payload_not_captured")
                 if (record.get("type") == "turn_context" and projection["turn_id"]
                         or projection.get("turn_event") == "task_started" and projection.get("event_turn_id")):
                     current_turn = projection.get("event_turn_id") or projection["turn_id"]
@@ -269,7 +227,8 @@ class Store:
                         turns[current_turn] = turn_seq
                 projection.update(turn_id=current_turn, root_turn_id=current_root,
                                   turn_seq=turns.get(current_turn) if current_turn else None)
-                mirror = compact_body_hash(record)
+                compact_hash = record.get(MIRROR) if dialogue else None
+                mirror = (compact_hash if record.get("type") == "compacted" and dialogue else compact_body_hash(record))
                 compacted = record.get("type") == "compacted" or projection["reason"] == "compact_reference_not_original"
                 if prior_assistant and mirror == prior_assistant[1]:
                     position, _ = prior_assistant
@@ -291,21 +250,25 @@ class Store:
                     else:
                         self.db.execute("UPDATE source_fragments SET payload_id=? WHERE row_id=?", (changed, fragment))
                         self.db.execute("UPDATE coverage_ranges SET state='excluded_mechanical',reason='compact_summary_mirror' WHERE fragment_id=?", (fragment,))
-                if not raw.endswith(b"\n"):
+                if not complete:
                     projection.update(state="pending", reason="unterminated_record", text="")
                 safe = projection["text"]
-                pid = payload(self.db, safe, {k: v for k, v in projection.items() if k != "text"})
                 old = previous_rows.get(count)
-                if (old and old["raw_sha256"] == raw_hash and old["byte_start"] == start and old["byte_end"] == offset
-                        and old["payload_id"] == pid and old["turn_id"] == current_turn and old["root_turn_id"] == current_root
-                        and old["turn_seq"] == projection["turn_seq"]):
+                unchanged = (old and old["raw_sha256"] == raw_hash and old["byte_start"] == start and old["byte_end"] == end
+                             and old["turn_id"] == current_turn and old["root_turn_id"] == current_root
+                             and old["turn_seq"] == projection["turn_seq"])
+                if unchanged and count <= preserve_prefix:
+                    pid = old["payload_id"]
+                else:
+                    pid = payload(self.db, safe, {k: v for k, v in projection.items() if k != "text"})
+                if unchanged and old["payload_id"] == pid:
                     fragment = old["row_id"]
                 else:
                     event_id = digest(f"{segment_id}:{count}")
                     self.db.execute("INSERT OR IGNORE INTO source_events VALUES(?,?,?)", (event_id, segment_id, count))
                     from .storage_v8 import insert_fragment
                     fragment = insert_fragment(self.db, dict(
-                        event_id=event_id, snapshot_id=snapshot_id, byte_start=start, byte_end=offset,
+                        event_id=event_id, snapshot_id=snapshot_id, byte_start=start, byte_end=end,
                         raw_sha256=raw_hash, kind=projection["kind"], role=projection["role"], channel=projection["channel"],
                         call_id=projection["call_id"], tool=projection["tool"], occurred_at=projection["timestamp"],
                         safe_text="", safe_sha256=digest(safe), turn_id=current_turn, root_turn_id=current_root,
@@ -315,7 +278,7 @@ class Store:
                 row_ids.append(fragment)
                 if safe and projection["state"] != "excluded_mechanical":
                     new_payloads.add(pid)
-                body_hash = assistant_body_hash(record)
+                body_hash = (compact_hash or assistant_body_hash(record)) if not compacted else None
                 if body_hash is not None and projection["state"] == "projected":
                     prior_assistant = (len(row_ids) - 1, body_hash)
                 elif compacted or projection["role"] in {"user", "assistant"}:
@@ -340,16 +303,16 @@ class Store:
                 "records": count, "source_sha256": expected_hash, "reused_snapshot": False,
                 "semantic_done": False, "inserted_fragments": inserted}
 
-    def import_compact(self, path, chat_id, transcript):
-        """Replay is inert; only proven byte-prefix appends reuse an ordinal."""
+    def import_compact(self, path, chat_id, transcript, *, dialogue=False):
+        """Replay is inert; only verified append prefixes reuse an ordinal."""
         from .archive import content_capture
         from .locking import file_lock
         with file_lock(Path(self.config["_path"]).parent / "inbox" / ".lock"):
-            path, manifest = content_capture(path, Path(self.config["_path"]).parent / "inbox" / "live", chat_id)
+            path, manifest = content_capture(path, Path(self.config["_path"]).parent / "inbox" / "live", chat_id, dialogue=dialogue)
             return self._import_compact_capture(path, manifest, chat_id, transcript)
 
     def _import_compact_capture(self, path, manifest, chat_id, transcript):
-        from .archive import open_source
+        from .archive import is_dialogue, open_source
         identity = manifest["sha256"], manifest["bytes"]
         with self._transaction():
             if self.db.execute("SELECT 1 FROM tombstones WHERE chat_id=?", (chat_id,)).fetchone():
@@ -364,10 +327,13 @@ class Store:
                         "semantic_done": False, "inserted_fragments": 0}
             last = self.db.execute("SELECT coalesce(max(ordinal),-1) FROM source_segments WHERE chat_id=?", (chat_id,)).fetchone()[0]
             mapped = self.db.execute(
-                "SELECT s.ordinal,ss.byte_count,ss.sha256 FROM source_segments s JOIN compact_streams m ON s.id=m.segment_id "
+                "SELECT s.ordinal,ss.byte_count,ss.sha256,ss.id,ss.records,s.id segment,a.path FROM source_segments s JOIN compact_streams m ON s.id=m.segment_id "
+                "LEFT JOIN source_archives a ON a.snapshot_id=s.head_snapshot "
                 "JOIN source_snapshots ss ON ss.id=s.head_snapshot WHERE m.chat_id=? AND m.transcript=?",
                 (chat_id, transcript)).fetchone()
             ordinal = last + 1
+            preserve_prefix = 0
+            dialogue = is_dialogue(path)
             if mapped and mapped["ordinal"] == last and identity[1] > mapped["byte_count"]:
                 prefix = hashlib.sha256()
                 remaining = mapped["byte_count"]
@@ -380,7 +346,52 @@ class Store:
                         remaining -= len(part)
                 if remaining == 0 and prefix.hexdigest() == mapped["sha256"]:
                     ordinal = last
-            return self._import_source(path, chat_id, ordinal, stream=transcript, identity=identity)
+                    if dialogue:
+                        preserve_prefix = mapped["records"]
+            if mapped and mapped["ordinal"] == last and ordinal != last and dialogue:
+                incomplete = self.db.execute(
+                    "SELECT 1 FROM snapshot_fragments f JOIN source_events e ON e.id=f.event_id "
+                    "JOIN coverage_ranges c ON c.fragment_id=f.row_id "
+                    "WHERE f.snapshot_id=? AND e.record_no=? AND c.reason='unterminated_record'",
+                    (mapped["id"], mapped["records"])).fetchone() is not None
+                if incomplete or not mapped["path"] or not is_dialogue(mapped["path"]):
+                    match = self._dialogue_prefix(path, mapped, incomplete)
+                    if match == "replay":
+                        return {"chat_id": chat_id, "segment_id": mapped["segment"], "snapshot_id": mapped["id"],
+                                "records": mapped["records"], "source_sha256": mapped["sha256"], "reused_snapshot": True,
+                                "semantic_done": False, "inserted_fragments": 0}
+                    if match == "append":
+                        ordinal = last
+                        preserve_prefix = mapped["records"] - int(incomplete)
+            return self._import_source(path, chat_id, ordinal, stream=transcript, identity=identity, preserve_prefix=preserve_prefix)
+
+    def _dialogue_prefix(self, path, mapped, incomplete):
+        from .archive import open_source
+        from .dialogue_capture import coordinates
+        # The complete native records define the stable prefix across formats.
+        # An unterminated tail was never eligible for semantic consumption.
+        count = mapped["records"] - int(incomplete)
+        if not count:
+            return None
+        prior = self.db.execute(
+            "SELECT raw_sha256,byte_start,byte_end FROM snapshot_fragments f "
+            "JOIN source_events e ON e.id=f.event_id WHERE f.snapshot_id=? AND e.record_no<=? ORDER BY e.record_no",
+            (mapped["id"], count))
+        end = matched = 0
+        with open_source(path) as handle:
+            for old in prior:
+                raw = handle.readline(MAX_LINE_BYTES + 1)
+                if not raw:
+                    return None
+                start, end, sha, _ = coordinates(json.loads(raw), end)
+                if (sha, start, end) != tuple(old):
+                    return None
+                matched += 1
+            if matched != count:
+                return None
+            if handle.read(1):
+                return "append"
+            return None if incomplete else "replay"
 
     def _reindex(self):
         self.db.execute("INSERT INTO source_fts(source_fts) VALUES('delete-all')")
@@ -442,7 +453,8 @@ class Store:
                 "pairing": self.pairing(row["chat_id"], row["call_id"], snapshot_id=snapshot_id),
                 "source": {"path": row["path"], "record_no": row["record_no"],
                            "byte_start": row["byte_start"], "byte_end": row["byte_end"],
-                           "raw_sha256": row["raw_sha256"]},
+                           "raw_sha256": row["raw_sha256"],
+                           **({"byte_space": projection["source_byte_space"]} if "source_byte_space" in projection else {})},
                 "text": row["safe_text"][start:end], "char_start": start, "char_end": end,
                 "safe_sha256": row["safe_sha256"], "projection": projection,
                 "coverage": {"state": row["state"], "reason": row["reason"]},
@@ -484,26 +496,30 @@ class Store:
     def status(self, chat_id=None):
         rows = self.db.execute("SELECT state,count(*) AS n FROM current_sources WHERE (? IS NULL OR chat_id=?) GROUP BY state",
                                (chat_id, chat_id)).fetchall()
-        schema = self.db.execute("PRAGMA user_version").fetchone()[0]
         jobs, attempts = {}, 0
-        if schema >= 2:
-            for row in self.db.execute("SELECT state,count(*) AS n,sum(call_count) AS calls FROM understanding_jobs WHERE (? IS NULL OR chat_id=?) GROUP BY state", (chat_id, chat_id)):
-                jobs[row["state"]] = row["n"]
-                attempts += row["calls"]
-        return {"product": "seywo", "schema_version": self.db.execute("PRAGMA user_version").fetchone()[0],
+        for row in self.db.execute("SELECT state,count(*) AS n,sum(call_count) AS calls FROM understanding_jobs WHERE (? IS NULL OR chat_id=?) GROUP BY state", (chat_id, chat_id)):
+            jobs[row["state"]] = row["n"]
+            attempts += row["calls"]
+        return {"product": "seywo", "schema_version": SCHEMA_VERSION,
                 "project_id": self.config["project_id"], "coverage": {r["state"]: r["n"] for r in rows},
                 "semantic_done": False, "model_calls": None if attempts else 0,
                 "model_attempts": attempts, "understanding_jobs": jobs, "automatic_maintenance": False}
 
     def delete_chat(self, chat_id: str):
-        with self.db:
-            self.db.execute("BEGIN IMMEDIATE")
-            self.db.execute("INSERT OR IGNORE INTO tombstones VALUES(?)", (chat_id,))
-            self.db.execute("DELETE FROM chats WHERE id=?", (chat_id,))
+        self._delete_chats([chat_id])
+        self._reclaim_after_close = True
+        return {"chat_id": chat_id, "deleted": True, "reimport_blocked": True,
+                "original_source_deleted": False}
+
+    def chat_deleted(self, chat_id):
+        return self.db.execute("SELECT 1 FROM tombstones WHERE chat_id=?", (chat_id,)).fetchone() is not None
+
+    def _delete_chats(self, chat_ids):
+        with self._transaction():
+            args = [(chat_id,) for chat_id in chat_ids]
+            self.db.executemany("INSERT OR IGNORE INTO tombstones VALUES(?)", args)
+            self.db.executemany("DELETE FROM chats WHERE id=?", args)
             from .storage_lifecycle import collect_database
             collect_database(self.db)
             self._reindex()
             self.db.execute("INSERT INTO source_fts(source_fts) VALUES('optimize')")
-        self._reclaim_after_close = True
-        return {"chat_id": chat_id, "deleted": True, "reimport_blocked": True,
-                "original_source_deleted": False}

@@ -1,6 +1,7 @@
 """Dependency-aware reclamation after publication, never on the model hot path."""
 import json
 from pathlib import Path
+import re
 import sqlite3
 import time
 
@@ -11,6 +12,31 @@ from .locking import file_lock, try_exclusive
 MAX_ORPHAN_BYTES = 8 * 1024 * 1024
 MAX_ORPHAN_BLOCKS = 32
 MIN_VACUUM_BYTES = 32 * 1024 * 1024
+ROLLBACK_RETENTION = 7 * 86400
+MIGRATION_RUN = re.compile(r'storage-[0-9]{8}-[0-9]{6}-[0-9a-f]{8}')
+
+
+def _expire_completed_rollbacks(state):
+    folder = state / 'maintenance/storage-migration'
+    if folder.is_symlink():
+        raise ValueError('symlinked rollback directory')
+    removed = 0
+    cutoff = time.time() - ROLLBACK_RETENTION
+    for receipt in folder.glob('storage-*.json'):
+        if receipt.is_symlink() or not MIGRATION_RUN.fullmatch(receipt.stem) or receipt.stat().st_mtime > cutoff:
+            continue
+        try:
+            body = json.loads(receipt.read_text(encoding='utf-8'))
+            if body['state'] != 'complete' or body['run_id'] != receipt.stem:
+                continue
+            target = folder / (receipt.stem + '.sqlite3.gz')
+            if body['backup']['path'] != str(target) or target.is_symlink() or not target.is_file():
+                continue
+        except (ValueError, TypeError, KeyError):
+            continue
+        target.unlink()
+        removed += 1
+    return removed
 
 
 def collect_database(db):
@@ -71,7 +97,7 @@ def status(config):
         return {'state': 'failed', 'error_code': 'storage_maintenance_failed'}
 
 
-def collect(config, *, force=False):
+def collect(config, *, force=False, reclaim_blocks=False, retire_dialogue=False):
     """Exclusive, nonblocking by default; no deletion can race a writer or Hook."""
     state = Path(config['_path']).parent
     for path in (state, state / 'inbox', *(state / 'inbox' / name for name in ('pending', 'live', 'objects')), state / 'maintenance'):
@@ -80,8 +106,6 @@ def collect(config, *, force=False):
     with try_exclusive(state / 'storage-migration.lock', blocking=force) as acquired:
         if not acquired:
             return {'state': 'deferred', 'reason': 'active_writer'}
-        if (state / 'storage-migration.pending').exists():
-            return {'state': 'deferred', 'reason': 'storage_migration_in_progress'}
         from .store import Store
         inbox = state / 'inbox'
         result = {'state': 'done', 'removed_manifests': 0, 'removed_blocks': 0, 'model_calls': 0}
@@ -91,7 +115,7 @@ def collect(config, *, force=False):
                 # graph is no longer trustworthy.  Stop before deleting any
                 # manifest, block, database row, or vacuumed page.
                 _validate_database_archives(store.db)
-                bound = {str(Path(r[0]).resolve()) for r in store.db.execute('SELECT path FROM source_segments UNION SELECT path FROM source_archives')}
+                bound = set()
                 deleted = {r[0] for r in store.db.execute('SELECT chat_id FROM tombstones')}
                 # Parse/validate every pending record before deleting anything.
                 pending = []
@@ -116,14 +140,32 @@ def collect(config, *, force=False):
                     with path.open('rb') as f:
                         manifest = archive._manifest(f)
                     if manifest is None:
-                        # Explicit legacy raw captures require admin migration.
+                        # Raw inputs are not managed archive manifests.
                         bound.add(str(path.resolve()))
                     manifests.append((path, manifest))
                 with store.db:
                     result.update(collect_database(store.db))
+                    if retire_dialogue:
+                        for path, manifest in manifests:
+                            if (manifest is not None and manifest.get('format') == archive.DIALOGUE_FORMAT
+                                    and str(path.resolve()) not in bound):
+                                store.db.execute('DELETE FROM source_archives WHERE path=?', (str(path.resolve()),))
+                bound.update(str(Path(r[0]).resolve()) for r in store.db.execute('SELECT path FROM source_archives'))
+                # A retired dialogue locator remains a segment identity, not a
+                # file dependency. Legacy native segment files stay protected.
+                dialogue_paths = {str(path.resolve()) for path, manifest in manifests
+                                  if manifest is not None and manifest.get('format') == archive.DIALOGUE_FORMAT}
+                bound.update(str(Path(r[0]).resolve()) for r in store.db.execute('SELECT path FROM source_segments')
+                             if str(Path(r[0]).resolve()) not in dialogue_paths)
                 for path, item in pending:
                     if item.get('chat_id') in deleted:
                         path.unlink()
+                for folder in (state / 'maintain', state / 'maintenance'):
+                    if folder.is_symlink():
+                        raise ValueError('symlinked chat cache directory')
+                    for path in folder.glob('*.json'):
+                        if path.stem in deleted:
+                            path.unlink()
                 for path, manifest in manifests:
                     if manifest is not None and str(path.resolve()) not in bound:
                         path.unlink()
@@ -132,7 +174,7 @@ def collect(config, *, force=False):
                 blocks = list((inbox / 'objects').glob('*.z'))
                 orphan = [p for p in blocks if p.stem not in refs]
                 result['pending_block_bytes'] = sum(p.stat().st_size for p in orphan)
-                if orphan and (force or len(orphan) >= MAX_ORPHAN_BLOCKS or result['pending_block_bytes'] >= MAX_ORPHAN_BYTES):
+                if orphan and (force or reclaim_blocks or retire_dialogue or len(orphan) >= MAX_ORPHAN_BLOCKS or result['pending_block_bytes'] >= MAX_ORPHAN_BYTES):
                     result.update(archive.garbage_collect(inbox))
                     result['pending_block_bytes'] = 0
                 free, total, page = [store.db.execute('PRAGMA ' + k).fetchone()[0] for k in ('freelist_count', 'page_count', 'page_size')]
@@ -140,13 +182,14 @@ def collect(config, *, force=False):
                 if (force and free) or (free * page >= MIN_VACUUM_BYTES and free >= total // 5):
                     store.db.execute('VACUUM')
                     result['free_database_bytes'] = 0
+        result['removed_rollback_images'] = _expire_completed_rollbacks(state)
         _receipt(config, result)
         return result
 
 
-def safe_collect(config):
+def safe_collect(config, *, reclaim_blocks=False, retire_dialogue=False):
     try:
-        return collect(config)
+        return collect(config, reclaim_blocks=reclaim_blocks, retire_dialogue=retire_dialogue)
     except (OSError, ValueError, sqlite3.Error):
         result = {'state': 'failed', 'error_code': 'storage_maintenance_failed', 'model_calls': 0}
         try:

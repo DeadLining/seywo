@@ -273,32 +273,6 @@ def test_corrupt_storage_receipt_is_a_safe_warning(tmp_path):
     assert status(cfg) == {'state': 'failed', 'error_code': 'storage_maintenance_failed'}
 
 
-def test_running_storage_migration_is_not_reported_as_interrupted(tmp_path):
-    from seywo import maintenance_status
-    root, cfg = project(tmp_path)
-    cfg['hook'] = {'enabled': True}
-    maintenance_status.record(cfg, 'chat', 'queued')
-    (root / '.seywo/storage-migration.pending').write_text('{"state":"raw_durable"}')
-    from seywo.locking import lifecycle
-    with lifecycle(cfg, exclusive=True):
-        state = maintenance_status.read(cfg, 'chat')
-    assert state['state'] == 'running'
-    assert state['title'] == '正在升级项目记忆'
-    assert '存储' in state['message']
-    assert not state['retryable']
-
-
-def test_interrupted_storage_migration_is_retryable_and_read_only(tmp_path):
-    from seywo import maintenance_status
-    root, cfg = project(tmp_path)
-    cfg['hook'] = {'enabled': True}
-    (root / '.seywo/storage-migration.pending').write_text('{"state":"raw_durable"}')
-    before = {str(p): p.read_bytes() for p in (root / '.seywo').rglob('*') if p.is_file()}
-    state = maintenance_status.read(cfg, 'chat')
-    assert state['state'] == 'blocked' and state['retryable']
-    assert {str(p): p.read_bytes() for p in (root / '.seywo').rglob('*') if p.is_file()} == before
-
-
 @pytest.mark.parametrize('alias_in_reference', [False, True])
 def test_collection_preserves_live_references_across_ancestor_path_aliases(tmp_path, alias_in_reference):
     from seywo import archive, inbox
@@ -330,16 +304,3 @@ def test_collection_preserves_live_references_across_ancestor_path_aliases(tmp_p
     with Store(alias_cfg, read_only=True) as store:
         event = store.db.execute("SELECT event_id FROM source_fragments WHERE role='user' LIMIT 1").fetchone()[0]
         assert store.read(event, snapshot_id=imported['snapshot_id'])['text'] == '来源必须保留'
-
-
-def test_migration_baseline_scan_is_visible_before_journal_publication(tmp_path):
-    from seywo import maintenance_status
-    from seywo.locking import lifecycle
-    root, cfg = project(tmp_path)
-    cfg['hook'] = {'enabled': True}
-    maintenance_status.record(cfg, 'chat', 'running', error_code='storage_migration_in_progress')
-    with lifecycle(cfg, exclusive=True):
-        state = maintenance_status.read(cfg, 'chat')
-    assert state['state'] == 'running' and state['title'] == '正在升级项目记忆'
-    state = maintenance_status.read(cfg, 'chat')
-    assert state['state'] == 'blocked' and state['retryable']

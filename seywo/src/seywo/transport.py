@@ -114,11 +114,6 @@ class Transport:
             result["error"] = "provider_status_" + str(payload_result.get("status"))
         return result
 
-    def complete_delta(self, *, model, instructions, payload, max_output_tokens=900):
-        """Call the legacy delta boundary."""
-        return self._complete_json(model=model, instructions=instructions, payload=payload,
-                                   max_output_tokens=max_output_tokens)
-
     def complete_compact(self, *, model, instructions, payload, max_output_tokens=1200):
         from .compact_model import schema_for
         return self._complete_json(model=model, instructions=instructions, payload=payload,

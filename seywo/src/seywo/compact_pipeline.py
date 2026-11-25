@@ -18,7 +18,7 @@ from .compact_model import (
     MAX_OUTPUT_TOKENS, MAX_REPAIRS, POLICY, CompactValidationError,
     request_payload, instructions, validate, repair_instructions,
 )
-from .delta_pipeline import _source
+from .compact_sources import _source
 from .compact_turns import closed_rows, commit_turns
 from .compact_input import batch_turns as _batch_turns
 from .compact_identity import canonical_item as _canonical_item
@@ -687,10 +687,8 @@ def _import_owned(store, config, chat_id, claimed):
     if not path.is_file():
         inbox.finish(config, claimed, state="failed", error="source_missing")
         return False
-    from .archive import content_capture
     try:
-        path, manifest = content_capture(path, inbox.root(config) / "live", chat_id,
-                                         limit=inbox.SNAPSHOT_LIMIT)
+        path, manifest = inbox.capture_dialogue(config, path, chat_id)
     except (OSError, ValueError) as exc:
         inbox.finish(config, claimed, state="failed",
                      error=str(exc)[:120] or "source_capture_failed")

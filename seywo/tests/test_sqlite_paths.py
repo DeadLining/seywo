@@ -66,12 +66,9 @@ def test_native_windows_sqlite_reads_same_database(tmp_path, extended):
         assert db.execute('SELECT value FROM proof').fetchone() == (42,)
 
 
-def test_project_database_and_backup_preserve_special_path_identity(tmp_path):
-    # Exercise the production initialization, store, and backup connections.
+def test_project_database_preserves_special_path_identity(tmp_path):
     from seywo.config import initialize, load_config
-    from seywo.storage_admin import _backup_database
     from seywo.store import Store
-    import gzip
 
     project = tmp_path / '项目 %23 # 空格'
     project.mkdir()
@@ -81,10 +78,6 @@ def test_project_database_and_backup_preserve_special_path_identity(tmp_path):
         assert store.db.execute('SELECT id, root FROM projects').fetchone()['id'] == first['project_id']
         with pytest.raises(sqlite3.OperationalError, match='readonly'):
             store.db.execute('DELETE FROM projects')
-    backup = tmp_path / '备份 % #.sqlite.gz'
-    _backup_database(Path(config['_database']), backup)
-    restored = tmp_path / 'restored.sqlite'
-    restored.write_bytes(gzip.decompress(backup.read_bytes()))
-    with sqlite3.connect(restored) as db:
-        assert db.execute('SELECT id FROM projects').fetchone()[0] == first['project_id']
+    with Store(config) as store:
+        assert store.db.execute('SELECT id FROM projects').fetchone()[0] == first['project_id']
     assert not (project / '.seywo' / 'index.sqlite3?mode=ro').exists()

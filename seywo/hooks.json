@@ -40,6 +40,16 @@
         ]
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --offline --no-config --no-project --python \">=3.11\" --with mcp==1.28.1 python -B \"${PLUGIN_ROOT}/bin/seywo-launch.py\" --hook"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

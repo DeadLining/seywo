@@ -110,20 +110,3 @@ def write(db, chat, version, override, doc, heads, task_id, origin, created_at):
     db.execute("INSERT INTO narrative_revisions VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                (chat, version, override, base, payload, hashlib.sha256(text.encode()).hexdigest(),
                 depth, heads, task_id, origin, created_at, len(text.encode())))
-
-
-def migrate(db):
-    db.execute("""CREATE TABLE narrative_revisions(
-        chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-        version INTEGER NOT NULL, override_revision INTEGER NOT NULL,
-        base_version INTEGER, body BLOB NOT NULL, body_hash TEXT NOT NULL,
-        depth INTEGER NOT NULL, source_heads TEXT NOT NULL, task_id TEXT UNIQUE,
-        origin TEXT NOT NULL, created_at REAL NOT NULL, logical_bytes INTEGER NOT NULL,
-        PRIMARY KEY(chat_id,version))""")
-    for row in db.execute("SELECT * FROM narrative_versions ORDER BY chat_id,version"):
-        write(db, row["chat_id"], row["version"], row["override_revision"], json.loads(row["body_json"]),
-              row["source_heads"], row["task_id"], row["origin"], row["created_at"])
-    db.execute("DROP TABLE narrative_versions")
-    db.execute("""CREATE VIEW narrative_versions AS SELECT chat_id,version,override_revision,
-        seywo_document(chat_id,version) AS body_json,source_heads,task_id,origin,created_at
-        FROM narrative_revisions""")

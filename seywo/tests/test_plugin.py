@@ -161,10 +161,10 @@ def test_plugin_setup_enables_its_bundled_compact_hook_on_existing_project(tmp_p
     data['hook'] = {'enabled': False, 'pipeline': 'seywo-delta-v1', 'model': 'existing-model'}
     config.write_text(json.dumps(data))
     result = call(create_plugin_server(tmp_path), 'seywo_initialize_project')
-    assert result['hook'] == {'enabled': True, 'pipeline': 'seywo-compact-v1', 'model': 'existing-model'}
+    assert result['hook'] == {'enabled': True}
     saved = json.loads(config.read_text())
     assert saved['hook']['enabled'] is True
-    assert saved['hook']['pipeline'] == 'seywo-compact-v1'
+    assert saved['hook'] == {'enabled': True}
     assert 'model_runtime' not in saved
 
 

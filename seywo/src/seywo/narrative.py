@@ -36,8 +36,6 @@ def empty():
 class Narrative:
     def __init__(self, store, *, clock=time.time):
         self.store, self.db, self.clock = store, store.db, clock
-        if self.db.execute("PRAGMA user_version").fetchone()[0] < 3:
-            raise ValueError("narrative_requires_schema3")
 
     def _chat(self, chat_id):
         if not self.db.execute("SELECT 1 FROM chats WHERE id=?", (chat_id,)).fetchone():

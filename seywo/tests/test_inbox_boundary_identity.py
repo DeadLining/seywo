@@ -1,6 +1,7 @@
 """Boundary delivery preserves every immutable source until it is consumed."""
 
 import json
+from io import BytesIO
 import os
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 from seywo import inbox
 from seywo.archive import open_source
 from seywo.config import initialize, load_config
+from seywo.dialogue_capture import records as project_records
 from seywo.store import Store, digest
 
 
@@ -56,15 +58,19 @@ def test_failed_source_records_are_bounded(boundary, monkeypatch):
     assert len(inbox.failed(config, "chat")) <= 3
 
 
-def test_snapshot_limit_is_enforced_and_failure_is_durable(boundary, monkeypatch):
+def test_archive_capacity_is_enforced_and_boundary_is_durable(boundary, monkeypatch):
+    from seywo import archive
+
     config, source = boundary
-    monkeypatch.setattr(inbox, "SNAPSHOT_LIMIT", 1)
-    write_source(source, "more than one byte")
+    monkeypatch.setattr(archive, "MAX_CHUNKS", 1)
+    write_source(source, "x" * 300_000)
     item = inbox.record(config, "chat", "PreCompact", str(source))
     saved = inbox._read(Path(item["_path"]))
     assert saved["snapshot"] is None
     assert saved["snapshot_error"] == "snapshot_unavailable"
     assert saved["state"] == "pending"
+    assert not list(inbox.snapshot_dir(config).glob("*.jsonl"))
+    assert not list((inbox.root(config) / "objects").glob("*.z"))
 
 
 @pytest.mark.parametrize("event", ["PreCompact", "PostCompact"])
@@ -80,8 +86,9 @@ def test_changed_pending_boundary_keeps_the_original_record(boundary, event):
 
     assert second["id"] != first["id"]
     assert record_path.read_bytes() == original_record
-    assert capture_bytes(first) == first_bytes
-    assert capture_bytes(second) == source.read_bytes()
+    assert capture_bytes(first) == b"".join(project_records(BytesIO(first_bytes)))
+    with source.open("rb") as original:
+        assert capture_bytes(second) == b"".join(project_records(original))
     assert [item["id"] for item in inbox.pending(config, "chat")] == [first["id"], second["id"]]
 
 
@@ -97,7 +104,8 @@ def test_changed_claimed_boundary_cannot_be_overwritten_by_finish(boundary):
 
     assert second["id"] != first["id"]
     assert [item["id"] for item in inbox.pending(config, "chat")] == [second["id"]]
-    assert capture_bytes(second) == source.read_bytes()
+    with source.open("rb") as original:
+        assert capture_bytes(second) == b"".join(project_records(original))
 
 
 def test_duplicate_pending_delivery_preserves_attempts_and_order(boundary):

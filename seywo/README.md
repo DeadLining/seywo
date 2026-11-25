@@ -1,6 +1,6 @@
 # Seywo — See Your Work
 
-**Seywo 0.5.3** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
+**Seywo 0.5.5** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
 
 Seywo 包含本地内核、STDIO MCP、Codex MCP App 面板和 Compact Hook。默认使用 Codex 当前登录、提供方和模型配置，不需要独立应用或额外 API Key；可选的 Responses API 配置保存在项目自己的 `.seywo/` 中。
 

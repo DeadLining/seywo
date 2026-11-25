@@ -99,7 +99,10 @@ def verify(project, host_chat=None, host_binary="codex"):
             hooks = request('hooks/list', {'cwds': [str(project)]})
             plugin_hooks = [hook for entry in hooks['data'] for hook in entry['hooks']
                             if hook.get('pluginId') == 'seywo@seywo-local']
-            assert len(plugin_hooks) == 5, hooks
+            declared = json.loads((installed / 'hooks.json').read_text())['hooks']
+            actual = sorted(hook['eventName'] for hook in plugin_hooks)
+            expected_events = sorted(key[0].lower() + key[1:] for key in declared)
+            assert actual == expected_events, {'expected': expected_events, 'actual': actual}
             server = wait_server(request, thread)
             # Older desktop backends omit runtimeStatus. Actual calls below
             # establish connectivity rather than inferring it from inventory.

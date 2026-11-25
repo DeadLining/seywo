@@ -232,6 +232,17 @@ def test_upgrade_reads_existing_failed_queue_without_writes(config):
     assert '原始对话' in status.read(config, 'chat')['message']
 
 
+def test_source_size_failure_recovers_specific_reason_from_inbox(config):
+    from seywo import inbox
+
+    item = inbox.record(config, 'chat', 'PreCompact', '/missing/transcript')
+    inbox.finish(config, item, state='failed', error='source_archive_capacity')
+    status.record(config, 'chat', 'failed', error_code='operation_failed')
+    result = status.read(config, 'chat')
+    assert result['state'] == 'failed' and result['retryable']
+    assert '超出归档容量' in result['message']
+
+
 def test_outer_worker_exception_does_not_overwrite_successor(config, monkeypatch, capsys):
     from seywo import maintain
     def successor_started(*_):
@@ -252,6 +263,7 @@ def test_completion_exposes_published_version_for_parallel_panel_reads(config):
 
 @pytest.mark.parametrize('code, phrase', [('codex_execution_failed','模型连接'),
     ('transport_error','模型连接'), ('http_401','凭据'), ('http_429','限流'),
+    ('source_archive_capacity','归档容量'), ('source_record_too_large: import rolled back without truncation','单条'),
     ('compact_invalid_evidence','校验')])
 def test_real_backend_error_codes_have_safe_actionable_copy(config, code, phrase):
     status.record(config, 'chat', 'failed', error_code=code)

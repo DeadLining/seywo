@@ -3,7 +3,7 @@
 Contract: successful compact boundary events never write to stdout. Failures
 may emit one bounded native systemMessage; injection events may also emit context. Always exit 0, with no model or
 network call in this process. A compact can rewrite or delete the transcript,
-so PreCompact copies a verbatim snapshot first.
+so PreCompact freezes a filtered dialogue capture first.
 
 Only projects that already created `.seywo/config.json` are touched; the hook
 never initializes a project and never looks at SessionGraph's config or database.
@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 
@@ -23,10 +24,11 @@ from .project_scope import CONFIG, resolve_project_root
 from .retrieval import Retrieval
 from .store import Store
 from .runtime_platform import process_options
+from .store import UnsupportedStorage
 
 BOUNDARY_EVENTS = {"PreCompact", "PostCompact"}
 INJECTION_EVENTS = {"SessionStart", "UserPromptSubmit"}
-EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS | {"Stop"}
+EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS | {"Stop", "SessionEnd"}
 MAX_CONTEXT_CHARS = 6000
 CHAT = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
@@ -136,42 +138,36 @@ def resume_context(config_path: Path, chat_id: str) -> str | None:
     )
 
 
+def _spawn_runtime(module, config, *args):
+    package_src = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    paths = [package_src]
+    if existing := env.get('PYTHONPATH'):
+        paths.extend(path for path in existing.split(os.pathsep) if path and path != package_src)
+    env['PYTHONPATH'] = os.pathsep.join(paths)
+    subprocess.Popen(
+        [sys.executable, '-B', '-m', module, '--config', str(config), *args],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        env=env, **process_options(detached=True), close_fds=True,
+    )
+
+
 def spawn(config: Path, chat_id: str) -> bool:
     try:
-        # The plugin entrypoint adds ``src`` to sys.path itself, but a child
-        # launched with ``python -m`` starts from the host project directory
-        # and does not inherit that path mutation. Export the installed package
-        # location explicitly so the worker cannot exit before maintenance
-        # starts with ``ModuleNotFoundError: seywo``.
-        package_src = str(Path(__file__).resolve().parent.parent)
-        env = os.environ.copy()
-        existing = env.get("PYTHONPATH")
-        paths = [package_src]
-        if existing:
-            paths.extend(path for path in existing.split(os.pathsep) if path and path != package_src)
-        env["PYTHONPATH"] = os.pathsep.join(paths)
-        subprocess.Popen(
-            [
-                sys.executable,
-                "-B",
-                "-m",
-                "seywo.maintain",
-                "--config",
-                str(config),
-                "--chat",
-                chat_id,
-            ],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            **process_options(detached=True),
-            close_fds=True,
-        )
+        _spawn_runtime('seywo.maintain', config, '--chat', chat_id)
         return True
     except OSError:
         maintenance_status.safe_record(config, chat_id, 'failed', error_code='worker_start_failed')
         return False  # the durable record stays pending; explicit retry can resume it
+
+
+def _spawn_deletion(config, *, settle=False):
+    from .chat_deletion import available, catalog_home
+    try:
+        if available(catalog_home()):
+            _spawn_runtime('seywo.chat_deletion', config, *(['--settle'] if settle else []))
+    except OSError:
+        pass  # Persistent host markers are checked again on the next lifecycle event.
 
 
 def _emit_notice(config, chat_id, *, output=None, fallback=None):
@@ -223,6 +219,10 @@ def main() -> int:
         "enabled"
     ) is not True:
         return 0
+    if event in {'SessionStart', 'SessionEnd'}:
+        _spawn_deletion(config_path, settle=event == 'SessionEnd')
+    if event == 'SessionEnd':
+        return 0
     if event == 'Stop':
         try:
             from .locking import lifecycle, file_lock
@@ -243,9 +243,15 @@ def main() -> int:
             # Keep queue publication and its visible state in the same ordering
             # as the worker's final check/release of inbox ownership.
             with lifecycle(config), file_lock(inbox.root(config) / '.lock'):
-                inbox.record(config, chat_id, event, transcript)
+                boundary = inbox.record(config, chat_id, event, transcript)
+                if boundary['state'] == 'excluded':
+                    return 0
                 saved = maintenance_status.safe_record(config, chat_id, 'queued')
-        except (OSError, ValueError):
+        except UnsupportedStorage:
+            maintenance_status.safe_record(config, chat_id, 'blocked', error_code='storage_schema_unsupported')
+            _emit_notice(config, chat_id)
+            return 0
+        except (OSError, ValueError, sqlite3.Error):
             maintenance_status.safe_record(config, chat_id, 'failed', error_code='queue_write_failed')
             _emit_notice(config, chat_id, fallback='Seywo：本次整理任务无法保存，请检查磁盘空间和写入权限。')
             return 0

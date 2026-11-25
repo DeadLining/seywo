@@ -11,7 +11,7 @@ def test_plugin_declares_compact_lifecycle_hooks_in_package():
     assert hooks_path.is_file()
     data = json.loads(hooks_path.read_text(encoding="utf-8"))
     hooks = data["hooks"]
-    expected = {"SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop"}
+    expected = {"SessionStart", "SessionEnd", "UserPromptSubmit", "PreCompact", "PostCompact", "Stop"}
     assert set(hooks) == expected
     for event in expected:
         entries = hooks[event]
@@ -43,7 +43,7 @@ def test_agent_plugins_manifest_registers_hooks_and_uses_absolute_plugin_entry()
     manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
     assert manifest['hooks'] == './hooks.json'
     hooks = json.loads((ROOT / 'hooks.json').read_text())['hooks']
-    assert set(hooks) == {'SessionStart', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
+    assert set(hooks) == {'SessionStart', 'SessionEnd', 'UserPromptSubmit', 'PreCompact', 'PostCompact', 'Stop'}
     assert all('"${PLUGIN_ROOT}/bin/seywo-launch.py" --hook' in entry['hooks'][0]['command']
                for entries in hooks.values() for entry in entries)
 

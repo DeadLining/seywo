@@ -88,12 +88,13 @@ def test_same_text_in_distinct_occurrences_keeps_two_evidence_rows(tmp_path):
         assert rows[0]["payload_id"] == rows[1]["payload_id"]
 
 
-def test_storage_verify_does_not_leave_a_migration_guard(tmp_path):
+def test_storage_verify_does_not_create_files(tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     initialize(root)
-    from seywo.storage_admin import run
-    config_path = root / ".seywo/config.json"
-    result = run(config_path, "verify")
+    from seywo.storage_verify import verify
+    state = root / ".seywo"
+    before = set(state.iterdir())
+    result = verify(load_config(state / "config.json"))
     assert result["state"] == "verified"
-    assert not (root / ".seywo/storage-migration.pending").exists()
+    assert set(state.iterdir()) == before

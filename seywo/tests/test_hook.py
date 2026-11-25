@@ -10,6 +10,7 @@ from pathlib import Path
 
 from seywo import hook, inbox
 from seywo.config import initialize, load_config
+from seywo.dialogue_capture import records
 
 
 def project(
@@ -86,7 +87,8 @@ def test_precompact_records_snapshot_and_spawns_worker(tmp_path, monkeypatch):
     items = inbox.pending(config, "chat-1")
     assert len(items) == 1 and items[0]["event"] == "PreCompact"
     snapshot = Path(items[0]["snapshot"])
-    assert open_source(snapshot).read() == source.read_bytes()
+    with open_source(snapshot) as saved, source.open("rb") as original:
+        assert saved.read() == b"".join(records(original))
     assert spawned and spawned[0][-2:] == ["--chat", "chat-1"]
 
 
@@ -147,18 +149,32 @@ def test_other_events_and_bad_payload_exit_zero(tmp_path, monkeypatch):
     assert run(monkeypatch, payload) == []
 
 
+def test_session_end_starts_only_deletion_reconciliation(tmp_path, monkeypatch):
+    from seywo import chat_deletion
+
+    config, _, payload = project(tmp_path, event='SessionEnd')
+    monkeypatch.setattr(chat_deletion, 'available', lambda _: True)
+    spawned = run(monkeypatch, payload)
+    assert len(spawned) == 1
+    assert spawned[0][3:] == ['seywo.chat_deletion', '--config', config['_path'], '--settle']
+    assert not inbox.pending(config)
+
+
 def test_postcompact_snapshots_its_own_segment(tmp_path, monkeypatch):
     config, source, payload = project(tmp_path, event="PostCompact")
     run(monkeypatch, payload)
     first = Path(inbox.pending(config)[0]["snapshot"])
-    assert open_source(first).read() == source.read_bytes()
+    with open_source(first) as saved, source.open("rb") as original:
+        captured = saved.read()
+        assert captured == b"".join(records(original))
     # A later compact must never overwrite the segment a worker may still read.
     inbox.claim(config, inbox.pending(config)[0])
     run(monkeypatch, payload)
     second = Path(inbox.pending(config)[0]["snapshot"])
     # Exact content has one immutable manifest; a second boundary may share it.
     assert second == first
-    assert open_source(second).read() == source.read_bytes()
+    with open_source(second) as saved:
+        assert saved.read() == captured
 
 
 def test_claim_then_record_writes_a_second_record(tmp_path, monkeypatch):

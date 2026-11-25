@@ -6,7 +6,7 @@ user/final sources, without decoding tool payloads or replaying other turns.
 """
 import json
 
-from .delta_pipeline import _fresh_rows
+from .compact_sources import _fresh_rows
 from .model_contract import model_eligible
 
 
