@@ -8,19 +8,17 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_mcp_and_hooks_share_uv_runtime_without_platform_shell_scripts():
+def test_mcp_and_hooks_share_host_runtime_without_uv():
     server = json.loads((ROOT / 'mcp.json').read_text())['mcpServers']['seywo']
-    assert server['command'] == 'uv'
-    assert '--no-config' in server['args'] and '--no-project' in server['args']
-    assert 'mcp==1.28.1' in server['args']
-    assert './bin/seywo-launch.py' in server['args']
+    assert server['command'] == './bin/seywo-host'
+    assert server['args'] == ['--mcp']
+    assert server['cwd'] == '.'
+    assert (ROOT / 'bin/seywo-host.cmd').is_file()
     hooks = json.loads((ROOT / 'hooks.json').read_text())['hooks']
     for entries in hooks.values():
         command = entries[0]['hooks'][0]['command']
-        assert command.startswith('uv ')
-        assert '--offline' in command
-        assert '${PLUGIN_ROOT}/bin/seywo-launch.py' in command
-        assert '--hook' in command
+        assert command == '"${PLUGIN_ROOT}/bin/seywo-host" --hook'
+        assert 'uv ' not in command
 
 
 def test_launcher_hook_is_relocatable_and_skips_recursive_model_work(tmp_path):

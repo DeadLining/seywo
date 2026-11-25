@@ -1,18 +1,8 @@
 {
   "mcpServers": {
     "seywo": {
-      "command": "uv",
+      "command": "./bin/seywo-host",
       "args": [
-        "run",
-        "--no-config",
-        "--no-project",
-        "--python",
-        ">=3.11",
-        "--with",
-        "mcp==1.28.1",
-        "python",
-        "-B",
-        "./bin/seywo-launch.py",
         "--mcp"
       ],
       "cwd": ".",

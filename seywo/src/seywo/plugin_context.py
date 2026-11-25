@@ -32,7 +32,7 @@ def host_thread_id(context):
         return None
 
 
-def catalog_home():
+def catalog_home(*, plugin_root=None):
     """Locate this host's catalog even when Codex filters CODEX_HOME from MCP.
 
     PLUGIN_DATA is supplied by Codex and retains the configured installation
@@ -46,7 +46,7 @@ def catalog_home():
         return data.parents[3]
     # Codex's compatible plugin loader resolves cwd but does not inject the
     # Agent Plugins environment. The entrypoint supplies its own exact root.
-    root = Path(os.environ.get('PLUGIN_ROOT', ''))
+    root = Path(plugin_root if plugin_root is not None else os.environ.get('PLUGIN_ROOT', ''))
     if (root.is_absolute() and len(root.parents) >= 5
             and root.parents[2].name == 'cache' and root.parents[3].name == 'plugins'):
         return root.parents[4]

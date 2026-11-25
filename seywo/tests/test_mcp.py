@@ -542,7 +542,11 @@ def test_project_registration_preserves_other_servers_and_is_idempotent(project)
     result = install(config)
     assert result["changed"] and path.read_text().startswith("[mcp_servers.existing]")
     data = tomllib.loads(path.read_text())
-    assert data["mcp_servers"]["seywo"]["args"][-1] == "mcp"
+    server = data['mcp_servers']['seywo']
+    assert Path(server['command']).is_absolute() and Path(server['command']).is_file()
+    assert Path(server['command']).name in {'seywo-host', 'seywo-host.cmd'}
+    assert server['args'] == ['--cli', '--config', config['_path'], 'mcp']
+    assert 'env' not in server
     before = path.read_bytes()
     assert not install(config)["changed"] and path.read_bytes() == before
     path.write_text('[mcp_servers.seywo]\ncommand="custom"\n')

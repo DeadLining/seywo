@@ -1,6 +1,6 @@
 {
   "name": "seywo",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "description": "Source-backed project memory, chat narratives and cross-chat search. Local STDIO runtime; no model calls for retrieval.",
   "interface": {
     "displayName": "Seywo",

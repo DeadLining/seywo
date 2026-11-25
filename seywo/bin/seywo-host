@@ -1,0 +1,24 @@
+#!/bin/sh
+# Only Codex-owned runtime locations; no PATH lookup, scan or download.
+set -eu
+if [ "${1:-}" = --hook ] && [ "${SEYWO_INTERNAL_MODEL:-}" = 1 ]; then exit 0; fi
+plugin=$(CDPATH= cd -- "${0%/*}/.." && pwd)
+run() {
+    for python in "$1/dependencies/python/bin/python3" "$1/dependencies/python/bin/python"; do
+        if [ -f "$1/runtime.json" ] && [ -x "$python" ]; then
+            exec "$python" -IBS -Xutf8 "$plugin/bin/seywo-host.py" --runtime-root "$@"
+        fi
+    done
+}
+if [ -n "${SEYWO_CODEX_RUNTIME:-}" ]; then
+    run "$SEYWO_CODEX_RUNTIME" "$@"
+else
+    if [ -n "${XDG_CACHE_HOME:-}" ]; then
+        run "$XDG_CACHE_HOME/codex-runtimes/codex-primary-runtime" "$@"
+    fi
+    if [ -n "${HOME:-}" ]; then
+        run "$HOME/.cache/codex-runtimes/codex-primary-runtime" "$@"
+    fi
+fi
+printf '%s\n' 'Seywo [runtime_missing]: Codex workspace Python is unavailable. Prepare the Codex workspace runtime, then reconnect Seywo.' >&2
+exit 1

@@ -19,7 +19,7 @@ def build(output):
     marketplace = package / '.agents/plugins'
     marketplace.mkdir(parents=True)
     shutil.copy2(REPO / '.agents/plugins/marketplace.json', marketplace / 'marketplace.json')
-    roots = ['.codex-plugin', 'bin', 'src/seywo', 'skills', 'docs']
+    roots = ['.codex-plugin', 'bin', 'src/seywo', 'skills', 'docs', 'runtime']
     files = ['README.md', 'pyproject.toml', 'mcp.json', 'hooks.json',
              'ui/panel.html', 'ui/THIRD_PARTY_NOTICES.txt']
     sources = [plugin / name for name in files]
@@ -48,12 +48,14 @@ codex plugin marketplace add /absolute/path/to/seywo-plugin-VERSION
 codex plugin add seywo@seywo-local
 ```
 
-Enable Seywo in the current project and review/trust its five Hooks in Codex.
+Enable Seywo in the current project and review/trust its lifecycle Hooks in Codex.
 Default extraction reuses the installed Codex login and global model configuration.
 No standalone Seywo/SessionGraph application or extra API key is required.
-Windows, macOS and Linux share the same uv entrypoint. Install uv on PATH once.
-uv provisions Python 3.11+ and the pinned MCP SDK in its own cache; first provisioning
-requires network access. Hooks reuse that prepared runtime offline.
+One marketplace package discovers the already prepared Codex workspace Python.
+No uv or separate interpreter download is required. MCP installs hash-pinned SDK
+dependencies into a private user cache on first connection (network required).
+Hooks and background workers use isolated stdlib-only Python. See PLUGIN.md for
+missing-runtime recovery and native platform verification limits.
 Existing chat MCP connections may need to reconnect after installing/updating.
 See seywo/docs/PLUGIN.md for settings, storage and verification boundaries.
 '''.replace('VERSION', version))
@@ -64,7 +66,7 @@ See seywo/docs/PLUGIN.md for settings, storage and verification boundaries.
                 bundle.write(path, Path(package.name) / path.relative_to(package))
     return {'version': version, 'directory': str(package), 'archive': str(archive),
             'bytes': archive.stat().st_size, 'file_count': sum(p.is_file() for p in package.rglob('*')),
-            'portable_entrypoint': (package / 'seywo/bin/seywo-launch.py').is_file()}
+            'portable_entrypoint': all((package / 'seywo/bin' / name).is_file() for name in ('seywo-host', 'seywo-host.cmd', 'seywo-host.ps1', 'seywo-host.py'))}
 
 
 if __name__ == '__main__':

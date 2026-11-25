@@ -1,6 +1,6 @@
 # Seywo — See Your Work
 
-**Seywo 0.5.5** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
+**Seywo 0.5.6** 是面向 Codex 的项目记忆插件。它按“项目 → Chat → Compact → 多轮对话”组织工作记录：在当前 Chat 展示一条紧凑主线，在项目内支持跨 Chat 检索，并按需定位原文证据。
 
 Seywo 包含本地内核、STDIO MCP、Codex MCP App 面板和 Compact Hook。默认使用 Codex 当前登录、提供方和模型配置，不需要独立应用或额外 API Key；可选的 Responses API 配置保存在项目自己的 `.seywo/` 中。
 
@@ -55,4 +55,4 @@ python3 -m pytest -q -c seywo/pyproject.toml seywo/tests
 python3 -m compileall -q seywo/src
 ```
 
-发布包由 `scripts/package-seywo-plugin.py` 生成。Windows、macOS、Linux 共用 `uv` 启动入口，首次运行由其私有缓存准备 Python 和 MCP SDK，Hook 离线复用；Node/npm 只用于开发和构建 UI。完整安装、Hook 信任、模型、存储和验收边界见 [`docs/PLUGIN.md`](docs/PLUGIN.md) 与 [`docs/seywo-mcp.md`](docs/seywo-mcp.md)。
+发布包由 `scripts/package-seywo-plugin.py` 生成。同一个市场包通过 POSIX/Windows 入口自动查找 Codex 已准备的工作区 Python，无需 `uv`，不下载解释器；MCP SDK 首次联网安装到 Seywo 私有缓存，Hook/后台维护仅依赖标准库；Node/npm 只用于开发和构建 UI。完整安装、Hook 信任、模型、存储和验收边界见 [`docs/PLUGIN.md`](docs/PLUGIN.md) 与 [`docs/seywo-mcp.md`](docs/seywo-mcp.md)。

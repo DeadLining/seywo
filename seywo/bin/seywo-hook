@@ -1,4 +1,4 @@
 #!/bin/sh
-# Compatibility shortcut; hooks.json uses the portable Python entry directly.
+# Compatibility shortcut; hooks.json uses seywo-host directly.
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 exec "$HERE/bin/seywo-runtime" "$@"

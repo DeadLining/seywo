@@ -1,4 +1,4 @@
 #!/bin/sh
-# Optional POSIX shortcut; the installed plugin uses uv directly on every OS.
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-exec uv run --no-config --no-project --python '>=3.11' python -B "$HERE/bin/seywo-launch.py" --cli "$@"
+set -eu
+HERE=$(CDPATH= cd -- "${0%/*}/.." && pwd)
+exec "$HERE/bin/seywo-host" --cli "$@"

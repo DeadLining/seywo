@@ -24,7 +24,7 @@ def verify_installed_payload(repository, installed):
     source = Path(repository) / 'seywo'
     files = [source / name for name in (
         '.codex-plugin/plugin.json', 'pyproject.toml', 'mcp.json', 'hooks.json', 'ui/panel.html')]
-    for folder in ('src/seywo', 'bin', 'skills'):
+    for folder in ('src/seywo', 'bin', 'skills', 'runtime'):
         files.extend(path for path in (source / folder).rglob('*')
                      if path.is_file() and '__pycache__' not in path.parts and path.suffix != '.pyc')
     for path in files:

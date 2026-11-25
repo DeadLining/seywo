@@ -141,12 +141,15 @@ def resume_context(config_path: Path, chat_id: str) -> str | None:
 def _spawn_runtime(module, config, *args):
     package_src = str(Path(__file__).resolve().parent.parent)
     env = os.environ.copy()
-    paths = [package_src]
-    if existing := env.get('PYTHONPATH'):
-        paths.extend(path for path in existing.split(os.pathsep) if path and path != package_src)
-    env['PYTHONPATH'] = os.pathsep.join(paths)
+    env.pop('PYTHONPATH', None)
+    env.pop('PYTHONHOME', None)
+    bootstrap = (
+        'import runpy,sys; sys.path.insert(0,sys.argv.pop(1)); '
+        'runpy.run_module(sys.argv.pop(1),run_name="__main__",alter_sys=True)'
+    )
     subprocess.Popen(
-        [sys.executable, '-B', '-m', module, '--config', str(config), *args],
+        [sys.executable, '-IBS', '-Xutf8', '-c', bootstrap, package_src, module,
+         '--config', str(config), *args],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env=env, **process_options(detached=True), close_fds=True,
     )

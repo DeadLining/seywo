@@ -1,6 +1,6 @@
 # Seywo Codex 插件
 
-当前版本 **0.5.5**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，无需独立应用，也不要求另外填写 API Key。版本变更见[更新日志](../CHANGELOG.md)。
+当前版本 **0.5.6**。插件自带本地内核、MCP、主线面板、Compact Hook 和 Codex 模型适配器，无需独立应用，也不要求另外填写 API Key。版本变更见[更新日志](../CHANGELOG.md)。
 
 ## 安装和首次启用
 
@@ -13,13 +13,15 @@ codex plugin add seywo@seywo-local
 
 安装包入口是 `seywo/.codex-plugin/plugin.json`。当前验收的 Codex 0.152.1 对 Agent Plugins 格式的 Hook 加载有显式跳过分支，因此本包使用其支持 Hook 的 Codex 清单格式。MCP 通过宿主解析出的插件工作目录启动，所有文件随插件迁移，无机器绝对路径，也不追加全局 Hook。
 
-Windows、macOS、Linux 使用同一个插件和同一个 `uv` 启动入口。机器需先安装 `uv`，并确保 Codex 能在 PATH 中找到它；`uv` 在私有缓存中准备 Python 3.11+ 与固定的 `mcp==1.28.1`，不会修改系统 Python。首次 MCP 连接允许下载依赖；Hook 使用相同缓存并强制离线，不在 compact 回调里下载或安装。没有 `uv` 时需要先完成这一项运行依赖安装，无需手动选择操作系统、Python 路径或 Shell。Node/npm 只用于开发构建。
+同一个市场插件自动查找 Codex 已准备的工作区 Python，不要求 uv、系统 Python 或手动下载平台安装包。启动时检查宿主清单、Python 版本、系统架构和 SQLite FTS5；找不到或不兼容时明确报错，不使用任意 PATH Python 兜底。宿主尚未准备运行时时，需要先通过 Codex 的工作区依赖准备能力完成准备，Seywo 不下载解释器。
+
+MCP 首次连接会从 PyPI 按完整哈希锁安装 SDK 到 `$CODEX_HOME/seywo/runtime/`，不改动 Codex 共享 Python；后续可离线复用。Hook、后台整理和删除检查仅使用隔离的标准库环境，不依赖 SDK 下载。并发准备、失败重试和旧缓存回收由统一启动器负责。定位路径、诊断方式和验证边界见 [`seywo/docs/PLUGIN.md`](../seywo/docs/PLUGIN.md)。
 
 平台差异集中在 `runtime_platform.py` 与按需加载的 `win32_native.py`：Unix 使用 flock/进程组；Windows 使用 LockFileEx/Job Object，模型进程先挂起、加入 Job 后恢复，防止超时留下子进程。平台适配不改变主线和 MCP 工具契约。可选 Responses API 的 Windows 凭据通过当前用户 DPAPI 加密，不依赖 Unix 权限位。Windows 工作区 URI、npm Codex shim 和 SQLite 路径由适配层处理。
 
-原生验收矩阵位于 `.github/workflows/portable-runtime.yml`，在 Windows、macOS、Linux 运行完整 Python 测试、真实声明入口/离线 Hook 检查、UI 测试和打包检查。本地 macOS 测试不能替代 Windows 原生执行结果。
+原生验收矩阵位于 `.github/workflows/portable-runtime.yml`，在 Windows、macOS、Linux 运行完整 Python 测试、夹具运行时的声明入口与离线后台检查、UI 测试和打包检查。本机已通过真实 macOS Codex Python、隔离市场安装与首次 SDK 下载验收；Windows/Linux 的真实桌面运行时发现尚未核验，CI 夹具不代表这一结果。
 
-正常使用时根据当前 Chat 自动定位项目。首次授权启用项目后创建 `.seywo/.gitignore`、配置和索引，并启用插件整理。初始化和打开面板不调用模型，不扫描其他项目。Codex 的五个插件 Hook 仍需在宿主中审核信任；安装代码不会替用户写入信任。升级后若命令或安装路径变化，宿主可能要求重新审核。已有 Chat 的 MCP 连接可能需要重连。
+正常使用时根据当前 Chat 自动定位项目。首次授权启用项目后创建 `.seywo/.gitignore`、配置和索引，并启用插件整理。初始化和打开面板不调用模型，不扫描其他项目。Codex 的六个插件 Hook 仍需在宿主中审核信任；安装代码不会替用户写入信任。升级后若命令或安装路径变化，宿主可能要求重新审核。已有 Chat 的 MCP 连接可能需要重连。
 
 ## 模型与整理
 

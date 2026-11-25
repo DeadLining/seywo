@@ -24,6 +24,7 @@ def payload(tmp_path):
         'src/seywo/__init__.py': '__version__="0.5.2"',
         'ui/panel.html': 'global settings UI',
         'bin/seywo-launch.py': 'launcher',
+        'runtime/requirements.lock': 'pinned hashed dependencies',
         'skills/history/SKILL.md': 'history',
         'pyproject.toml': 'version="0.5.2"', 'hooks.json': '{}', 'mcp.json': '{}',
     }.items():
@@ -38,10 +39,10 @@ def payload(tmp_path):
 def test_installed_payload_matches_current_source(tmp_path, monkeypatch):
     repository, installed = payload(tmp_path)
     checked = verifier(monkeypatch).verify_installed_payload(repository, installed)
-    assert checked == 9
+    assert checked == 10
 
 
-@pytest.mark.parametrize('name', ['src/seywo/settings.py', 'ui/panel.html', 'bin/seywo-launch.py'])
+@pytest.mark.parametrize('name', ['src/seywo/settings.py', 'ui/panel.html', 'bin/seywo-launch.py', 'runtime/requirements.lock'])
 def test_same_version_with_old_code_is_rejected(tmp_path, monkeypatch, name):
     repository, installed = payload(tmp_path)
     (installed / name).write_text('old version of this file')

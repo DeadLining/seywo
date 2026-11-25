@@ -1,6 +1,7 @@
 """Independent local CLI. Every import names its chat, file and segment order."""
 
 import argparse
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sqlite3
@@ -41,7 +42,7 @@ def _compact(args):
     return maintain.run_chat(config, args.chat)
 
 
-def main(argv=None):
+def main(argv=None, *, sdk=nullcontext):
     parser = argparse.ArgumentParser(prog="seywo", description="Seywo — See Your Work")
     parser.add_argument("--config", type=Path, default=Path.cwd() / ".seywo/config.json")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -158,8 +159,9 @@ def main(argv=None):
             from .mcp_install import install
             result = install(load_config(args.config))
         elif args.command == "mcp":
-            from .mcp_server import create_server
-            create_server(args.config).run(transport="stdio")
+            with sdk():
+                from .mcp_server import create_server
+                create_server(args.config).run(transport="stdio")
             return 0
         elif args.command == "compact":
             result = _compact(args)

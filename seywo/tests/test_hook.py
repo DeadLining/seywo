@@ -64,9 +64,11 @@ def run(monkeypatch, payload):
     return spawned
 
 
-def test_spawn_worker_exports_installed_package_path(tmp_path, monkeypatch):
+def test_spawn_worker_isolates_python_and_loads_exact_package(tmp_path, monkeypatch):
     config, _, _ = project(tmp_path)
     captured = {}
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "untrusted"))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "untrusted"))
 
     def capture(*args, **kwargs):
         captured["args"] = args
@@ -77,8 +79,10 @@ def test_spawn_worker_exports_installed_package_path(tmp_path, monkeypatch):
 
     package_src = str(Path(hook.__file__).resolve().parent.parent)
     env = captured["kwargs"]["env"]
-    assert package_src in env["PYTHONPATH"].split(os.pathsep)
-    assert captured["args"][0][0:4] == [hook.sys.executable, "-B", "-m", "seywo.maintain"]
+    assert "PYTHONPATH" not in env and "PYTHONHOME" not in env
+    command = captured["args"][0]
+    assert command[:4] == [hook.sys.executable, "-IBS", "-Xutf8", "-c"]
+    assert command[5:7] == [package_src, "seywo.maintain"]
 
 
 def test_precompact_records_snapshot_and_spawns_worker(tmp_path, monkeypatch):
@@ -156,7 +160,7 @@ def test_session_end_starts_only_deletion_reconciliation(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_deletion, 'available', lambda _: True)
     spawned = run(monkeypatch, payload)
     assert len(spawned) == 1
-    assert spawned[0][3:] == ['seywo.chat_deletion', '--config', config['_path'], '--settle']
+    assert spawned[0][6:] == ['seywo.chat_deletion', '--config', config['_path'], '--settle']
     assert not inbox.pending(config)
 
 

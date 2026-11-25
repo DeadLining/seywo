@@ -1,7 +1,7 @@
 #!/bin/sh
-# Compatibility shortcut for previous local registrations.
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+set -eu
+HERE=$(CDPATH= cd -- "${0%/*}/.." && pwd)
 if [ "${1:-}" = --mcp ]; then
-  exec uv run --no-config --no-project --python '>=3.11' --with mcp==1.28.1 python -B "$HERE/bin/seywo-launch.py" "$@"
+  exec "$HERE/bin/seywo-host" "$@"
 fi
-exec uv run --offline --no-config --no-project --python '>=3.11' --with mcp==1.28.1 python -B "$HERE/bin/seywo-launch.py" --hook "$@"
+exec "$HERE/bin/seywo-host" --hook "$@"

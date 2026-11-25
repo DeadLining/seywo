@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 from seywo_protocol import PipeReader, wait_server
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -15,7 +16,27 @@ import time
 REPOSITORY = Path(__file__).resolve().parent.parent
 
 
-def verify(repository=REPOSITORY):
+def stage_workspace_python_probe(repository, base, env, runtime):
+    """Use the actual source manifests in an isolated, dependency-cold HOME."""
+    home = base / 'user home'
+    bundle = home / '.cache/codex-runtimes/codex-primary-runtime'
+    bundle.parent.mkdir(parents=True)
+    bundle.symlink_to(runtime, target_is_directory=True)
+    env.clear()
+    env.update(HOME=str(home), CODEX_HOME=str(base / '.codex'), PATH='/usr/bin:/bin',
+               PYTHONDONTWRITEBYTECODE='1')
+    assert shutil.which('uv', path=env['PATH']) is None
+    assert shutil.which('codex', path=env['PATH']) is None
+    market = base / 'probe marketplace'
+    (market / '.agents/plugins').mkdir(parents=True)
+    shutil.copy2(repository / '.agents/plugins/marketplace.json', market / '.agents/plugins/marketplace.json')
+    shutil.copytree(repository / 'seywo', market / 'seywo',
+                    ignore=shutil.ignore_patterns('__pycache__', '.pytest_cache', '.ruff_cache',
+                                                   '.venv', 'build', 'node_modules', 'tests', 'evals'))
+    return market, bundle / 'dependencies/python/bin/python3'
+
+
+def verify(repository=REPOSITORY, *, binary='codex', probe=None):
     with tempfile.TemporaryDirectory(prefix='seywo-plugin-acceptance-') as temporary:
         base = Path(temporary).resolve()
         codex_state = base / '.codex'
@@ -23,9 +44,12 @@ def verify(repository=REPOSITORY):
         codex_state.mkdir()
         workspace.mkdir()
         env = {**os.environ, 'CODEX_HOME': str(codex_state)}
+        python = sys.executable
+        if probe:
+            repository, python = stage_workspace_python_probe(repository, base, env, probe)
 
         def cli(*args, cwd=workspace):
-            result = subprocess.run(['codex', *args], env=env, cwd=cwd, capture_output=True,
+            result = subprocess.run([binary, *args], env=env, cwd=cwd, capture_output=True,
                                     text=True, timeout=30)
             if result.returncode:
                 raise RuntimeError(f'Codex {args[:2]} failed: {result.stderr[:500]}')
@@ -46,7 +70,7 @@ def verify(repository=REPOSITORY):
         batch_roots = [base / 'batch first project', base / 'batch second project']
         for root in batch_roots:
             root.mkdir()
-        batch_command = [sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli', 'init-batch', *map(str, batch_roots)]
+        batch_command = [python, '-IB', str(installed / 'bin/seywo-launch.py'), '--cli', 'init-batch', *map(str, batch_roots)]
         def batch_cli(*extra, answer=''):
             result = subprocess.run([*batch_command, *extra], input=answer, env=env,
                                     capture_output=True, text=True, timeout=30)
@@ -64,7 +88,7 @@ def verify(repository=REPOSITORY):
         assert all((root / '.seywo/config.json').read_bytes() == config
                    for root, config in zip(batch_roots, batch_configs))
         with (base / 'host.stderr').open('wb') as error_log:
-            process = subprocess.Popen(['codex', 'app-server', '--stdio', '--enable', 'hooks'], env=env, cwd=workspace,
+            process = subprocess.Popen([binary, 'app-server', '--stdio', '--enable', 'hooks'], env=env, cwd=workspace,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=error_log)
             reader = PipeReader(process.stdout)
             buffered = b''
@@ -78,7 +102,7 @@ def verify(repository=REPOSITORY):
                 process.stdin.write((json.dumps({'id': identity, 'method': method,
                                                 'params': params}) + '\n').encode())
                 process.stdin.flush()
-                deadline = time.monotonic() + 30
+                deadline = time.monotonic() + (260 if method == 'mcpServerStatus/list' else 30)
                 while time.monotonic() < deadline:
                     if b'\n' not in buffered:
                         chunk = reader.read(0.5)
@@ -131,7 +155,7 @@ def verify(repository=REPOSITORY):
                         (thread, str(workspace / 'host-catalog-fixture.jsonl'), int(time.time()), int(time.time()),
                          'cli', 'fixture', str(workspace), 'Acceptance fixture',
                          '{"type":"workspace-write"}', 'never'))
-                running = wait_server(request, thread)
+                running = wait_server(request, thread, timeout=240)
                 assert running['runtimeStatus'] == 'connected', running['runtimeStatus']
                 assert len(running['tools']) == 19
                 hook_inventory = request('hooks/list', {'cwds': [str(workspace)]})
@@ -193,19 +217,19 @@ def verify(repository=REPOSITORY):
                 fixture.write_text(''.join(json.dumps(item) + '\n' for item in events))
                 # Import a fixture only; never scan the user's Codex history.
                 # Exercise the shared Python CLI without a platform shell.
-                result = subprocess.run([sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli',
+                result = subprocess.run([python, '-IB', str(installed / 'bin/seywo-launch.py'), '--cli',
                                          '--config', first['config'], 'import', str(fixture),
                                          '--chat', 'plugin-acceptance', '--order', '0'],
-                                        cwd=workspace, capture_output=True, text=True, timeout=20)
+                                        cwd=workspace, env=env, capture_output=True, text=True, timeout=20)
                 assert result.returncode == 0, result.stderr
                 host_fixture = workspace / 'host-source.jsonl'
                 host_events = json.loads(json.dumps(events))
                 host_events[0]['payload']['id'] = thread
                 host_events[1]['payload']['content'][0]['text'] = 'host current chat fixture'
                 host_fixture.write_text(''.join(json.dumps(item) + '\n' for item in host_events))
-                imported = subprocess.run([sys.executable, str(installed / 'bin/seywo-launch.py'), '--cli', '--config', first['config'],
+                imported = subprocess.run([python, '-IB', str(installed / 'bin/seywo-launch.py'), '--cli', '--config', first['config'],
                                            'import', str(host_fixture), '--chat', thread, '--order', '0'],
-                                          cwd=workspace, capture_output=True, text=True, timeout=20)
+                                          cwd=workspace, env=env, capture_output=True, text=True, timeout=20)
                 assert imported.returncode == 0, imported.stderr
                 automatic = raw_tool('seywo_open')['structuredContent']
                 assert automatic['chat_id'] == thread
@@ -263,8 +287,8 @@ with Store(load_config(Path(sys.argv[2]))) as store:
     service.edit('plugin-acceptance',base_version=1,override_revision=0,actor='fixture',
                  patch={'entity':'item','id':item['id'],'fields':{'title':'已验证插件主线'}})
 """
-                seeded = subprocess.run([sys.executable, '-c', seed_code, str(installed), first['config']],
-                                        cwd=workspace, capture_output=True, text=True, timeout=20)
+                seeded = subprocess.run([python, '-IB', '-c', seed_code, str(installed), first['config']],
+                                        cwd=workspace, env=env, capture_output=True, text=True, timeout=20)
                 assert seeded.returncode == 0, seeded.stderr
                 narrative = tool('seywo_panel_data', view='narrative', chat_id='plugin-acceptance')
                 mainline = tool('seywo_panel_data', view='mainline', chat_id='plugin-acceptance')
@@ -313,6 +337,9 @@ with Store(load_config(Path(sys.argv[2]))) as store:
                 assert not (installed / '.seywo').exists()
                 assert (workspace / '.seywo/.gitignore').read_text() == '*\n!.gitignore\n'
                 return {'verified_on': date.today().isoformat(), 'status': 'passed',
+                        'runtime': 'workspace_python_probe' if probe else 'distributed',
+                        'private_dependencies_initially_empty': bool(probe),
+                        'host_runtime_preexisting': bool(probe),
                         'host': host['userAgent'], 'marketplace': 'seywo-local',
                         'plugin': 'seywo', 'plugin_hooks': plugin_hooks, 'completed_hooks': completed_hooks, 'runtime_status': running['runtimeStatus'],
                         'tools': sorted(running['tools']), 'tool_count': len(running['tools']),
@@ -348,8 +375,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--repository', type=Path, default=REPOSITORY)
+    parser.add_argument('--host', default='codex')
+    parser.add_argument('--workspace-runtime-probe', type=Path, metavar='RUNTIME_ROOT')
     args = parser.parse_args()
-    report = verify(args.repository.resolve())
+    probe = None
+    if args.workspace_runtime_probe:
+        if os.name != 'posix':
+            parser.error('The isolated workspace-runtime probe currently supports POSIX only.')
+        probe = args.workspace_runtime_probe.resolve()
+        if not (probe / 'dependencies/python/bin/python3').is_file():
+            parser.error('Provide a Codex workspace runtime root.')
+    binary = shutil.which(args.host)
+    if not binary:
+        parser.error('Cannot find the requested Codex executable.')
+    report = verify(args.repository.resolve(), binary=str(Path(binary).absolute()), probe=probe)
     text = json.dumps(report, ensure_ascii=False, indent=2) + '\n'
     if args.report:
         args.report.write_text(text)
