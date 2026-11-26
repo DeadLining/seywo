@@ -16,8 +16,10 @@ def test_mcp_and_hooks_share_host_runtime_without_uv():
     assert (ROOT / 'bin/seywo-host.cmd').is_file()
     hooks = json.loads((ROOT / 'hooks.json').read_text())['hooks']
     for entries in hooks.values():
-        command = entries[0]['hooks'][0]['command']
+        hook = entries[0]['hooks'][0]
+        command = hook['command']
         assert command == '"${PLUGIN_ROOT}/bin/seywo-host" --hook'
+        assert hook['commandWindows'] == '& "$env:PLUGIN_ROOT/bin/seywo-host.cmd" --hook'
         assert 'uv ' not in command
 
 

@@ -6,11 +6,13 @@ import io
 import json
 import os
 from pathlib import Path
+from unittest import skipUnless
 
 
 from seywo import hook, inbox
 from seywo.config import initialize, load_config
 from seywo.dialogue_capture import records
+from seywo.project_scope import source_belongs_to_project
 
 
 def project(
@@ -94,6 +96,33 @@ def test_precompact_records_snapshot_and_spawns_worker(tmp_path, monkeypatch):
     with open_source(snapshot) as saved, source.open("rb") as original:
         assert saved.read() == b"".join(records(original))
     assert spawned and spawned[0][-2:] == ["--chat", "chat-1"]
+
+
+@skipUnless(os.name == "nt", "Windows extended-length paths")
+def test_compact_accepts_windows_project_path_with_or_without_prefix(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    extended_root = Path("\\\\?\\" + str(root))
+    config_path = Path(initialize(extended_root, plugin_hook=True)["config"])
+    config = load_config(config_path)
+    assert config["project_root"] == str(extended_root)
+    assert load_config(root / ".seywo" / "config.json")["project_root"] == str(extended_root)
+
+    source = root / "source.jsonl"
+    source.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": "win-chat", "cwd": str(root)}})
+        + "\n" + json.dumps(message("Windows project")) + "\n",
+        encoding="utf-8",
+    )
+    payload = {"session_id": "win-chat", "cwd": str(root), "transcript_path": str(source)}
+    for event in ("PreCompact", "PostCompact"):
+        assert run(monkeypatch, {**payload, "hook_event_name": event})
+    assert {item["event"] for item in inbox.pending(config, "win-chat")} == {"PreCompact", "PostCompact"}
+    assert source_belongs_to_project(str(root), str(extended_root))
+    assert source_belongs_to_project(str(extended_root), str(root))
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / ".git").mkdir()
+    assert not source_belongs_to_project(str(other), str(extended_root))
 
 
 def test_duplicate_delivery_coalesces_on_source_fingerprint(tmp_path, monkeypatch):

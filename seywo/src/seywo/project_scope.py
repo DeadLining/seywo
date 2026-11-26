@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 
 
 CONFIG = Path('.seywo/config.json')
@@ -63,7 +64,24 @@ def resolve_project_root(workspace: Path, *, discover_config: bool = False) -> P
     return configured if discover_config and configured is not None else workspace
 
 
+def _without_windows_path_prefix(path: str) -> str:
+    if path[:8].lower() == '\\\\?\\unc\\':
+        return '\\\\' + path[8:]
+    if re.match(r'^\\\\\?\\[A-Za-z]:\\', path):
+        return path[4:]
+    return path
+
+
+def project_paths_match(path: Path, project_root: str) -> bool:
+    """Compare resolved project paths while preserving the stored owner spelling."""
+    if not isinstance(project_root, str):
+        return False
+    if os.name == 'nt':
+        return _without_windows_path_prefix(str(path)) == _without_windows_path_prefix(project_root)
+    return str(path) == project_root
+
+
 def source_belongs_to_project(cwd: str, project_root: str) -> bool:
     workspace = Path(cwd).expanduser().resolve()
-    return (str(workspace) == project_root
-            or str(resolve_project_root(workspace)) == project_root)
+    return (project_paths_match(workspace, project_root)
+            or project_paths_match(resolve_project_root(workspace), project_root))

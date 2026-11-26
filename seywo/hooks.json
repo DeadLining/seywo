@@ -5,7 +5,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }
@@ -15,7 +16,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }
@@ -25,7 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }
@@ -35,7 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }
@@ -45,7 +49,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }
@@ -55,7 +60,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook"
+            "command": "\"${PLUGIN_ROOT}/bin/seywo-host\" --hook",
+            "commandWindows": "& \"$env:PLUGIN_ROOT/bin/seywo-host.cmd\" --hook"
           }
         ]
       }

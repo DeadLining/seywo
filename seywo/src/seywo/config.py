@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
+from .project_scope import project_paths_match
 from .runtime_platform import replace_file
 
 from .locking import file_lock
@@ -63,12 +64,12 @@ def load_config(path: Path) -> dict:
         raise ValueError("Seywo requires an explicit .seywo/config.json")
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("Seywo configuration must not be a symlink")
-    project_directory(path.parent.parent)
+    root = project_directory(path.parent.parent)
     data = json.loads(path.read_text(encoding="utf-8"))
     if (data.get("product") != "seywo" or data.get("schema_version") != 1
             or not isinstance(data.get("project_id"), str) or not data["project_id"]
             or data.get("database") != "index.sqlite3"
-            or data.get("project_root") != str(path.parent.parent.resolve())):
+            or not project_paths_match(root, data.get("project_root"))):
         raise ValueError("invalid or foreign Seywo configuration")
     database = path.parent / data["database"]
     if database.is_symlink():
