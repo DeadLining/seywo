@@ -1,6 +1,6 @@
 # Seywo Codex plugin
 
-Version **0.5.6** packages the local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
+Version **0.6.0** packages the local runtime, STDIO MCP server, history Skill and a self-contained MCP App. Codex starts the runtime; the shipped UI requires no separate HTTP service or CDN. The model-facing `seywo_open` response is small; details travel through the app-only `seywo_panel_data` tool.
 
 ## Runtime prerequisites
 
@@ -148,7 +148,7 @@ incomplete state, not a failure notification or a reason to spend another call.
 A `Stop` Hook recaptures the now-complete native transcript and wakes the existing
 compact worker only while a compact boundary remains pending/claimed. Ordinary
 turns without unfinished compact work do not capture sources or start extraction.
-The frozen boundary is preserved; the turn ledger prevents replaying committed
+The frozen boundary is preserved; the per-chat cursor prevents replaying committed
 turns. Explicit retry also recaptures the source for this waiting state, instead
 of replaying the same incomplete snapshot. Waiting receipts remain retryable and
 the panel polls them through publication without showing a success checkmark.
@@ -156,13 +156,13 @@ A process that fails before Seywo's Hook runtime starts is outside these receipt
 Codex owns that command-execution error.
 
 
-## Storage lifecycle (schema 8)
+## Storage lifecycle (schema 9)
 
 Stable event/snapshot identities and exact source ranges reference shared compressed descriptors. Legacy task request/result documents are content-addressed with checksum-verified delta chains of at most 32 documents; original SQL task reads reconstruct exact bytes. External-content FTS derives tokens from compressed source payloads and retains the original unicode61 tokenizer and phrase positions. Explicit imports and existing indexes retain their tool-search coverage.
 
 Automatic captures freeze dialogue before the background worker starts, so a subsequent Codex rewrite cannot change the input being processed or retried. They keep user/assistant text, turn metadata, and original record hashes and ranges, but omit attachment payloads, tool arguments/results and Compact replacement histories before writing any archive block. The original Codex log is never edited. Projected archive locators are not native rollout paths: evidence ranges marked `byte_space=original_transcript` describe the original bytes, and evidence excerpts read the safe indexed text instead. Explicit raw import APIs still retain their existing behavior.
 
-New indexes are created directly at schema 8. Existing schema 8 indexes open without rewriting; other schemas are refused without modifying the index. The runtime does not migrate storage or make full database backups. `seywo/bin/seywo --config /absolute/project/.seywo/config.json storage verify` performs read-only database and archive validation.
+New indexes use schema 9. Other schemas are refused without modifying the index. To start fresh, stop the old worker and move the entire project `.seywo` directory aside before initializing; never mix an old inbox or receipts with a fresh database. The runtime does not migrate storage or make full database backups. `seywo/bin/seywo --config /absolute/project/.seywo/config.json storage verify` performs read-only database and archive validation.
 
 After successful/no-op maintenance and explicit deletion, one nonblocking collector protects database references and pending/claimed/failed boundaries before removing detached captures, payloads, descriptors and unreachable task document chains. Archive GC and VACUUM are thresholded; use `storage gc` for explicit forced reclamation. Active writers defer collection. One small storage receipt replaces previous results; reclamation failure is visible separately from successful narrative publication and is retried after subsequent successful maintenance.
 

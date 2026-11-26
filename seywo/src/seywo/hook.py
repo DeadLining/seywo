@@ -20,7 +20,7 @@ import sys
 from . import inbox, maintenance_status
 from .admission import NonHumanSource, require_human, transcript_meta
 from .config import load_config
-from .project_scope import CONFIG, resolve_project_root
+from .project_scope import ProjectBinding, SourceOwnerMismatch, UnverifiedWorkingDirectory
 from .retrieval import Retrieval
 from .store import Store
 from .runtime_platform import process_options
@@ -31,12 +31,32 @@ INJECTION_EVENTS = {"SessionStart", "UserPromptSubmit"}
 EVENTS = BOUNDARY_EVENTS | INJECTION_EVENTS | {"Stop", "SessionEnd"}
 MAX_CONTEXT_CHARS = 6000
 CHAT = re.compile(r"[A-Za-z0-9_-]{1,128}")
+OWNER_NOTICE = 'Seywo：无法确认对话日志归属当前项目，本次未保存快照。'
 
 
-def find_config(cwd: str) -> Path | None:
+def find_config(cwd: str, *, chat_id=None, report_unverified=False) -> Path | None:
+    def confirm(candidate):
+        if not chat_id:
+            return False
+        try:
+            with Store(load_config(candidate.config_path), read_only=True) as store:
+                return store.has_admitted_source(chat_id)
+        except (OSError, ValueError, sqlite3.Error):
+            return False
+
     try:
-        config = resolve_project_root(Path(cwd), discover_config=True) / CONFIG
+        config = ProjectBinding.from_observed_cwd(Path(cwd), confirm_history=confirm).config_path
         return config if config.is_file() else None
+    except UnverifiedWorkingDirectory as exc:
+        if report_unverified and (nearby := exc.nearby_config) is not None:
+            try:
+                enabled = (not (nearby.parent / 'disabled').exists()
+                           and (load_config(nearby).get('hook') or {}).get('enabled') is True)
+            except (ValueError, OSError):
+                enabled = False
+            if enabled:
+                raise
+        return None
     except (OSError, TypeError, ValueError, RuntimeError):
         return None
 
@@ -209,7 +229,12 @@ def main() -> int:
             chat_id = chat_identity(transcript, chat_id)
         except NonHumanSource:
             return 0
-    config_path = find_config(payload.get("cwd") or os.getcwd())
+    try:
+        config_path = find_config(payload.get("cwd") or os.getcwd(), chat_id=chat_id,
+                                  report_unverified=event in BOUNDARY_EVENTS)
+    except UnverifiedWorkingDirectory:
+        print(json.dumps({'systemMessage': 'Seywo：原工作目录已不存在，无法确认本次压缩的项目归属；未写入项目记忆。'}, ensure_ascii=False))
+        return 0
     if config_path is None:
         return 0
     try:
@@ -236,6 +261,8 @@ def main() -> int:
             spawn(config_path, chat_id)
             if not saved:
                 _emit_notice(config, chat_id, fallback='Seywo：补全任务已保存，但无法记录整理状态。')
+        except SourceOwnerMismatch:
+            print(json.dumps({'systemMessage': OWNER_NOTICE}, ensure_ascii=False))
         except (OSError, ValueError):
             maintenance_status.safe_record(config, chat_id, 'failed', error_code='queue_write_failed')
             _emit_notice(config, chat_id)
@@ -250,6 +277,9 @@ def main() -> int:
                 if boundary['state'] == 'excluded':
                     return 0
                 saved = maintenance_status.safe_record(config, chat_id, 'queued')
+        except SourceOwnerMismatch:
+            print(json.dumps({'systemMessage': OWNER_NOTICE}, ensure_ascii=False))
+            return 0
         except UnsupportedStorage:
             maintenance_status.safe_record(config, chat_id, 'blocked', error_code='storage_schema_unsupported')
             _emit_notice(config, chat_id)

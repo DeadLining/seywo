@@ -21,13 +21,12 @@ class CompactTransport:
         indexes = [turn["index"] for turn in payload["turns"]]
         return {
             "output": {
-                "segments": [{"title": "片段级主线", "turn_indexes": indexes, "action": "continue"}],
+                "segments": [{"title": "片段级主线", "turn_indexes": indexes, "action": "continue", "anchor_index": None}],
                 "changes": [{"operation": "new", "title": "压缩当前对话", "type": "goal",
                               "attribution": "user", "turn_indexes": indexes,
-                              "target_index": None, "open": True}],
-                "focus_segment": 0,
-                "current": {"goal_indexes": [max((row["index"] for row in payload["active_items"]), default=-1) + 1],
-                            "question_indexes": [], "next_step_indexes": []},
+                              "target_index": None, "open": True, "merge_indexes": []}],
+
+                "current": {"goal_index": max((row["index"] for row in payload["active_items"]), default=-1) + 1, "priority_indexes": []},
             },
             "finish": "complete",
             "error": None,
@@ -185,14 +184,14 @@ class SequentialCompactTransport(CompactTransport):
         if self.calls == 1:
             change = {"operation": "new", "title": "跨批次事项", "type": "goal",
                       "attribution": "user", "turn_indexes": indexes,
-                      "target_index": None, "open": True}
+                      "target_index": None, "open": True, "merge_indexes": []}
         else:
             change = {"operation": "update", "title": "跨批次事项已补充", "type": "goal",
                       "attribution": "user", "turn_indexes": indexes,
-                      "target_index": 0, "open": True}
-        return {"output": {"segments": [{"title": "跨批次主线", "turn_indexes": indexes, "action": "continue"}],
-                            "changes": [change], "focus_segment": 0,
-                            "current": {"goal_indexes": [0], "question_indexes": [], "next_step_indexes": []}},
+                      "target_index": 0, "open": True, "merge_indexes": []}
+        return {"output": {"segments": [{"title": "跨批次主线", "turn_indexes": indexes, "action": "continue", "anchor_index": None}],
+                            "changes": [change],
+                            "current": {"goal_index": 0, "priority_indexes": []}},
                 "finish": "complete", "error": None,
                 "usage": {"input_tokens": 100, "output_tokens": 20}}
 
@@ -278,9 +277,9 @@ def test_current_only_change_gets_a_new_revision(tmp_path, monkeypatch):
     first = run(config, write_source(tmp_path, rows))
     assert first['version'] == 1
     def view_only(**kwargs):
-        return {'output': {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
-            'changes': [], 'focus_segment': 0,
-            'current': {'goal_indexes': [], 'question_indexes': [], 'next_step_indexes': []}},
+        return {'output': {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
+            'changes': [],
+            'current': {"goal_index": None, "priority_indexes": []}},
             'usage': {'input_tokens': 10, 'output_tokens': 10}, 'error': None}
     fake.complete_compact = view_only
     rows.extend([{'type': 'turn_context', 'payload': {'turn_id': 't2'}},

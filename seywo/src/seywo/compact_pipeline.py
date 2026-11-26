@@ -8,7 +8,6 @@ owns identity, evidence, structure, publication, and cursor advancement.
 
 from copy import deepcopy
 import json
-import re
 from pathlib import Path
 import time
 
@@ -19,7 +18,7 @@ from .compact_model import (
     request_payload, instructions, validate, repair_instructions,
 )
 from .compact_sources import _source
-from .compact_turns import closed_rows, commit_turns
+from .compact_turns import closed_rows
 from .compact_input import batch_turns as _batch_turns
 from .compact_identity import canonical_item as _canonical_item
 from .hook import chat_identity
@@ -27,13 +26,12 @@ from .model_contract import model_eligible
 from .narrative import Narrative, empty
 from .narrative_contract import validate_layout
 from .phase_integrity import OBJECTIVE_TYPES, validate_phase_changes
+from .project_scope import SourceOwnerMismatch
 from .store import digest, encode
 from .understanding import Understanding
 
 PIPELINE = "seywo-compact-v1"
 UNRESOLVED_TYPES = {"question", "goal", "action", "next_step", "correction"}
-_COMPLETED_ASSISTANT = re.compile(r"(?:已(?:经)?(?:实现|完成|修复|验证|解决|关闭|通过|恢复|正常)|确认(?:完成|通过)|问题解决|无遗留)", re.I)
-_PENDING_ASSISTANT = re.compile(r"(?:待(?:验证|确认|处理)|尚待|仍(?:需|待)|未(?:完成|解决|验证)|需要继续|还要)", re.I)
 
 
 def _write_state(path, state):
@@ -215,16 +213,12 @@ def _segment_anchor(doc, segment, related, identities):
         return anchor
     if segment["action"] not in {"branch", "new_phase"}:
         return None
-    # Old saved outputs have no anchor field. Accept only an unambiguous
-    # identity-based binding, rather than guessing from semantic title matches.
     if segment["action"] == "new_phase":
-        candidates = [i for i in related if i["type"] in OBJECTIVE_TYPES
-                      and i["attribution"] == "user_statement"]
-    else:
-        candidates = [i for i in related if i["type"] != "goal"] or related
-        questions = [i for i in candidates if i["type"] == "question"]
-        if len(questions) == 1:
-            candidates = questions
+        raise ValueError('compact_new_phase_requires_user_objective')
+    candidates = [i for i in related if i["type"] != "goal"] or related
+    questions = [i for i in candidates if i["type"] == "question"]
+    if len(questions) == 1:
+        candidates = questions
     if len(candidates) != 1:
         raise ValueError("compact_structure_anchor_required")
     return candidates[0]
@@ -373,30 +367,7 @@ def _place_items(doc, added, structures, *, locks=()):
                 phase["goal_item_ids"].append(identity)
 
 
-def _normalize_changes(output, turns):
-    """Apply deterministic completion semantics before materialization.
-
-    The model remains responsible for deciding what matters and how items
-    relate. Runtime only closes an assistant-attributed item when its source
-    explicitly reports completion and contains no pending qualifier, avoiding
-    stale unresolved nodes from phrases such as “已实现” or “已验证”.
-    """
-    # v2 explicitly owns semantic state. A completion verb for one subtask
-    # must never override the model's open state for a composite historical goal.
-    if "current" in output:
-        return output
-    changes = []
-    for change in output["changes"]:
-        if change["attribution"] == "assistant" and change["open"]:
-            text = " ".join(turns[index].get("assistant", "") for index in change["turn_indexes"])
-            if _COMPLETED_ASSISTANT.search(text) and not _PENDING_ASSISTANT.search(text):
-                change = {**change, "open": False}
-        changes.append(change)
-    return {**output, "changes": changes}
-
-
 def apply_compact(previous, output, turns, catalog, task_id, *, locks=()):
-    output = _normalize_changes(output, turns)
     doc = deepcopy(previous) if previous else empty()
     doc.setdefault("identity_changes", [])
     doc.setdefault("pending_revisions", [])
@@ -544,7 +515,6 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
             if rows and not deferred:
                 state["cursor"] = [rows[-1]["ordinal"], rows[-1]["record_no"]]
                 with store.db:
-                    commit_turns(store.db, chat_id, rows)
                     store.db.execute("INSERT INTO delta_progress VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET cursor_json=excluded.cursor_json,version=excluded.version,windows=excluded.windows",
                                      (chat_id, encode(state["cursor"]), state.get("version", 0), state.get("windows", 0) + 1))
             inbox.settle_imported(config, chat_id, state.get("cursor"))
@@ -605,7 +575,7 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                         raise ValueError(result.get("error") or "compact_empty")
                     output_chars += len(json.dumps(result["output"], ensure_ascii=False, separators=(",", ":")))
                     try:
-                        output = validate(result["output"], list(range(len(payload_turns))), set(item_ids), require_current=True)
+                        output = validate(result["output"], list(range(len(payload_turns))), set(item_ids))
                         candidate, added, touched = apply_compact(
                             working, output, chunk, catalog, f"{batch_id}:{chunk_index}", locks=locks)
                     except ValueError as exc:
@@ -628,7 +598,6 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
                 version = head + 1 if current != service._body(chat_id, head) else head
                 if version != head:
                     service._write(chat_id, version, override, current, encode(Understanding(store)._heads(chat_id)), task_id=batch_id, origin=PIPELINE)
-                commit_turns(store.db, chat_id, rows)
                 cursor = after
                 state.update(cursor=cursor, version=version, windows=state.get("windows", 0) + 1)
                 store.db.execute("INSERT INTO delta_progress VALUES(?,?,?,?) ON CONFLICT(chat_id) DO UPDATE SET cursor_json=excluded.cursor_json,version=excluded.version,windows=excluded.windows",
@@ -645,10 +614,7 @@ def _run_compact(config, chat_id, state, state_path, transport, report):
             with store.db:
                 _record(store.db, (batch_id, chat_id, encode(before), encode(after), base_head[0], None, "failed", len(turns), segment_count, calls,
                                     input_chars, output_chars, input_tokens, output_tokens, "[]", "[]", str(exc)[:120], time.time(), time.time()), model_runs)
-            # Source ingestion already committed before semantic extraction.
-            # Keep the semantic failure in compact_batches and release the
-            # source boundary so retry can resume from the semantic cursor.
-            inbox.settle_imported(config, chat_id, after)
+            # The imported claim is durable, but only a committed cursor can settle it.
             report.update(state="failed", error_code=str(exc)[:120], calls=calls, pipeline=PIPELINE,
                           input_chars=input_chars, output_chars=output_chars, input_tokens=input_tokens, output_tokens=output_tokens)
             _write_state(state_path, state)
@@ -677,6 +643,9 @@ def _import_owned(store, config, chat_id, claimed):
     if owner != chat_id:
         try:
             inbox.record(config, owner, claimed["event"], str(path))
+        except SourceOwnerMismatch as exc:
+            inbox.finish(config, claimed, state="failed", error=exc.code)
+            return False
         except (OSError, ValueError):
             inbox.finish(config, claimed, state="failed", error="chat_identity_unresolved")
             return False
@@ -688,10 +657,10 @@ def _import_owned(store, config, chat_id, claimed):
         inbox.finish(config, claimed, state="failed", error="source_missing")
         return False
     try:
-        path, manifest = inbox.capture_dialogue(config, path, chat_id)
+        path, manifest = store.capture_source(path, chat_id, dialogue=True)
     except (OSError, ValueError) as exc:
         inbox.finish(config, claimed, state="failed",
-                     error=str(exc)[:120] or "source_capture_failed")
+                     error=exc.code if isinstance(exc, SourceOwnerMismatch) else str(exc)[:120] or "source_capture_failed")
         return False
     if str(path) != claimed.get("snapshot"):
         claimed = inbox.relocate(config, claimed, path)

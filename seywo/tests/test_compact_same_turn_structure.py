@@ -22,7 +22,7 @@ def semantic():
 
 def test_same_native_turn_can_supply_multiple_ordered_structural_events():
     raw = semantic()
-    checked = validate(raw, [0], set(), require_current=True)
+    checked = validate(raw, [0], set())
     text = '主线账单审阅；先进入重试调查，排查后仍未知，现在返回账单主线。'
     turns = [turn('native', text, '', source(0, 'user', text))]
     doc, added, _ = apply_compact(empty(), checked, turns, [], 'same-native')

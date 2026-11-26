@@ -117,14 +117,10 @@ def test_index2_policy_upgrade_cannot_reset_spend_or_use_old_lease(setup):
     store.db.commit()
     before = engine.status(job)['usage']
     current = engine.prepare('chat', options)['job_id']
-    assert current != job and engine.status(job)['state'] == 'retired_policy'
-    assert engine.status(current)['usage'] == before
-    state = store.db.execute('SELECT state,error_code FROM understanding_attempts WHERE id=?', (claim['attempt_id'],)).fetchone()
-    assert tuple(state) == ('superseded', 'model_policy_retired')
-    engine.submit(claim['attempt_id'], backend=options.backend, output={'items': []})
-    state = store.db.execute('SELECT state,error_code FROM understanding_attempts WHERE id=?', (claim['attempt_id'],)).fetchone()
-    assert tuple(state) == ('late', 'late_response')
-    assert engine.status(current)['usage'] == before
+    assert current != job and engine.status(job)['usage'] == before
+    assert engine.status(current)['usage']['call_count'] == 0
+    state = store.db.execute('SELECT state FROM understanding_attempts WHERE id=?', (claim['attempt_id'],)).fetchone()
+    assert state[0] == 'inflight'
     private = json.loads(store.db.execute('SELECT request_json FROM understanding_tasks WHERE id=?', (claim['task_id'],)).fetchone()[0])
     assert private['indexed']['policy'] == 'seywo-index-5'
 

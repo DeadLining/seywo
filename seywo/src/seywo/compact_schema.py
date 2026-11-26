@@ -26,14 +26,8 @@ CREATE TABLE IF NOT EXISTS compact_batches(
     changes_json TEXT NOT NULL,
     error_code TEXT,
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
-);
-CREATE TABLE IF NOT EXISTS compact_turn_commits(
-    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
-    turn_id TEXT NOT NULL,
-    through_ordinal INTEGER NOT NULL,
-    through_record INTEGER NOT NULL,
-    PRIMARY KEY(chat_id,turn_id)
+    updated_at REAL NOT NULL,
+    model_runs_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS compact_batches_chat ON compact_batches(chat_id, created_at DESC);
 """
@@ -51,13 +45,5 @@ def setup(db):
 
         columns = {row[1] for row in db.execute("PRAGMA table_info(compact_batches)")}
         if "model_runs_json" not in columns:
-            db.execute("ALTER TABLE compact_batches ADD COLUMN model_runs_json TEXT NOT NULL DEFAULT '[]'")
-
-        # Stable rowid breaks equal timestamps deterministically during legacy cleanup.
-        db.execute("""DELETE FROM compact_batches WHERE rowid IN (
-            SELECT rowid FROM (
-                SELECT rowid, row_number() OVER (
-                    PARTITION BY chat_id,state ORDER BY updated_at DESC,rowid DESC) n
-                FROM compact_batches WHERE state IN ('done','failed')) WHERE n>1)""")
-        db.execute("UPDATE compact_batches SET segments_json='[]',changes_json='[]' "
-                   "WHERE segments_json<>'[]' OR changes_json<>'[]'")
+            from .store import UnsupportedStorage
+            raise UnsupportedStorage('unsupported compact batch schema')

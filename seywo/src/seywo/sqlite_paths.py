@@ -3,6 +3,8 @@ from pathlib import Path, PurePath, PureWindowsPath
 import re
 from urllib.parse import quote
 
+from .windows_paths import native_windows_path
+
 
 def sqlite_uri(path: PurePath, *, mode: str) -> str:
     """Open an existing database without putting Windows prefixes in the authority.
@@ -19,18 +21,7 @@ def sqlite_uri(path: PurePath, *, mode: str) -> str:
     if not path.is_absolute():
         raise ValueError('SQLite database path must be absolute')
     if isinstance(path, PureWindowsPath):
-        raw = str(path)
-        if raw[:8].lower() == '\\\\?\\unc\\':
-            raw = '\\\\' + raw[8:]
-        elif raw.startswith('\\\\?\\'):
-            raw = raw[4:]
-            if not re.match(r'^[a-zA-Z]:[\\/]', raw):
-                raise ValueError('Unsupported Windows database namespace')
-        if raw.startswith('\\\\.\\'):
-            raise ValueError('Windows device paths are not database paths')
-        native = PureWindowsPath(raw)
-        if not native.is_absolute():
-            raise ValueError('SQLite database path must be absolute')
+        native = native_windows_path(path)
         if re.fullmatch('[a-zA-Z]:', native.drive):
             uri = 'file:///' + quote(native.as_posix(), safe='/:')
         elif native.drive.startswith('\\\\'):

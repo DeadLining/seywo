@@ -1,7 +1,9 @@
 """Read-only, paged projections for the plugin panel; no model execution."""
 import json
+from pathlib import Path
 
 from .narrative import Narrative, empty
+from .project_scope import project_label
 from .retrieval import Retrieval, identity, integer, page
 
 
@@ -69,7 +71,8 @@ class Panel:
         result['retrieval']['offset'] = offset
         if result['retrieval']['next_offset'] is not None:
             result['retrieval']['next_offset'] += offset
-        result.update(project_root=self.store.config['project_root'], chat_count=len(chats))
+        owner = self.store.config['project_root']
+        result.update(project_root=owner, project_name=project_label(Path(owner)), chat_count=len(chats))
         return result
 
     def mainline(self, chat_id):

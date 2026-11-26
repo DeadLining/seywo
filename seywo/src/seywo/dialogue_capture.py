@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 
-from .projection import BINARY, assistant_body_hash, compact_body_hash
+from .projection import BINARY, assistant_body_hash, compact_body_hash, message_channel
 
 MAX_RECORD_BYTES = 16 * 1024 * 1024
 ORIGIN = "_seywo_dialogue_v1"
@@ -16,7 +16,7 @@ _SPACE = re.compile(rb'[ \t\r\n]*')
 # Structural allowlist for oversized JSONL records. Normal records go through
 # json.loads. The large-record reader scans discarded values without loading them.
 _BLOCK = {"type": True, "text": True}
-_PAYLOAD = dict.fromkeys(("type", "id", "cwd", "turn_id", "root_turn_id", "role", "channel", "call_id", "name", "message"), True)
+_PAYLOAD = dict.fromkeys(("type", "id", "cwd", "turn_id", "root_turn_id", "role", "channel", "phase", "call_id", "name", "message"), True)
 _SOURCE = {"subagent": None}
 _PAYLOAD.update(content=[_BLOCK], source=_SOURCE)
 _RECORD = {"type": True, "timestamp": True, "payload": _PAYLOAD}
@@ -163,6 +163,8 @@ def _retain(record):
         payload = _strings(p, ("type", "turn_id"))
     elif event == "response_item":
         payload = _strings(p, ("type", "role", "channel", "call_id", "name"))
+        if isinstance(channel := message_channel(p), str):
+            payload['channel'] = channel
         if kind == "message" and p.get("role") in ("user", "assistant") and isinstance(p.get("content"), list):
             # Keep placeholders so evidence paths for mixed text/media retain
             # their original content indices. No media URL or binary is copied.
@@ -188,7 +190,7 @@ def _retain(record):
     return row or {"type": "unparsed"}
 
 
-def records(handle):
+def records(handle, *, check=None):
     """Yield one small JSON row per source line, with original byte provenance."""
     offset = 0
     while raw := handle.readline(_CHUNK):
@@ -200,6 +202,8 @@ def records(handle):
                 record = json.loads(raw.decode("utf-8"))
             except (ValueError, RecursionError):
                 record = None
+        if check is not None:
+            check(record)
         row = _retain(record) if complete or offset == 0 else {"type": "unparsed"}
         row[ORIGIN] = [offset, offset + size, sha, complete]
         encoded = json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "backslashreplace") + b"\n"

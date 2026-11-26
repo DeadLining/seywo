@@ -263,7 +263,6 @@ class Understanding:
                 target_data["bridge"] = options.bridge
             if options.skip:
                 target_data["skip"] = options.skip
-            legacy_target = digest(encode(target_data))
             target = digest(encode({**target_data, "model_policy": POLICY}))
             old = self.db.execute("SELECT * FROM understanding_jobs WHERE target_hash=?", (target,)).fetchone()
             if old:
@@ -299,22 +298,7 @@ class Understanding:
             job_id = uuid4().hex
             self.db.execute("INSERT INTO understanding_jobs(id,chat_id,target_hash,source_heads,options_json,limits_json,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
                             (job_id, chat_id, target, encode(heads), encode(asdict(options)), encode(asdict(limits)), "pending", self.clock()))
-            previous_targets = [legacy_target] + [digest(encode({**target_data, "model_policy": policy}))
-                for policy in ("seywo-index-1", "seywo-index-2", "seywo-index-3", "seywo-index-4") if policy != POLICY]
-            predecessors = [row for key in previous_targets if (row := self.db.execute(
-                "SELECT * FROM understanding_jobs WHERE target_hash=?", (key,)).fetchone())]
             owner = self.db.execute("SELECT owner_id FROM model_budget_owners WHERE job_id=?", (parent["id"],)).fetchone()[0] if parent else job_id
-            for prior in predecessors:
-                prior_owner = self.db.execute("SELECT owner_id FROM model_budget_owners WHERE job_id=?", (prior["id"],)).fetchone()[0]
-                if owner == job_id:
-                    owner = prior_owner
-                elif prior_owner != owner:
-                    self.db.execute("UPDATE model_budget_owners SET owner_id=? WHERE owner_id=?", (owner, prior_owner))
-                inherited = json.loads(prior["limits_json"])
-                limits = Limits(**{k: min(v, inherited[k]) for k, v in asdict(limits).items()})
-                self.db.execute("UPDATE understanding_jobs SET limits_json=? WHERE id=?", (encode(asdict(limits)), job_id))
-                self.db.execute("UPDATE understanding_attempts SET state='superseded',error_code='model_policy_retired' WHERE job_id=? AND state='inflight'", (prior["id"],))
-                self.db.execute("UPDATE understanding_jobs SET state='retired_policy' WHERE id=?", (prior["id"],))
             self.db.execute("INSERT INTO model_budget_owners VALUES(?,?)", (job_id, owner))
             rows = self.db.execute("SELECT * FROM current_sources WHERE chat_id=? ORDER BY ordinal,record_no", (chat_id,)).fetchall()
             if options.through_order is not None:

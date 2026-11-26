@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from .config import initialize, project_directory, state_dir
+from .project_scope import ProjectBinding
 
 FILES = ('.gitignore', 'config.json', 'index.sqlite3', '.init.lock', 'storage-migration.lock')
 
@@ -25,6 +26,7 @@ def _plan(root):
     # existing projects and must not read/reset their settings or databases.
     if config.exists():
         return {**base, 'status': 'skipped', 'reason': 'config.json already exists'}
+    ProjectBinding.at(root)
     for name in FILES:
         path = state / name
         if path.is_symlink():

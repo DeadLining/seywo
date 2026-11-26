@@ -30,7 +30,7 @@ def test_native_calls_and_usage_are_measured_without_real_provider(monkeypatch, 
                 'changes': [{'operation': 'new', 'title': '账单审阅', 'type': 'goal',
                              'attribution': 'user', 'turn_indexes': indexes, 'target_index': None,
                              'open': True, 'merge_indexes': []}],
-                'current': {'goal_indexes': [0], 'question_indexes': [], 'next_step_indexes': []}}}
+                'current': {"goal_index": 0, "priority_indexes": []}}}
 
     monkeypatch.setattr(module, 'CodexTransport', NativeFixture)
     case = {'id': 'meter-native', 'checks': {'max_items': 1, 'phases': 1},

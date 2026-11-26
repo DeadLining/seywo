@@ -968,7 +968,7 @@ def test_latest_work_visibility_pins_focused_phase_only():
     assert request["previous"]["items"][0]["id"] == "old"
 
 
-def test_organization_policy_upgrade_retires_inflight_b_without_resetting_spend(
+def test_unknown_organization_policy_cannot_replace_an_inflight_request(
     setup, monkeypatch
 ):
     import seywo.narrative as narrative_module
@@ -984,22 +984,21 @@ def test_organization_policy_upgrade_retires_inflight_b_without_resetting_spend(
     assert lease["request"]["phase"] == "organize"
     spent = engine.status(job)["usage"]
     monkeypatch.setattr(narrative_module, "ORGANIZATION_POLICY", "test-next-policy")
-    replacement = service.prepare(job)
-    assert replacement["task_id"] != first["task_id"]
-    assert service.prepare(job)["task_id"] == replacement["task_id"]
+    with pytest.raises(ValueError, match='organization_policy_unsupported'):
+        service.prepare(job)
     assert engine.status(job)["usage"] == spent
     assert (
         store.db.execute(
             "SELECT state FROM understanding_tasks WHERE id=?", (first["task_id"],)
         ).fetchone()[0]
-        == "stale"
+        == "inflight"
     )
     assert (
         store.db.execute(
             "SELECT state FROM understanding_attempts WHERE id=?",
             (lease["attempt_id"],),
         ).fetchone()[0]
-        == "superseded"
+        == "inflight"
     )
     assert (
         store.db.execute(

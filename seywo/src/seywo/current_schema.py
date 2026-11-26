@@ -15,7 +15,8 @@ CREATE TABLE source_segments(
 CREATE TABLE source_snapshots(
  id TEXT PRIMARY KEY, segment_id TEXT NOT NULL REFERENCES source_segments(id) ON DELETE CASCADE,
  sha256 TEXT NOT NULL, byte_count INTEGER NOT NULL, records INTEGER NOT NULL,
- projection_version TEXT NOT NULL, UNIQUE(segment_id,sha256,projection_version));
+ projection_version TEXT NOT NULL, dialogue INTEGER NOT NULL CHECK(dialogue IN (0,1)),
+ UNIQUE(segment_id,sha256,projection_version));
 
 CREATE TABLE source_events(
  id TEXT PRIMARY KEY, segment_id TEXT NOT NULL REFERENCES source_segments(id) ON DELETE CASCADE,

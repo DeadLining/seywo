@@ -71,10 +71,9 @@ def test_upgrade_from_index4_preserves_spend_and_invalidates_old_lease(setup):
         store.db.execute('UPDATE understanding_jobs SET target_hash=? WHERE id=?', (target, old))
     replacement = engine.prepare('chat', options)['job_id']
     assert replacement != old
-    assert engine.status(replacement)['usage']['call_count'] == 1
-    assert engine.status(old)['state'] == 'retired_policy'
-    engine.submit(lease['attempt_id'], backend=options.backend, output={'items': []})
-    assert store.db.execute('SELECT state FROM understanding_attempts WHERE id=?', (lease['attempt_id'],)).fetchone()[0] == 'late'
+    assert engine.status(replacement)['usage']['call_count'] == 0
+    assert engine.status(old)['usage']['call_count'] == 1
+    assert engine.claim(replacement, backend=options.backend)['request']['protocol'] == 'seywo-index-5'
     assert store.db.execute('SELECT count(*) FROM narrative_versions').fetchone()[0] == 0
 
 
@@ -117,8 +116,8 @@ def test_later_explanation_can_focus_same_phase_but_old_question_cannot_hide_new
     assert task['task_id']
 
 
-def test_previous_index4_narrative_continues_without_rebuilding_old_sources(setup):
-    from test_s3 import publish, layout
+def test_previous_index4_narrative_is_rejected_without_rewriting_it(setup):
+    from test_s3 import publish
     from test_s2 import drain
     store, engine, _, service, _, _, view = publish(setup)
     old = view['narrative']
@@ -135,9 +134,6 @@ def test_previous_index4_narrative_continues_without_rebuilding_old_sources(setu
     store.import_source(setup[3], 'chat', 0)
     job = engine.prepare('chat', setup[2])['job_id']
     drain(engine, job)
-    task = service.prepare(job)
-    claim = engine.claim(job, backend=setup[2].backend)
-    assert claim['request']['protocol'] == 'seywo-index-5'
-    assert engine.submit(claim['attempt_id'], backend=setup[2].backend,
-                         output=layout(claim['request']))['error_code'] is None
-    assert service.publish(task['task_id'])['narrative']['model_policy'] == 'seywo-index-5'
+    with pytest.raises(ValueError, match='previous_model_policy_incompatible'):
+        service.prepare(job)
+    assert store.db.execute('SELECT max(version) FROM narrative_versions').fetchone()[0] == view['version']

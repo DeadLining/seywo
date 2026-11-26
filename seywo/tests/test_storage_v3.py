@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from seywo.config import initialize, load_config
-from seywo.store import Store
+from seywo.store import SCHEMA_VERSION, Store
 
 
 def project(tmp_path):
@@ -31,7 +31,7 @@ def test_shared_descriptors_keep_distinct_occurrences_and_exact_reads(tmp_path):
     root, cfg = project(tmp_path)
     raw = source(root, root / 'raw.jsonl', [message('同一个目标 some_symbol')])
     with Store(cfg) as s:
-        assert s.db.execute('PRAGMA user_version').fetchone()[0] == 8
+        assert s.db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
         snapshots = [s.import_source(raw if i == 0 else source(root, root / f'{i}.jsonl',
                      [message('同一个目标 some_symbol')]), 'chat', i) for i in range(8)]
         assert s.db.execute('SELECT count(*) FROM fragment_descriptors').fetchone()[0] <= 2
@@ -247,7 +247,7 @@ def test_initial_database_is_published_only_when_schema_is_complete(tmp_path, mo
     assert observed and observed[0].name.startswith('.index-')
     assert not observed[0].exists()
     with Store(load_config(root / '.seywo/config.json'), read_only=True) as store:
-        assert store.db.execute('PRAGMA user_version').fetchone()[0] == 8
+        assert store.db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
 
 
 @pytest.mark.parametrize('damage', [{'state': 'failed', 'chat_id': ['chat'], 'snapshot': 'file'}, {'state': 'failed', 'chat_id': 'chat', 'snapshot': ['file']}])

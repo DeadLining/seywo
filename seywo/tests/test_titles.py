@@ -122,9 +122,8 @@ def test_legacy_snapshot_without_title_remains_read_only(setup):
         from seywo.document_store import register
         register(store.db)
     before = store.db.total_changes
-    read = service.read("chat", version=1)
-    assert "title" not in read["narrative"]["items"][0]
-    assert read["narrative"]["items"][0]["content"] == legacy["items"][0]["content"]
+    with pytest.raises(ValueError, match='invalid_item_title'):
+        service.read('chat', version=1)
     assert store.db.total_changes == before
 
 

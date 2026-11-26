@@ -6,6 +6,7 @@ import sqlite3
 import pytest
 
 from seywo.sqlite_paths import sqlite_uri
+from seywo.windows_paths import extended_windows_path
 
 
 @pytest.mark.parametrize(('raw', 'expected'), [
@@ -61,7 +62,7 @@ def test_native_windows_sqlite_reads_same_database(tmp_path, extended):
     with sqlite3.connect(path) as db:
         db.execute('CREATE TABLE proof(value)')
         db.execute('INSERT INTO proof VALUES (42)')
-    locator = PureWindowsPath('\\\\?\\' + str(path)) if extended else path
+    locator = extended_windows_path(path) if extended else path
     with sqlite3.connect(sqlite_uri(locator, mode='ro'), uri=True) as db:
         assert db.execute('SELECT value FROM proof').fetchone() == (42,)
 

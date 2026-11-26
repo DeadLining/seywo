@@ -23,7 +23,7 @@ BLOCK_BYTES = 256 * 1024
 MAX_MANIFEST = 4 * 1024 * 1024
 MAX_CHUNKS = 32768  # Preserve the legacy 1 GiB capacity at the new 32 KiB minimum.
 HASH = re.compile(r"[a-f0-9]{64}")
-DIALOGUE_FORMAT = "dialogue-v1"
+DIALOGUE_FORMAT = "dialogue-v2"
 
 
 def _sha(data):
@@ -139,9 +139,10 @@ def _manifest(handle):
     if os.fstat(handle.fileno()).st_size > MAX_MANIFEST:
         raise ValueError("oversized archive manifest")
     manifest = record if record is not None else json.load(handle)
+    if isinstance(manifest, dict) and 'format' in manifest and manifest['format'] != DIALOGUE_FORMAT:
+        raise ValueError('source_capture_format_unsupported')
     if (not isinstance(manifest, dict)
             or set(manifest) - {"format"} != {"seywo_archive", "bytes", "sha256", "chunks"}
-            or "format" in manifest and manifest["format"] != DIALOGUE_FORMAT
             or type(manifest["seywo_archive"]) is not int or manifest["seywo_archive"] != 1
             or type(manifest["bytes"]) is not int or manifest["bytes"] < 0
             or not isinstance(manifest["sha256"], str) or not HASH.fullmatch(manifest["sha256"])
@@ -184,7 +185,40 @@ def capture(source, target):
         return _capture(source, target)
 
 
-def _capture(source, target, *, dialogue=False):
+def _parts(handle, *, dialogue=False, admit=None):
+    """Validate session boundaries on the same stream that supplies the bytes."""
+    from .dialogue_capture import MAX_RECORD_BYTES, records
+    from .project_scope import SourceOwnerMismatch
+
+    seen = False
+
+    def check(record):
+        nonlocal seen
+        if not seen:
+            admit(record)
+            seen = True
+        elif isinstance(record, dict) and record.get('type') == 'session_meta':
+            raise SourceOwnerMismatch('multiple session identities in one physical source')
+
+    if dialogue:
+        yield from records(handle, check=check if admit else None)
+    elif admit is None:
+        yield from iter(lambda: handle.read(BLOCK_BYTES), b'')
+    else:
+        while raw := handle.readline(MAX_RECORD_BYTES + 1):
+            if len(raw) > MAX_RECORD_BYTES:
+                raise ValueError('source_record_too_large: raw capture')
+            try:
+                record = json.loads(raw)
+            except (ValueError, RecursionError):
+                record = None
+            check(record)
+            yield raw
+    if admit and not seen:
+        raise ValueError('empty source')
+
+
+def _capture(source, target, *, dialogue=False, admit=None):
     """Stream once; publish only after every referenced block is durable."""
     source, target = Path(source), Path(target)
     folder = _objects(target)
@@ -205,11 +239,7 @@ def _capture(source, target, *, dialogue=False):
         with open_source(source) as incoming:
             before = os.fstat(incoming.fileno())
             from .archive_chunks import chunks as content_chunks
-            if dialogue:
-                from .dialogue_capture import records
-                parts = content_chunks(records(incoming))
-            else:
-                parts = content_chunks(incoming)
+            parts = content_chunks(_parts(incoming, dialogue=dialogue, admit=admit))
             for data in parts:
                 if len(chunks) == MAX_CHUNKS:
                     raise ValueError("source_archive_capacity")
@@ -251,7 +281,7 @@ def is_dialogue(path):
     return manifest is not None and manifest.get("format") == DIALOGUE_FORMAT
 
 
-def content_capture(source, folder, prefix, *, dialogue=False):
+def content_capture(source, folder, prefix, *, dialogue=False, admit):
     """Canonical immutable locator, independent of legacy capture filenames."""
     source, folder = Path(source).resolve(), Path(folder).resolve()
     temporary = folder / f".{prefix}-{uuid4().hex}.jsonl"
@@ -261,11 +291,11 @@ def content_capture(source, folder, prefix, *, dialogue=False):
                 existing = _manifest(handle)
             projected = existing is not None and existing.get("format") == DIALOGUE_FORMAT
             if existing is not None and source.parent == folder and (not dialogue or projected):
-                if source_digest(source) != (existing["sha256"], existing["bytes"]):
+                if source_digest(source, admit=admit) != (existing["sha256"], existing["bytes"]):
                     raise ValueError("archive identity mismatch")
                 manifest = existing
             else:
-                manifest = _capture(source, temporary, dialogue=dialogue and not projected)
+                manifest = _capture(source, temporary, dialogue=dialogue and not projected, admit=admit)
             if dialogue and manifest["bytes"] == 0:
                 raise ValueError("empty dialogue capture")
             tag = "-dialogue" if manifest.get("format") == DIALOGUE_FORMAT else ""
@@ -283,10 +313,10 @@ def content_capture(source, folder, prefix, *, dialogue=False):
             temporary.unlink(missing_ok=True)
 
 
-def source_digest(path):
+def source_digest(path, *, admit=None):
     digest, size = hashlib.sha256(), 0
     with open_source(path) as f:
-        while data := f.read(BLOCK_BYTES):
+        for data in _parts(f, admit=admit):
             digest.update(data)
             size += len(data)
     return digest.hexdigest(), size

@@ -6,19 +6,12 @@ import tempfile
 from pathlib import Path
 from uuid import uuid4
 
-from .project_scope import project_paths_match
+from .project_scope import ProjectBinding, project_directory
 from .runtime_platform import replace_file
 
 from .locking import file_lock
 
 DEFAULT_IGNORE = "*\n!.gitignore\n"
-
-
-def project_directory(root: Path, *, strict: bool = False) -> Path:
-    root = root.expanduser().absolute()
-    if root.is_symlink():
-        raise ValueError("Seywo project directory must not be a symlink")
-    return root.resolve(strict=strict)
 
 
 def state_dir(root: Path) -> Path:
@@ -64,12 +57,12 @@ def load_config(path: Path) -> dict:
         raise ValueError("Seywo requires an explicit .seywo/config.json")
     if path.is_symlink() or path.parent.is_symlink():
         raise ValueError("Seywo configuration must not be a symlink")
-    root = project_directory(path.parent.parent)
+    owner = ProjectBinding.at(path.parent.parent)
     data = json.loads(path.read_text(encoding="utf-8"))
     if (data.get("product") != "seywo" or data.get("schema_version") != 1
             or not isinstance(data.get("project_id"), str) or not data["project_id"]
             or data.get("database") != "index.sqlite3"
-            or not project_paths_match(root, data.get("project_root"))):
+            or not owner.matches_stored_owner(data.get("project_root"))):
         raise ValueError("invalid or foreign Seywo configuration")
     database = path.parent / data["database"]
     if database.is_symlink():
@@ -98,6 +91,7 @@ def initialize(root: Path, *, plugin_hook: bool = False, skip_existing: bool = F
     if skip_existing and path.exists():
         return {"skipped": True, "config": str(path)}
     root.mkdir(parents=True, exist_ok=True)
+    ProjectBinding.at(root)  # Reject an unidentifiable owner before creating any plugin state.
     state.mkdir(mode=0o700, exist_ok=True)
     # Refuse even dangling links before publishing any project files.
     for name in ("config.json", "index.sqlite3", ".gitignore"):

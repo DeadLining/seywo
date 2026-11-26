@@ -6,9 +6,10 @@ from typing import Literal
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
-from .config import initialize, load_config
+from .config import load_config
 from .panel import Panel
-from .plugin_binding import ProjectRequired
+from .plugin_binding import ProjectRequired, ReconnectRequired
+from .project_scope import project_label
 from .plugin_context import current_chat, host_thread_id, catalog_home
 from .retrieval import Retrieval, serialize, snapshot
 from .settings import provider_status, read_provider, save_provider, use_codex, validate_endpoint
@@ -22,10 +23,10 @@ from .store import Store
 # Codex may retain an MCP App resource by URI for the lifetime of a Chat, so
 # reusing panel-v1.html would keep an already-open Chat on the previous DOM
 # even after the plugin files have been reinstalled.
-RESOURCE_URI = 'ui://seywo/panel-v9.html'
+RESOURCE_URI = 'ui://seywo/panel-v11.html'
 
 
-def register_panel(server, resolve_config):
+def register_panel(server, resolve_config, initialize_bound):
     readonly = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
 
     @server.resource(RESOURCE_URI, name='Seywo', mime_type='text/html;profile=mcp-app',
@@ -56,8 +57,10 @@ def register_panel(server, resolve_config):
             if initialized:
                 # New configurations enable the bundled Hook atomically. A retry
                 # after a database creation failure reuses the existing identity.
-                initialize(path.parent.parent, plugin_hook=True)
+                initialize_bound(path.parent.parent, plugin_hook=True)
             store = Store(load_config(path), read_only=True)
+        except ReconnectRequired:
+            info = {'state': 'reconnect_required', 'project_root': None, 'chat_id': None, 'model_calls': 0}
         except ProjectRequired:
             info = {'state': 'project_required', 'project_root': None, 'chat_id': None, 'model_calls': 0}
         except (OSError, ValueError, sqlite3.Error) as exc:
@@ -65,6 +68,7 @@ def register_panel(server, resolve_config):
             # so the panel can retry through the same binding checks. No traceback.
             info = {'state': 'initialization_failed',
                     'project_root': str(path.parent.parent) if path is not None else None,
+                    'project_name': project_label(path.parent.parent) if path is not None else None,
                     'chat_id': None, 'model_calls': 0, 'retryable': True,
                     'error': str(exc)}
         else:
@@ -73,6 +77,7 @@ def register_panel(server, resolve_config):
                     store.require_human_chat(chat_id)
                 identity, default = current_chat(store, server.get_context())
                 info = {'project_root': store.config['project_root'], 'chat_id': chat_id or default,
+                        'project_name': project_label(path.parent.parent),
                         'current_chat_id': identity, 'model_calls': 0}
                 if initialized:
                     info['initialized'] = True

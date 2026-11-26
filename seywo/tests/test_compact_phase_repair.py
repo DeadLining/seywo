@@ -54,7 +54,7 @@ def counts(config):
     with Store(config, read_only=True) as store:
         return {name: store.db.execute(f'SELECT count(*) FROM {name}').fetchone()[0]
                 for name in ['source_segments', 'source_snapshots', 'source_fragments',
-                             'narrative_versions', 'compact_turn_commits']}
+                             'narrative_versions', 'delta_progress']}
 
 
 @pytest.mark.parametrize('bad,reason', [('old', 'anchor_not_in_segment'), ('missing', 'anchor_required'),
@@ -93,9 +93,9 @@ def test_exhausted_repair_is_failed_retryable_and_does_not_reimport_or_republish
     assert status['state'] == 'failed' and status['retryable']
     assert '阶段' in status['message']
     saved = inbox._read(Path(boundary['_path']))
-    assert saved['state'] == 'done' and saved.get('imported_cursor')
+    assert saved['state'] == 'claimed' and saved['imported_snapshot_id'] and saved['imported_cursor']
     before = counts(config)
-    assert before['narrative_versions'] == before['compact_turn_commits'] == 0
+    assert before['narrative_versions'] == before['delta_progress'] == 0
     with Store(config, read_only=True) as store:
         receipt = store.db.execute('SELECT * FROM compact_batches').fetchone()
         assert receipt['published_version'] is None and receipt['state'] == 'failed'
@@ -140,8 +140,8 @@ def test_failed_ledger_overrides_stale_done_receipt_and_retry_schedules(tmp_path
     config = setup(tmp_path, monkeypatch, transport)
     boundary = inbox.record(config, 'repair', 'PreCompact', str(make_source(tmp_path, 'repair')))
     maintain.run_chat(config, 'repair')
-    # Source ingestion is complete even though semantic publication failed.
-    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
+    saved = inbox._read(Path(boundary['_path']))
+    assert saved['state'] != 'done' and saved['imported_snapshot_id']
     with Store(config, read_only=True) as store:
         status = maintenance_status.read(config, 'repair', db=store.db)
     assert status['state'] == 'failed' and status['retryable']
@@ -153,6 +153,7 @@ def test_failed_ledger_overrides_stale_done_receipt_and_retry_schedules(tmp_path
     transport.recover = True
     monkeypatch.setattr(Store, '_import_compact_capture', lambda *a: pytest.fail('legacy retry must reuse sources'))
     assert maintain.run_chat(config, 'repair')['state'] == 'done'
+    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
     with Store(config, read_only=True) as store:
         assert maintenance_status.read(config, 'repair', db=store.db)['state'] == 'done'
         assert store.db.execute('SELECT count(*) FROM narrative_versions').fetchone()[0] == 1
@@ -284,7 +285,7 @@ def test_eleven_turn_five_topic_repair_publishes_exactly_one_complete_version(tm
         body = json.loads(versions[0][0])
         assert len(body['phases']) == len(body['items']) == 5
         assert len(body['transitions']) == 4
-        assert store.db.execute('SELECT count(*) FROM compact_turn_commits').fetchone()[0] == 11
+        assert store.db.execute('SELECT turn_count FROM compact_batches').fetchone()[0] == 11
 
 
 def test_imported_failure_retry_budget_does_not_block_a_later_success(tmp_path, monkeypatch):
@@ -310,7 +311,7 @@ def test_phase_anchor_requires_user_evidence_inside_its_segment():
     payload = dict(active_items=[], turns=[dict(index=0), dict(index=1)])
     output = phases(payload)
     output['changes'][1]['turn_indexes'] = [0, 1]
-    output = compact_model.validate(output, [0, 1], set(), require_current=True)
+    output = compact_model.validate(output, [0, 1], set())
     with pytest.raises(ValueError, match='compact_new_phase_requires_user_objective') as error:
         apply_compact(empty(), output, turns, [], 'assistant-only-phase')
     assert error.value.details['reason'] == 'anchor_user_evidence_missing_in_segment'
@@ -335,5 +336,6 @@ def test_runtime_preflight_failure_records_zero_model_calls_and_stays_retryable(
         run = json.loads(batch['model_runs_json'])[0]
         assert run['calls'] == 0 and run['runtime'] == 'app-server'
         assert store.db.execute('SELECT count(*) FROM narrative_versions').fetchone()[0] == 0
-    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
+    saved = inbox._read(Path(boundary['_path']))
+    assert saved['state'] == 'claimed' and saved['imported_snapshot_id']
     assert maintenance_status.read(config, 'auth')['retryable']

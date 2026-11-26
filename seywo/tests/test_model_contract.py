@@ -211,7 +211,7 @@ def test_default_function_backend_receives_only_indexed_wire(setup):
         FunctionBackend(options.backend, transport).complete({"backend": options.backend})
 
 
-def test_old_policy_cannot_be_reclaimed_and_new_target_shares_spend(setup):
+def test_new_target_does_not_inherit_an_obsolete_jobs_limits_or_usage(setup):
     store, engine, options, *_ = setup
     old = engine.prepare("chat", options, Limits(call_count=1))["job_id"]
     claim = engine.claim(old, backend=options.backend)
@@ -225,15 +225,10 @@ def test_old_policy_cannot_be_reclaimed_and_new_target_shares_spend(setup):
     old_json = store.db.execute("SELECT request_json FROM understanding_tasks WHERE id=?", (claim["task_id"],)).fetchone()[0]
     new = engine.prepare("chat", options)["job_id"]
     assert old != new
-    assert engine.claim(new, backend=options.backend)["state"] == "waiting_budget"
-    assert engine.claim(old, backend=options.backend)["state"] == "retired_policy"
-    assert engine.status(new)["usage"]["call_count"] == 1
-    assert engine.status(new)["limits"]["call_count"] == 1
+    assert engine.status(new)["usage"]["call_count"] == 0
+    assert engine.status(old)["usage"]["call_count"] == 1
+    assert engine.claim(new, backend=options.backend)["state"] == "request"
     assert store.db.execute("SELECT request_json FROM understanding_tasks WHERE id=?", (claim["task_id"],)).fetchone()[0] == old_json
-    # Late reported usage still affects the shared owner, but cannot publish.
-    engine.submit(claim["attempt_id"], backend=options.backend, output={}, usage={"input_tokens": 53, "output_tokens": 23})
-    assert engine.status(new)["usage"]["input_tokens"] == 53
-    assert engine.status(new)["usage"]["output_tokens"] == 23
 
 
 def test_empty_incremental_b_keeps_history_locks_and_creates_no_spurious_review(setup):
@@ -460,8 +455,7 @@ def test_merge_cannot_collapse_requests_and_observed_results(setup, different):
 
 
 @pytest.mark.parametrize("old_policy", ["seywo-stop-4", "seywo-stop-5", "seywo-stop-6"])
-def test_new_step_guidance_preserves_frozen_organization_wires(setup, old_policy):
-    """New instructions cannot invalidate a saved request or change its indexes."""
+def test_only_current_organization_policy_can_freeze_a_request(setup, old_policy):
     store, engine, job, service, _, _, _ = publish(setup)
     service.prepare(job)
     claim = engine.claim(job, backend=setup[2].backend)
@@ -470,17 +464,11 @@ def test_new_step_guidance_preserves_frozen_organization_wires(setup, old_policy
     old = {k: v for k, v in stored(store, claim).items()
            if k not in {"indexed", "input_fingerprint"}}
     old.update(organization_policy=old_policy, semantic_stop_policy="seywo-stop-intent-2")
-    old = freeze(old)
-    frozen_wire = model_request(old)
-    current = freeze({**{k: v for k, v in old.items()
-                        if k not in {"indexed", "input_fingerprint"}},
-                      "organization_policy": "seywo-stop-8"})
-    assert model_request(old) == frozen_wire
+    with pytest.raises(ValueError, match='organization_policy_unsupported'):
+        freeze(old)
+    current = freeze({**old, 'organization_policy': 'seywo-stop-8'})
     assert "omission retains the old list" in model_request(current)["output_schema"]["overview"]["next_step_indexes"]
-    assert "same work identity" not in frozen_wire["rules"]
     assert "same work identity" in model_request(current)["rules"]
-    if old_policy != "seywo-stop-6":
-        assert frozen_wire["output_schema"]["overview"]["next_step_indexes"] == "action/next_step/goal int[] only"
     # Explicit [] clears a stale step; absence still preserves a delta by contract.
     output = hydrate({"overview": {"next_step_indexes": []}}, current)
     from seywo.narrative_contract import validate_output
@@ -566,12 +554,13 @@ def test_locked_item_still_rejects_mismatched_keep(setup):
 
 
 @pytest.mark.parametrize("policy", ["seywo-stop-6", "seywo-stop-7"])
-def test_old_semantic_policy_keeps_legacy_keep_behavior(setup, policy):
+def test_old_organization_policy_is_rejected(setup, policy):
     private, incoming_index = organize_input(setup, policy=policy)
     incoming = next(i for i in private["incoming"])
     incoming["item"]["title"] = "继续调查新的动作"
     incoming["item"]["content"] = "另一项动作"
-    assert keep_output(frozen(private), incoming_index)["items"][0]["title"] == private["previous"]["items"][0]["title"]
+    with pytest.raises(ValueError, match='organization_policy_unsupported'):
+        frozen(private)
 
 
 def test_organize_accepts_verbatim_echoed_preamble():

@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from seywo import inbox, maintain
 from seywo.store import Store
 from seywo.config import initialize, load_config
@@ -61,6 +63,109 @@ def test_midturn_compact_defers_and_later_submits_complete_question_answer(tmp_p
     assert transport.payloads[0]['turns'] == [
         {'index': 0, 'user': '检查 Hook 是否就绪', 'assistant': '四个 Hook 已就绪，可以验收'}]
     assert run(config, source)['calls'] == 0
+
+
+def test_native_phase_seals_stop_before_terminal_and_excludes_commentary(tmp_path, monkeypatch):
+    config, transport = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    note = rows[-1]['payload']
+    note['phase'] = note.pop('channel')
+    assert run(config, write_source(tmp_path, rows))['deferred_turn']
+    final = message('核验完成', 'assistant')
+    final['payload'].update(phase='final_answer')
+    rows.append(final)
+    source = write_source(tmp_path, rows)
+    inbox.record(config, 'live-chat', 'Stop', str(source))
+    result = maintain.run_chat(config, 'live-chat')
+    assert result['calls'] == 1 and not result['deferred_turn']
+    assert transport.payloads[0]['turns'] == [{'index': 0, 'user': '检查 Hook 是否就绪', 'assistant': '核验完成'}]
+    rows.append({'type':'event_msg','payload':{'type':'task_complete','turn_id':'t1'}})
+    assert run(config, write_source(tmp_path, rows))['calls'] == 0
+
+
+def test_late_short_capture_cannot_replace_longer_head(tmp_path, monkeypatch):
+    config, _ = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    rows[-1]['payload']['phase'] = rows[-1]['payload'].pop('channel')
+    final = message('完成检查', 'assistant')
+    final['payload']['phase'] = 'final_answer'
+    source = write_source(tmp_path, rows)
+    with Store(config) as store:
+        path, manifest = store.capture_source(source, 'live-chat', dialogue=True)
+        write_source(tmp_path, rows + [final])
+        head = store.import_compact(source, 'live-chat', str(source), dialogue=True)
+        late = store._import_compact_capture(path, manifest, 'live-chat', str(source))
+        assert late['snapshot_id'] == head['snapshot_id'] and late['inserted_fragments'] == 0
+        assert store.import_compact(source, 'live-chat', str(source), dialogue=True)['snapshot_id'] == head['snapshot_id']
+        assert store.db.execute('SELECT count(*) FROM source_snapshots').fetchone()[0] == 1
+        obsolete = {**manifest, 'format': 'dialogue-v1'}
+        path.write_text(json.dumps(obsolete))
+        with pytest.raises(ValueError, match='source_capture_format_unsupported'):
+            store._import_compact_capture(path, obsolete, 'live-chat', str(source))
+        assert store.db.execute('SELECT head_snapshot FROM source_segments').fetchone()[0] == head['snapshot_id']
+
+
+@pytest.mark.parametrize(('dialogue', 'append'), [(True, False), (True, True), (False, False)])
+def test_old_projection_is_rejected_without_rebinding(tmp_path, monkeypatch, dialogue, append):
+    from seywo import projection, store as storage
+    from seywo.compact_turns import closed_rows
+
+    config, _ = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    final = message('完成检查', 'assistant')
+    final['payload']['phase'] = 'final_answer'
+    rows.append(final)
+    source = write_source(tmp_path, rows)
+    with Store(config) as store:
+        with monkeypatch.context() as old:
+            old.setattr(storage, 'VERSION', 'codex-safe-v5')
+            old.setattr(projection, 'message_channel', lambda p: p.get('channel'))
+            first = store.import_compact(source, 'live-chat', str(source))
+            assert closed_rows(store, 'live-chat', None)[1]
+        if append:
+            write_source(tmp_path, rows + [{'type': 'event_msg', 'payload': {'type': 'token_count'}}])
+        def recapture():
+            return store.import_compact(source, 'live-chat', str(source), dialogue=dialogue)
+        with pytest.raises(ValueError, match='source_capture_format_unsupported'):
+            recapture()
+        assert store.db.execute('SELECT head_snapshot FROM source_segments').fetchone()[0] == first['snapshot_id']
+
+
+def test_retry_recaptures_after_source_owner_corrected(tmp_path, monkeypatch):
+    from seywo import hook, maintenance_control, maintenance_status
+
+    config, transport = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    source = write_source(tmp_path, rows)
+    assert run(config, source)['deferred_turn']
+    rows[0]['payload']['cwd'] = str(tmp_path.parent)
+    write_source(tmp_path, rows)
+    spawned = []
+    monkeypatch.setattr(hook, 'spawn', lambda *args: spawned.append(args) or True)
+    for _ in range(2):
+        rejected = maintenance_control.retry(config, 'live-chat')
+        assert not rejected['accepted'] and not spawned
+        assert rejected['maintenance']['message'] == maintenance_status.REASONS['source_project_unverified']
+    rows[0]['payload']['cwd'] = str(tmp_path)
+    final = message('核验完成', 'assistant')
+    final['payload']['phase'] = 'final_answer'
+    write_source(tmp_path, rows + [final])
+    assert maintenance_control.retry(config, 'live-chat')['accepted']
+    assert maintain.run_chat(config, 'live-chat')['state'] == 'done'
+    assert maintenance_status.read(config, 'live-chat')['state'] == 'done' and transport.calls == 1
+
+
+def test_retry_reports_replaced_chat_separately_from_missing_file(tmp_path, monkeypatch):
+    from seywo import maintenance_control, maintenance_status
+    config, _ = configured(tmp_path, monkeypatch)
+    rows = native_turn(tmp_path)
+    source = write_source(tmp_path, rows)
+    assert run(config, source)['deferred_turn']
+    rows[0]['payload']['id'] = 'other-chat'
+    write_source(tmp_path, rows)
+    result = maintenance_control.retry(config, 'live-chat')
+    assert not result['accepted']
+    assert result['maintenance']['message'] == maintenance_status.REASONS['chat_identity_unresolved']
 
 
 def test_legacy_cursor_inside_turn_rehydrates_original_question(tmp_path, monkeypatch):
@@ -141,16 +246,10 @@ def test_unterminated_final_record_never_seals_the_turn(tmp_path, monkeypatch):
     assert fake.payloads[0]['turns'][0]['assistant'] == '完整的最终结论'
 
 
-def test_old_midturn_cursor_rehydrates_question_on_abort_without_new_visible_body(tmp_path, monkeypatch):
-    from seywo.store import Store
+def test_abort_without_new_visible_body_seals_pending_question(tmp_path, monkeypatch):
     config, fake = configured(tmp_path, monkeypatch)
     rows = native_turn(tmp_path)
-    run(config, write_source(tmp_path, rows))
-    with Store(config) as store:
-        last = store.db.execute('SELECT ordinal,max(record_no) FROM current_sources').fetchone()
-        store.db.execute('INSERT OR REPLACE INTO delta_progress VALUES(?,?,?,?)',
-                         ('live-chat', json.dumps(list(last)), 0, 1))
-        store.db.commit()
+    assert run(config, write_source(tmp_path, rows))['deferred_turn']
     rows.append({'type': 'event_msg', 'payload': {'type': 'turn_aborted', 'turn_id': 't1'}})
     report = run(config, write_source(tmp_path, rows))
     assert report['calls'] == 1
@@ -191,7 +290,7 @@ def test_terminal_only_after_committed_abort_does_not_repeat_user_request(tmp_pa
     assert fake.calls == 1
 
 
-def test_lifecycle_projection_upgrade_reuses_unchanged_body_payloads(tmp_path, monkeypatch):
+def test_explicit_import_preserves_unsupported_source_payloads(tmp_path, monkeypatch):
     from seywo import store as storage
     from seywo.store import Store
     config, _ = configured(tmp_path, monkeypatch)
@@ -213,7 +312,8 @@ def test_lifecycle_projection_upgrade_reuses_unchanged_body_payloads(tmp_path, m
             body_payloads = {r['event_id']: r['payload_id'] for r in store.db.execute(
                 "SELECT event_id,payload_id FROM current_sources WHERE kind='message'")}
     with Store(config) as store:
-        store.import_source(source, 'live-chat', 0)
+        with pytest.raises(ValueError, match='source_capture_format_unsupported'):
+            store.import_source(source, 'live-chat', 0)
         after = {r['event_id']: r['payload_id'] for r in store.db.execute(
             "SELECT event_id,payload_id FROM current_sources WHERE kind='message'")}
         assert after == body_payloads

@@ -11,11 +11,11 @@ from uuid import uuid4
 from .sqlite_paths import sqlite_uri
 from .current_schema import DDL
 from .admission import require_human, transcript_meta
-from .project_scope import source_belongs_to_project
+from .project_scope import SourceOwnerMismatch, source_belongs_to_project
 from .projection import VERSION, assistant_body_hash, compact_body_hash, project, search_tokens
 
 APPLICATION_ID = 0x5345574F
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 MAX_LINE_BYTES = 16 * 1024 * 1024
 
 
@@ -107,6 +107,14 @@ class Store:
                 self.db.execute("BEGIN IMMEDIATE")
                 yield
 
+    def has_admitted_source(self, chat_id):
+        """An identity row alone is not evidence: imports stage it before validation."""
+        return self.db.execute(
+            'SELECT 1 FROM chats c JOIN source_segments s ON s.chat_id=c.id '
+            'WHERE c.id=? AND c.project_id=? AND s.head_snapshot IS NOT NULL LIMIT 1',
+            (chat_id, self.config['project_id']),
+        ).fetchone() is not None
+
     def require_human_chat(self, chat_id):
         """Block known internal sources imported before admission was enforced.
 
@@ -115,6 +123,27 @@ class Store:
         """
         for row in self.db.execute("SELECT path FROM source_segments WHERE chat_id=?", (chat_id,)):
             require_human(transcript_meta(row["path"]))
+
+    def _require_source_owner(self, meta):
+        cwd = meta.get('cwd')
+        if not isinstance(cwd, str) or not cwd or not source_belongs_to_project(
+            cwd, Path(self.config['_path']).parent.parent,
+            has_history=lambda: self.has_admitted_source(meta['id']),
+        ):
+            raise SourceOwnerMismatch('source cwd differs from the bound project root')
+
+    def capture_source(self, path, chat_id, *, dialogue):
+        from .archive import content_capture
+
+        def admit(record):
+            if not (isinstance(record, dict) and record.get('type') == 'session_meta'
+                    and isinstance(meta := record.get('payload'), dict) and isinstance(meta.get('id'), str)):
+                raise ValueError('first record must identify the explicitly selected chat')
+            self._require_source_owner(meta)
+            require_human(meta)
+
+        folder = Path(self.config['_path']).parent / 'inbox' / 'live'
+        return content_capture(path, folder, chat_id, dialogue=dialogue, admit=admit)
 
     def import_source(self, path: Path, chat_id: str, ordinal: int, *, stream=None) -> dict:
         with self._transaction():
@@ -149,6 +178,10 @@ class Store:
                     prior = mapped
             if prior and (prior["chat_id"] != chat_id or prior["ordinal"] != ordinal):
                 raise ValueError("source binding/order cannot change implicitly")
+            if prior and prior['head_snapshot'] and self.db.execute(
+                'SELECT 1 FROM source_snapshots WHERE id=? AND (projection_version<>? OR dialogue<>?)',
+                (prior['head_snapshot'], VERSION, dialogue)).fetchone():
+                raise ValueError('source_capture_format_unsupported')
             segment_id = prior["id"] if prior else uuid4().hex
             if not prior:
                 self.db.execute("INSERT INTO source_segments VALUES(?,?,?,?,NULL)", (segment_id, chat_id, str(path), ordinal))
@@ -166,7 +199,7 @@ class Store:
                     "FROM snapshot_fragments f JOIN source_events e ON e.id=f.event_id WHERE f.snapshot_id=?",
                     (prior["head_snapshot"],))}
             snapshot_id = uuid4().hex
-            self.db.execute("INSERT INTO source_snapshots VALUES(?,?,?,0,0,?)", (snapshot_id, segment_id, snapshot_id, VERSION))
+            self.db.execute("INSERT INTO source_snapshots VALUES(?,?,?,0,0,?,?)", (snapshot_id, segment_id, snapshot_id, VERSION, dialogue))
             previous = self.db.execute(
                 "SELECT turn_id,root_turn_id FROM current_sources WHERE chat_id=? AND ordinal<? AND turn_id IS NOT NULL "
                 "ORDER BY ordinal DESC,record_no DESC LIMIT 1", (chat_id, ordinal)).fetchone()
@@ -206,9 +239,7 @@ class Store:
                     if record.get("type") != "session_meta" or not isinstance(meta, dict) or meta.get("id") != chat_id:
                         raise ValueError("first record must identify the explicitly selected chat")
                     require_human(meta)
-                    cwd = meta.get("cwd")
-                    if cwd and not source_belongs_to_project(cwd, self.config["project_root"]):
-                        raise ValueError("source cwd differs from the bound project root")
+                    self._require_source_owner(meta)
                     metadata_seen = True
                 elif record.get("type") == "session_meta":
                     raise ValueError("multiple session identities in one physical source")
@@ -305,10 +336,9 @@ class Store:
 
     def import_compact(self, path, chat_id, transcript, *, dialogue=False):
         """Replay is inert; only verified append prefixes reuse an ordinal."""
-        from .archive import content_capture
         from .locking import file_lock
         with file_lock(Path(self.config["_path"]).parent / "inbox" / ".lock"):
-            path, manifest = content_capture(path, Path(self.config["_path"]).parent / "inbox" / "live", chat_id, dialogue=dialogue)
+            path, manifest = self.capture_source(path, chat_id, dialogue=dialogue)
             return self._import_compact_capture(path, manifest, chat_id, transcript)
 
     def _import_compact_capture(self, path, manifest, chat_id, transcript):
@@ -317,24 +347,26 @@ class Store:
         with self._transaction():
             if self.db.execute("SELECT 1 FROM tombstones WHERE chat_id=?", (chat_id,)).fetchone():
                 raise ValueError("chat was deleted; implicit reimport is prohibited")
+            last = self.db.execute("SELECT coalesce(max(ordinal),-1) FROM source_segments WHERE chat_id=?", (chat_id,)).fetchone()[0]
+            mapped = self.db.execute(
+                "SELECT s.ordinal,ss.*,s.id segment FROM source_segments s JOIN compact_streams m ON s.id=m.segment_id "
+                "JOIN source_snapshots ss ON ss.id=s.head_snapshot WHERE m.chat_id=? AND m.transcript=?",
+                (chat_id, transcript)).fetchone()
+            latest = mapped is not None and mapped['ordinal'] == last
+            dialogue = is_dialogue(path)
+            if mapped and (mapped['projection_version'] != VERSION or mapped['dialogue'] != dialogue):
+                raise ValueError('source_capture_format_unsupported')
             duplicate = self.db.execute(
                 "SELECT ss.*,s.id segment FROM source_snapshots ss JOIN source_segments s ON s.id=ss.segment_id "
-                "WHERE s.chat_id=? AND ss.sha256=? AND ss.projection_version=?",
-                (chat_id, identity[0], VERSION)).fetchone()
+                "WHERE s.chat_id=? AND ss.sha256=? AND ss.projection_version=? AND ss.dialogue=?",
+                (chat_id, identity[0], VERSION, dialogue)).fetchone()
             if duplicate:
                 return {"chat_id": chat_id, "segment_id": duplicate["segment"], "snapshot_id": duplicate["id"],
                         "records": duplicate["records"], "source_sha256": identity[0], "reused_snapshot": True,
                         "semantic_done": False, "inserted_fragments": 0}
-            last = self.db.execute("SELECT coalesce(max(ordinal),-1) FROM source_segments WHERE chat_id=?", (chat_id,)).fetchone()[0]
-            mapped = self.db.execute(
-                "SELECT s.ordinal,ss.byte_count,ss.sha256,ss.id,ss.records,s.id segment,a.path FROM source_segments s JOIN compact_streams m ON s.id=m.segment_id "
-                "LEFT JOIN source_archives a ON a.snapshot_id=s.head_snapshot "
-                "JOIN source_snapshots ss ON ss.id=s.head_snapshot WHERE m.chat_id=? AND m.transcript=?",
-                (chat_id, transcript)).fetchone()
-            ordinal = last + 1
+            ordinal = last if latest and identity[0] == mapped['sha256'] else last + 1
             preserve_prefix = 0
-            dialogue = is_dialogue(path)
-            if mapped and mapped["ordinal"] == last and identity[1] > mapped["byte_count"]:
+            if latest and identity[1] > mapped["byte_count"]:
                 prefix = hashlib.sha256()
                 remaining = mapped["byte_count"]
                 with open_source(path) as handle:
@@ -348,27 +380,25 @@ class Store:
                     ordinal = last
                     if dialogue:
                         preserve_prefix = mapped["records"]
-            if mapped and mapped["ordinal"] == last and ordinal != last and dialogue:
+            if latest and ordinal != last and dialogue:
                 incomplete = self.db.execute(
                     "SELECT 1 FROM snapshot_fragments f JOIN source_events e ON e.id=f.event_id "
                     "JOIN coverage_ranges c ON c.fragment_id=f.row_id "
                     "WHERE f.snapshot_id=? AND e.record_no=? AND c.reason='unterminated_record'",
                     (mapped["id"], mapped["records"])).fetchone() is not None
-                if incomplete or not mapped["path"] or not is_dialogue(mapped["path"]):
-                    match = self._dialogue_prefix(path, mapped, incomplete)
-                    if match == "replay":
-                        return {"chat_id": chat_id, "segment_id": mapped["segment"], "snapshot_id": mapped["id"],
-                                "records": mapped["records"], "source_sha256": mapped["sha256"], "reused_snapshot": True,
-                                "semantic_done": False, "inserted_fragments": 0}
-                    if match == "append":
-                        ordinal = last
-                        preserve_prefix = mapped["records"] - int(incomplete)
+                match = self._dialogue_prefix(path, mapped, incomplete)
+                if match in {'stale', 'replay'}:
+                    return {'chat_id': chat_id, 'segment_id': mapped['segment'], 'snapshot_id': mapped['id'],
+                            'records': mapped['records'], 'source_sha256': mapped['sha256'], 'reused_snapshot': True,
+                            'semantic_done': False, 'inserted_fragments': 0}
+                if incomplete and match == 'append':
+                    ordinal = last
             return self._import_source(path, chat_id, ordinal, stream=transcript, identity=identity, preserve_prefix=preserve_prefix)
 
     def _dialogue_prefix(self, path, mapped, incomplete):
         from .archive import open_source
         from .dialogue_capture import coordinates
-        # The complete native records define the stable prefix across formats.
+        # Compare native coordinates when normalized captures differ in length.
         # An unterminated tail was never eligible for semantic consumption.
         count = mapped["records"] - int(incomplete)
         if not count:
@@ -382,7 +412,7 @@ class Store:
             for old in prior:
                 raw = handle.readline(MAX_LINE_BYTES + 1)
                 if not raw:
-                    return None
+                    return 'stale' if matched else None
                 start, end, sha, _ = coordinates(json.loads(raw), end)
                 if (sha, start, end) != tuple(old):
                     return None

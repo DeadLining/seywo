@@ -67,7 +67,7 @@ def test_busy_sibling_does_not_lose_boundary_arriving_during_model_call(tmp_path
     assert not inbox.pending(config, 'live-chat')
     assert '第二段' in transport.payloads[-1]['turns'][0]['user']
     with Store(config, read_only=True) as store:
-        assert store.db.execute('SELECT count(*) FROM compact_turn_commits WHERE chat_id=?', ('live-chat',)).fetchone()[0] == 2
+        assert store.db.execute('SELECT windows FROM delta_progress WHERE chat_id=?', ('live-chat',)).fetchone()[0] == 2
 
 
 def test_boundary_in_final_exit_check_is_processed_before_unlock(tmp_path, monkeypatch):

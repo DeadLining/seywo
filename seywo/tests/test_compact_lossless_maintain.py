@@ -51,7 +51,7 @@ def test_long_native_turn_is_complete_condensed_and_correctly_cited(tmp_path, mo
         assert len(body['items']) == 1
         refs = body['items'][0]['evidence']
         assert sum(ref['end'] - ref['start'] for ref in refs) == len(user)
-        assert store.db.execute('SELECT count(*) FROM compact_turn_commits WHERE chat_id=?', ('long',)).fetchone()[0] == 1
+        assert store.db.execute('SELECT windows FROM delta_progress WHERE chat_id=?', ('long',)).fetchone()[0] == 1
         receipt = store.db.execute('SELECT turn_count,model_calls FROM compact_batches WHERE chat_id=?', ('long',)).fetchone()
         assert tuple(receipt) == (1, transport.calls)
     # Repeated maintenance sees the committed native turn, not new fragments.
@@ -79,9 +79,10 @@ def test_later_slice_failure_publishes_nothing_then_retry_publishes_once(tmp_pat
     # The source was durably imported before semantic extraction failed.  It is
     # therefore complete in the source inbox and retry starts from the
     # semantic cursor without importing the transcript again.
-    assert inbox._read(Path(boundary['_path']))['state'] == 'done'
+    saved = inbox._read(Path(boundary['_path']))
+    assert saved['state'] == 'claimed' and saved['imported_snapshot_id']
     with Store(config, read_only=True) as store:
-        for table in ['narrative_versions', 'delta_progress', 'compact_turn_commits']:
+        for table in ['narrative_versions', 'delta_progress']:
             assert store.db.execute(f'SELECT count(*) FROM {table} WHERE chat_id=?', ('retry',)).fetchone()[0] == 0
     healthy = SequentialCompactTransport()
     monkeypatch.setattr(maintain, 'Transport', lambda *a, **kw: healthy)
@@ -91,4 +92,4 @@ def test_later_slice_failure_publishes_nothing_then_retry_publishes_once(tmp_pat
     assert ''.join(t['assistant'] for p in healthy.payloads for t in p['turns']) == assistant
     with Store(config, read_only=True) as store:
         assert store.db.execute('SELECT count(*) FROM narrative_versions WHERE chat_id=?', ('retry',)).fetchone()[0] == 1
-        assert store.db.execute('SELECT count(*) FROM compact_turn_commits WHERE chat_id=?', ('retry',)).fetchone()[0] == 1
+        assert store.db.execute('SELECT windows FROM delta_progress WHERE chat_id=?', ('retry',)).fetchone()[0] == 1

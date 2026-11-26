@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from seywo import inbox
 from seywo.archive import open_source
 from seywo.config import initialize, load_config
@@ -23,7 +25,7 @@ def message(role, text):
 def test_oversized_media_does_not_discard_neighbouring_text_or_change_coordinates(tmp_path):
     config = load_config(Path(initialize(tmp_path / "project")["config"]))
     source = tmp_path / "rollout.jsonl"
-    meta = wire("session_meta", {"id": "chat"})
+    meta = wire("session_meta", {"id": "chat", "cwd": config['project_root']})
     start = wire("event_msg", {"type": "task_started", "turn_id": "turn"})
     media = "A" * (17 * 1024 * 1024)
     mixed = wire("response_item", {"content": [
@@ -58,27 +60,23 @@ def test_oversized_media_does_not_discard_neighbouring_text_or_change_coordinate
         assert store.db.execute("SELECT json_extract(projection_json, '$.turn_event') FROM current_sources WHERE record_no=6").fetchone()[0] == "task_complete"
 
 
-def test_existing_raw_prefix_keeps_evidence_and_is_not_reimported(tmp_path):
+def test_stream_format_change_is_rejected_without_changing_evidence(tmp_path):
     config = load_config(Path(initialize(tmp_path / "project")["config"]))
     source = tmp_path / "rollout.jsonl"
-    first = wire("session_meta", {"id": "chat"}) + message("user", "original request") + wire(
+    first = wire("session_meta", {"id": "chat", "cwd": config['project_root']}) + message("user", "original request") + wire(
         "response_item", {"type": "function_call_output", "output": "previously indexed tool evidence"})
     source.write_bytes(first)
     with Store(config) as store:
         previous = store.import_compact(source, "chat", str(source))
         old_rows = [tuple(r) for r in store.db.execute("SELECT event_id,row_id,safe_text FROM current_sources ORDER BY record_no")]
-        replay = store.import_compact(source, "chat", str(source), dialogue=True)
-        assert replay["snapshot_id"] == previous["snapshot_id"]
-        assert replay["inserted_fragments"] == 0
+        with pytest.raises(ValueError, match='source_capture_format_unsupported'):
+            store.import_compact(source, 'chat', str(source), dialogue=True)
 
         source.write_bytes(first + message("user", "new request") + wire(
             "response_item", {"type": "function_call_output", "output": "new excluded tool evidence"}))
-        added = store.import_compact(source, "chat", str(source), dialogue=True)
-        assert added["segment_id"] == previous["segment_id"]
-        assert added["inserted_fragments"] == 2
+        with pytest.raises(ValueError, match='source_capture_format_unsupported'):
+            store.import_compact(source, 'chat', str(source), dialogue=True)
         current = [tuple(r) for r in store.db.execute("SELECT event_id,row_id,safe_text FROM current_sources ORDER BY record_no")]
-        assert current[:3] == old_rows
+        assert current == old_rows
         assert store.read(old_rows[-1][0], snapshot_id=previous["snapshot_id"])["text"] == old_rows[-1][-1]
-        assert [r[2] for r in current[3:]] == ["new request", ""]
-        assert store.import_compact(source, "chat", str(source), dialogue=True)["snapshot_id"] == added["snapshot_id"]
-        assert store.db.execute("SELECT count(*) FROM source_snapshots").fetchone()[0] == 2
+        assert store.db.execute("SELECT count(*) FROM source_snapshots").fetchone()[0] == 1

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "seywo"
-version = "0.5.6"
+version = "0.6.0"
 description = "See Your Work: independent, source-backed work narratives"
 requires-python = ">=3.11"
 dependencies = []

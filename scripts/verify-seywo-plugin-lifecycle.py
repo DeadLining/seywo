@@ -10,12 +10,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import select
 import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
+from seywo_protocol import PipeReader
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -40,7 +40,11 @@ def verify(host="codex"):
                 payload = json.loads(prompt.splitlines()[-1])
                 indexes = [turn['index'] for turn in payload['turns']]
                 text = json.dumps({'segments': [{'title': '插件独立运行', 'turn_indexes': indexes,
-                                  'action': 'continue'}], 'changes': [], 'focus_segment': 0, 'current': {'goal_indexes': [], 'question_indexes': [], 'next_step_indexes': []}}, ensure_ascii=False)
+                                  'action': 'continue', 'anchor_index': None}],
+                                  'changes': [{'operation': 'new', 'type': 'goal', 'title': '将内核放入插件',
+                                               'attribution': 'user', 'turn_indexes': [indexes[0]],
+                                               'target_index': None, 'merge_indexes': [], 'open': True}],
+                                  'current': {'goal_index': 0, 'priority_indexes': []}}, ensure_ascii=False)
             message = {'id': 'msg_fixture', 'type': 'message', 'role': 'assistant',
                        'status': 'completed', 'content': [{'type': 'output_text', 'text': text, 'annotations': []}]}
             events = [
@@ -90,6 +94,7 @@ stream_max_retries = 0
             with (base / 'host.stderr').open('wb') as errors:
                 process = subprocess.Popen([host, 'app-server', '--stdio', '--enable', 'hooks'],
                     cwd=project, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+                reader = PipeReader(process.stdout)
 
                 def read(timeout):
                     nonlocal buffer
@@ -101,8 +106,8 @@ stream_max_retries = 0
                             if 'method' in row:
                                 notices.append(row)
                             return row
-                        if select.select([process.stdout], [], [], 0.2)[0]:
-                            chunk = os.read(process.stdout.fileno(), 65536)
+                        chunk = reader.read(0.2)
+                        if chunk is not None:
                             if not chunk:
                                 raise RuntimeError('Host exited')
                             buffer += chunk
@@ -131,7 +136,11 @@ stream_max_retries = 0
                     process.stdin.write(b'{"method":"initialized"}\n')
                     process.stdin.flush()
                     hooks = request('hooks/list', {'cwds': [str(project)]})['data'][0]['hooks']
-                    assert len(hooks) == 5
+                    hooks = [hook for hook in hooks if hook.get('pluginId') == 'seywo@seywo-local']
+                    declared = json.loads((installed / 'hooks.json').read_text())['hooks']
+                    expected = sorted(name[0].lower() + name[1:] for name in declared)
+                    actual = sorted(hook['eventName'] for hook in hooks)
+                    assert actual == expected, {'expected': expected, 'actual': actual}
                     # This isolated verifier reviews its own installed source.
                     for hook in hooks:
                         request('config/value/write', {'keyPath': 'hooks.state.' + json.dumps(hook['key']) + '.trusted_hash',
@@ -158,11 +167,12 @@ stream_max_retries = 0
                                 db.row_factory = sqlite3.Row
                                 ready = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='compact_batches'").fetchone()
                                 if ready:
-                                    found = [dict(row) for row in db.execute('SELECT state,turn_count,segment_count,model_calls,error_code FROM compact_batches')]
+                                    found = [dict(row) for row in db.execute('SELECT state,turn_count,segment_count,model_calls,error_code,published_version FROM compact_batches WHERE chat_id=?', (thread,))]
                         if found and any(row['state'] == 'done' for row in found):
                             break
                         time.sleep(0.2)
                     assert found and all(row['state'] == 'done' for row in found), found
+                    assert [row['published_version'] for row in found] == [1], found
                     runs = [row['params']['run'] for row in notices if row.get('method') == 'hook/completed']
                     assert {'preCompact', 'postCompact'} <= {row['eventName'] for row in runs if row['status'] == 'completed'}, runs
                     assert sum(row['model_calls'] for row in found) == 1, found

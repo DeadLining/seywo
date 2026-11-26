@@ -141,7 +141,7 @@ def test_open_unbound_project_is_renderable_without_backend_error(tmp_path):
     async def missing(_):
         raise ProjectRequired('unbound')
     server = FastMCP('test')
-    register_panel(server, missing)
+    register_panel(server, missing, lambda *a, **kw: pytest.fail('unbound project must not initialize'))
     async def check():
         result = await server.call_tool('seywo_open', {})
         assert result.structuredContent['state'] == 'project_required'
@@ -180,7 +180,7 @@ def test_open_existing_project_never_reinitializes_or_rewrites(tmp_path, monkeyp
     def forbidden(*args, **kwargs):
         pytest.fail('existing project must not initialize or enable hooks')
     monkeypatch.setattr('seywo.config.initialize', forbidden)
-    monkeypatch.setattr('seywo.plugin_ui.initialize', forbidden)
+    monkeypatch.setattr('seywo.plugin.initialize', forbidden)
     monkeypatch.setattr('seywo.config.enable_plugin_hook', forbidden)
     server = create_plugin_server(tmp_path)
     async def check():

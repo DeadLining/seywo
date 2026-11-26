@@ -18,15 +18,14 @@ def change(operation, title, target=None, *, opened=True, merges=()):
 def batch(changes, *, questions=(), anchor=None):
     return {"segments": [{"title": "账单审阅", "turn_indexes": [0],
                           "action": "continue", "anchor_index": anchor}],
-            "changes": changes, "focus_segment": 0,
-            "current": {"goal_indexes": [], "question_indexes": list(questions),
-                        "next_step_indexes": []}}
+            "changes": changes,
+            "current": {"goal_index": None, "priority_indexes": list(questions)}}
 
 
 def materialize(semantic, *, previous=None, catalog=(), task="index-regression"):
     text = "邮件调查仍待查。税额疑问已明确解决。"
     turns = [turn("indexes", text, "", source(99, "user", text, turn="indexes"))]
-    checked = validate(semantic, [0], {row["index"] for row in catalog}, require_current=True)
+    checked = validate(semantic, [0], {row["index"] for row in catalog})
     doc, added, touched = apply_compact(previous or empty(), checked, turns, list(catalog), task)
     return checked, doc, added, touched
 
@@ -36,9 +35,6 @@ def test_unbound_first_net_state_does_not_shift_later_virtual_target(first, firs
     semantic = batch([change(first, "邮件调查待查", opened=first_open),
                       change("new", "税额疑问待查"),
                       change("resolve", "税额疑问已解决", 1, opened=False)])
-    # Start with the old segment shape so this exposes identity corruption
-    # independently of adding anchor_index support.
-    semantic["segments"][0].pop("anchor_index")
     checked, doc, added, touched = materialize(semantic)
     assert checked["changes"][2]["target_index"] == 1
     assert checked["changes"][0]["operation"] == "new"
@@ -60,14 +56,12 @@ def test_normalized_first_item_has_one_shared_current_and_anchor_identity(operat
 
 def test_later_unbound_update_is_rejected_instead_of_creating_or_merging_an_item():
     semantic = batch([change("update", "邮件调查"), change("update", "税额调查")])
-    semantic["segments"][0].pop("anchor_index")
     with pytest.raises(ValueError, match="compact_target_required"):
         validate(semantic, [0], set())
 
 
 def test_resolve_open_true_is_rejected_before_first_item_normalization():
     semantic = batch([change("resolve", "邮件调查", opened=True)])
-    semantic["segments"][0].pop("anchor_index")
     with pytest.raises(ValueError, match="compact_resolve_must_close"):
         validate(semantic, [0], set())
 
@@ -76,7 +70,6 @@ def test_change_position_is_not_an_alias_for_a_virtual_item():
     # Change position 1 creates virtual item 5 after an update of historical item 4.
     semantic = batch([change("update", "邮件调查进展", 4), change("new", "税额疑问"),
                       change("resolve", "税额疑问已解决", 1, opened=False)])
-    semantic["segments"][0].pop("anchor_index")
     with pytest.raises(ValueError, match="compact_target_required"):
         validate(semantic, [0], {4})
 
@@ -85,7 +78,6 @@ def test_change_position_is_not_an_alias_for_a_virtual_item():
 def test_target_must_be_an_offered_integer_identity(bad_target):
     semantic = batch([change("new", "邮件调查"),
                       change("resolve", "调查已解决", bad_target, opened=False)])
-    semantic["segments"][0].pop("anchor_index")
     with pytest.raises(ValueError, match="compact_target_required"):
         validate(semantic, [0], set())
 
@@ -128,12 +120,16 @@ def test_current_cannot_reference_an_unoffered_or_noninteger_identity(bad_curren
         validate(batch([change("update", "邮件调查")], questions=[bad_current]), [0], set())
 
 
-@pytest.mark.parametrize("action", ["continue", "branch", "new_phase", "return"])
+@pytest.mark.parametrize("action", ["continue", "branch", "new_phase", "mainline"])
 @pytest.mark.parametrize("anchor", [None, 0, 4])
 def test_anchor_accepts_null_historical_or_new_identity(action, anchor):
     semantic = batch([change("new", "新调查")], anchor=anchor)
     semantic["segments"][0]["action"] = action
     active = {4} if anchor == 4 else set()
+    if action == 'new_phase' and anchor in (None, 4):
+        with pytest.raises(ValueError, match='compact_new_phase_requires_user_objective'):
+            validate(semantic, [0], active)
+        return
     result = validate(semantic, [0], active)
     assert result["segments"][0]["anchor_index"] == anchor
 
@@ -152,12 +148,12 @@ def test_branch_can_anchor_history_without_any_changes():
     assert result["segments"][0]["anchor_index"] == 4
 
 
-def test_legacy_segments_remain_accepted_without_mutating_the_caller():
+def test_missing_anchor_field_is_rejected_without_mutating_the_caller():
     semantic = batch([change("update", "邮件调查")])
     semantic["segments"][0].pop("anchor_index")
     original = deepcopy(semantic)
-    result = validate(semantic, [0], set())
-    assert result["changes"][0]["operation"] == "new"
+    with pytest.raises(ValueError, match='compact_invalid_segment_fields'):
+        validate(semantic, [0], set())
     assert semantic == original
 
 
@@ -187,7 +183,6 @@ def test_live_schema_leaves_final_focus_to_ordered_structural_replay():
 
 def test_new_output_without_legacy_focus_is_accepted_and_materializes_current():
     semantic = batch([change("new", "邮件调查")], questions=[0])
-    semantic.pop("focus_segment")
     checked, doc, added, touched = materialize(semantic)
     assert "focus_segment" not in checked
     assert doc["overview"]["open_question_ids"] == [doc["items"][0]["id"]]
@@ -195,18 +190,18 @@ def test_new_output_without_legacy_focus_is_accepted_and_materializes_current():
 
 
 @pytest.mark.parametrize("legacy_focus", [None, 0, 999, -1])
-def test_legacy_focus_is_only_type_checked_not_interpreted_as_an_index(legacy_focus):
+def test_obsolete_focus_is_rejected(legacy_focus):
     semantic = batch([change("new", "邮件调查")])
     semantic["focus_segment"] = legacy_focus
-    checked = validate(semantic, [0], set(), require_current=True)
-    assert checked["changes"][0]["title"] == "邮件调查"
+    with pytest.raises(ValueError, match='compact_invalid_fields'):
+        validate(semantic, [0], set())
 
 
 @pytest.mark.parametrize("legacy_focus", [True, False, 0.0, "0", [], {}])
 def test_legacy_focus_still_rejects_noninteger_nonnull_values(legacy_focus):
     semantic = batch([change("new", "邮件调查")])
     semantic["focus_segment"] = legacy_focus
-    with pytest.raises(ValueError, match="compact_invalid_focus"):
+    with pytest.raises(ValueError, match="compact_invalid_fields"):
         validate(semantic, [0], set())
 
 
@@ -228,7 +223,6 @@ def test_segments_cannot_reorder_or_interleave_the_source_turns(parts):
 @pytest.mark.parametrize("parts", [[[0, 1, 2, 3]], [[0], [1], [2, 3]], [[0, 1], [2, 3]]])
 def test_segments_are_an_ordered_contiguous_partition_of_provided_turns(parts):
     semantic = batch([])
-    semantic.pop("focus_segment")
     semantic["segments"] = [{"title": "调查过程", "action": "continue",
                              "turn_indexes": indexes, "anchor_index": None}
                             for indexes in parts]
@@ -258,7 +252,7 @@ def test_current_identity_shape_preserves_order_duplicates_and_caller(goal):
     semantic = batch([change("new", "上传故障")])
     semantic["current"] = {"goal_index": goal, "priority_indexes": [4, 0, 4, 0]}
     original = deepcopy(semantic)
-    checked = validate(semantic, [0], {0, 4}, require_current=True)
+    checked = validate(semantic, [0], {0, 4})
     assert checked["current"] == original["current"]
     assert semantic == original
 
@@ -279,7 +273,7 @@ def test_current_identity_shape_rejects_invalid_or_unknown_references(field, bad
     semantic["current"] = {"goal_index": None, "priority_indexes": []}
     semantic["current"][field] = bad
     with pytest.raises(ValueError, match="compact_invalid_current_indexes"):
-        validate(semantic, [0], set(), require_current=True)
+        validate(semantic, [0], set())
 
 
 @pytest.mark.parametrize("current", [
@@ -291,7 +285,7 @@ def test_current_shapes_cannot_be_partial_or_mixed(current):
     semantic = batch([])
     semantic["current"] = current
     with pytest.raises(ValueError, match="compact_invalid_current_fields"):
-        validate(semantic, [0], set(), require_current=True)
+        validate(semantic, [0], set())
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -301,7 +295,11 @@ def test_both_current_shapes_preserve_same_batch_targets_and_resolved_references
     current = ({"goal_indexes": [0], "question_indexes": [1, 0], "next_step_indexes": [1]}
                if legacy else {"goal_index": 0, "priority_indexes": [1, 0, 1]})
     semantic["current"] = current
-    checked = validate(semantic, [0], set(), require_current=True)
+    if legacy:
+        with pytest.raises(ValueError, match='compact_invalid_current_fields'):
+            validate(semantic, [0], set())
+        return
+    checked = validate(semantic, [0], set())
     assert checked["current"] == current  # Classification and resolved filtering belong to runtime.
     assert checked["changes"][2]["target_index"] == 1
     assert checked["changes"][0]["operation"] == "new"
@@ -313,7 +311,7 @@ def test_current_goal_identity_does_not_impose_a_goal_item_type(kind):
     item["type"] = kind
     semantic = batch([item])
     semantic["current"] = {"goal_index": 0, "priority_indexes": []}
-    assert validate(semantic, [0], set(), require_current=True)["current"]["goal_index"] == 0
+    assert validate(semantic, [0], set())["current"]["goal_index"] == 0
 
 
 def test_live_action_schema_uses_mainline_without_changing_internal_actions():
@@ -330,8 +328,11 @@ def test_live_mainline_canonicalizes_to_internal_return_without_mutating_caller(
     semantic["segments"][0]["action"] = "mainline"
     if legacy_segment:
         semantic["segments"][0].pop("anchor_index")
+        with pytest.raises(ValueError, match='compact_invalid_segment_fields'):
+            validate(semantic, [0], set())
+        return
     original = deepcopy(semantic)
-    checked = validate(semantic, [0], set(), require_current=True)
+    checked = validate(semantic, [0], set())
     assert checked["segments"][0]["action"] == "return"
     assert semantic == original
 

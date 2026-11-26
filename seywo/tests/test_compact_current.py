@@ -27,7 +27,7 @@ def history():
 def test_current_view_replaces_old_strings_without_destroying_history():
     doc = history()
     semantic = output(operation='resolve', title='Hook 已就绪', item_type='action', target_index=0)
-    semantic['current'] = {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [2]}
+    semantic['current'] = {"goal_index": 1, "priority_indexes": [2]}
     catalog = [{'index': n, **v} for n, v in enumerate(doc['items'])]
     turns = [turn('t', 'Hook 已就绪，接下来核验检索', '', source(1, 'user', 'Hook 已就绪，接下来核验检索'))]
     result, _, _ = apply_compact(doc, semantic, turns, catalog, 'current')
@@ -40,9 +40,9 @@ def test_current_view_replaces_old_strings_without_destroying_history():
 
 def test_explicit_current_can_leave_old_open_items_as_history():
     doc = history()
-    semantic = {'segments': [{'title': '插件验收', 'turn_indexes': [0], 'action': 'continue'}],
-                'changes': [], 'focus_segment': 0,
-                'current': {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [2]}}
+    semantic = {'segments': [{'title': '插件验收', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
+                'changes': [],
+                'current': {"goal_index": 1, "priority_indexes": [2]}}
     turns = [turn('t', '重点是插件验收', '', source(1, 'user', '重点是插件验收'))]
     result, _, _ = apply_compact(doc, semantic, turns,
         [{'index': n, **v} for n, v in enumerate(doc['items'])], 'view-only')
@@ -63,9 +63,9 @@ def test_catalog_does_not_starve_recent_relevant_history_behind_old_todos():
 
 
 @pytest.mark.parametrize('current', [
-    {'goal_indexes': [99], 'question_indexes': [], 'next_step_indexes': []},
+    {"goal_index": 99, "priority_indexes": []},
     {'goal_indexes': [0, 0], 'question_indexes': [], 'next_step_indexes': []},
-    {'goal_indexes': [], 'question_indexes': [], 'next_step_indexes': list(range(4))},
+    {"goal_index": None, "priority_indexes": list(range(7))},
 ])
 def test_invalid_current_indexes_fail_at_contract_boundary(current):
     semantic = output()
@@ -84,9 +84,9 @@ def test_schema_is_sent_once_through_structured_output_not_duplicated_in_prompt(
 
 def test_current_view_respects_manual_overview_selection():
     doc = history()
-    semantic = {'segments': [{'title': '插件验收', 'turn_indexes': [0], 'action': 'continue'}],
-                'changes': [], 'focus_segment': 0,
-                'current': {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [2]}}
+    semantic = {'segments': [{'title': '插件验收', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
+                'changes': [],
+                'current': {"goal_index": 1, "priority_indexes": [2]}}
     result, _, _ = apply_compact(doc, semantic,
         [turn('t', '验收检索', '', source(1, 'user', '验收检索'))],
         [{'index': n, **v} for n, v in enumerate(doc['items'])], 'locked',
@@ -97,14 +97,14 @@ def test_current_view_respects_manual_overview_selection():
 def test_new_virtual_indexes_do_not_collide_with_historical_targets():
     doc = history()
     semantic = {
-        'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
+        'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
         'changes': [
             {'operation': 'new', 'title': '新事项', 'type': 'action', 'attribution': 'user',
              'turn_indexes': [0], 'target_index': None, 'open': True, 'merge_indexes': []},
             {'operation': 'update', 'title': '新事项补充', 'type': 'action', 'attribution': 'user',
              'turn_indexes': [0], 'target_index': 3, 'open': True, 'merge_indexes': []}],
-        'focus_segment': 0,
-        'current': {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [3]}}
+
+        'current': {"goal_index": 1, "priority_indexes": [3]}}
     validated = validate(semantic, [0], {0, 1, 2})
     result, added, touched = apply_compact(doc, validated,
         [turn('t', '新增事项并补充要求', '', source(1, 'user', '新增事项并补充要求'))],
@@ -119,7 +119,7 @@ def test_completion_of_one_subtask_cannot_override_model_open_composite_status()
     doc = history()
     semantic = output(operation='update', title='Hook已完成，依赖安装待验证',
                       item_type='action', attribution='assistant', target_index=0, open=True)
-    semantic['current'] = {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [0]}
+    semantic['current'] = {"goal_index": 1, "priority_indexes": [0]}
     text = '已实现 Hook 接入，依赖自动安装还没验证'
     result, _, _ = apply_compact(doc, semantic,
         [turn('t', '', text, source(1, 'assistant', text))],
@@ -138,22 +138,22 @@ def test_relevance_selection_reserves_the_current_goal():
 
 def test_chronological_actions_select_current_line_and_manual_focus_has_precedence():
     semantic = {
-        'segments': [{'title': '主线', 'turn_indexes': [0], 'action': 'continue'},
-                     {'title': '排查支线', 'turn_indexes': [1], 'action': 'branch'}],
+        'segments': [{'title': '主线', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None},
+                     {'title': '排查支线', 'turn_indexes': [1], 'action': 'branch', "anchor_index": None}],
         'changes': [{'operation': 'new', 'title': title, 'type': 'goal', 'attribution': 'user',
                      'turn_indexes': [n], 'target_index': None, 'open': True, 'merge_indexes': []}
                     for n, title in enumerate(['主线目标', '支线目标'])],
-        'focus_segment': 0,
-        'current': {'goal_indexes': [0], 'question_indexes': [], 'next_step_indexes': []}}
+
+        'current': {"goal_index": 0, "priority_indexes": []}}
     turns = [turn('t1', '主线目标', '', source(1, 'user', '主线目标')),
              turn('t2', '排查支线', '', source(2, 'user', '排查支线', turn='t2'))]
     doc, _, _ = apply_compact(empty(), semantic, turns, [], 'focus')
     assert len(doc['branches']) == 1
     assert doc['overview']['focus']['branch_id'] == doc['branches'][0]['id']
     prior = history()
-    focused = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
-        'changes': [], 'focus_segment': 0,
-        'current': {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [2]}}
+    focused = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
+        'changes': [],
+        'current': {"goal_index": 1, "priority_indexes": [2]}}
     locked_focus = {'phase_id': 'old-phase', 'branch_id': None}
     revised, _, _ = apply_compact(prior, focused, turns[:1],
         [{'index': n, **v} for n, v in enumerate(prior['items'])], 'locked-focus',
@@ -162,15 +162,17 @@ def test_chronological_actions_select_current_line_and_manual_focus_has_preceden
 
 
 def test_new_model_boundary_cannot_silently_fall_back_to_legacy_current_view():
+    semantic = output()
+    del semantic['current']
     with pytest.raises(ValueError, match='compact_current_required'):
-        validate(output(), [0], set(), require_current=True)
+        validate(semantic, [0], set())
 
 
 def test_title_update_preserves_independently_locked_manual_content():
     doc = history()
     doc['items'][0]['content'] = '人工补充的准确说明'
     semantic = output(operation='update', title='Hook 已确认', item_type='action', target_index=0, open=True)
-    semantic['current'] = {'goal_indexes': [1], 'question_indexes': [], 'next_step_indexes': [0]}
+    semantic['current'] = {"goal_index": 1, "priority_indexes": [0]}
     result, _, _ = apply_compact(doc, semantic,
         [turn('t', 'Hook 已确认', '', source(1, 'user', 'Hook 已确认'))],
         [{'index': n, **v} for n, v in enumerate(doc['items'])], 'content-locked',
@@ -180,7 +182,7 @@ def test_title_update_preserves_independently_locked_manual_content():
 
 
 def select(doc, selection, *, locks=()):
-    semantic = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue'}],
+    semantic = {'segments': [{'title': '当前工作', 'turn_indexes': [0], 'action': 'continue', "anchor_index": None}],
                 'changes': [], 'current': selection}
     return apply_compact(doc, semantic,
         [turn('t', '继续当前重点。', '', source(1, 'user', '继续当前重点。'))],
@@ -205,9 +207,9 @@ def test_priority_indexes_are_classified_by_materialized_type_once():
     assert result['overview']['unresolved'] == ['待查问题0', '验收检索结果']
 
 
-def test_legacy_question_in_both_lists_is_not_a_fatal_type_conflict():
+def test_duplicate_priority_is_projected_once():
     doc = question_history()
-    result = select(doc, {'goal_indexes': [1], 'question_indexes': [3], 'next_step_indexes': [3]})
+    result = select(doc, {"goal_index": 1, "priority_indexes": [3, 3]})
     assert result['overview']['open_question_ids'] == ['question-0']
     assert result['overview']['next_step_ids'] == []
 

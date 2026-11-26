@@ -11,6 +11,7 @@ from .store import digest, encode
 from .titles import validate_title
 
 POLICY = "seywo-index-5"
+ORGANIZATION_POLICY = "seywo-stop-8"
 UNIT_CHARS = 600
 ISSUE_TYPES = {"question", "observation", "correction"}
 # Fixed local validator codes only; never echo provider text or source exceptions.
@@ -340,15 +341,16 @@ def compile_request(request):
                 primary_source_indexes=[i for i, s in enumerate(sources) if s["purpose"] != "context"],
                 unresolved=list(dict.fromkeys(request["unresolved"])), gaps=[{"reason": g.get("reason", "source_unavailable"), "count": g.get("count", 1)} for g in request["gaps"]])
     if request["phase"] == "organize":
+        if request.get("organization_policy") != ORGANIZATION_POLICY:
+            raise ValueError("organization_policy_unsupported")
         wire.update(organize_catalog(request, sources))
-        if request.get("organization_policy") == "seywo-stop-8":
-            wire["rules"] += "\nA keep binding requires the same work identity: type, attribution, short title and dependency targets. Refreshed wording or scope may keep; a distinct action or changed work item must use propose or revise."
+        wire["rules"] += "\nA keep binding requires the same work identity: type, attribution, short title and dependency targets. Refreshed wording or scope may keep; a distinct action or changed work item must use propose or revise."
         if request.get("bounded_stop_rules"):
             wire["rules"] += "\n" + request["bounded_stop_rules"]
         if "catalog_scope" in wire:
             wire["rules"] += "\nThis catalog is partial. Item indexes are sparse global indexes, never row positions. Archived work remains unchanged. Omitted references are listed in catalog_scope.hidden_references; do not overwrite those lists or guess hidden indexes. Request readback before changing hidden work."
         schema = deepcopy(B_SCHEMA)
-        if request.get("semantic_stop_policy") and request.get("organization_policy") in {"seywo-stop-6", "seywo-stop-7", "seywo-stop-8"}:
+        if request.get("semantic_stop_policy"):
             schema["overview"]["next_step_indexes"] = "Pending action/next_step/goal int[] only. Already-applied navigation is not pending. Use [] explicitly to clear obsolete previous steps; omission retains the old list, even without new items."
         if request.get("semantic_stop_policy"):
             schema["overview"]["goal_item_indexes"] = "Current work indexes, including a question for explanatory work; a user decision can be the stop when it settles the earlier work. A subtask outcome need not replace the overall goal. Constraints and navigation alone need not become goals."
@@ -399,26 +401,14 @@ def freeze(request):
     return request
 
 
-# Advisory wire sections regenerated from POLICY. A saved request may predate a
-# wording change; the index map and every private field must still match exactly.
-VOLATILE_WIRE = {"rules", "output_schema"}
-
-
 def model_request(request):
     if request.get("indexed", {}).get("policy") != POLICY:
         raise ValueError("old_model_policy_requires_new_target")
     # Rebuild/check prevents accidental mutated maps or leaked private model requests.
     rebuilt = compile_request(request)
     saved = request["indexed"]
-    if ({k: v for k, v in saved.items() if k != "wire"}
-            != {k: v for k, v in rebuilt.items() if k != "wire"}):
+    if saved != rebuilt:
         raise ValueError("indexed_map_mismatch")
-    if ({k: v for k, v in saved["wire"].items() if k not in VOLATILE_WIRE}
-            != {k: v for k, v in rebuilt["wire"].items() if k not in VOLATILE_WIRE}):
-        raise ValueError("indexed_map_mismatch")
-    # The fingerprint still covers every private field, so a mutated request is
-    # rejected. Only the regenerated prose may differ: an old window then picks
-    # up a rule fix instead of failing as an unknown mismatch.
     if request["input_fingerprint"] != digest(encode(
             {k: v for k, v in request.items() if k != "input_fingerprint"})):
         raise ValueError("indexed_map_mismatch")
@@ -767,7 +757,7 @@ def from_indexes(row, maps):
 def organize_catalog(request, sources):
     maps = narrative_maps(request)
     previous = request["previous"]
-    if (any(previous[k] for k in ("items", "phases", "branches", "transitions")) or previous["overview"]["unresolved"]) and previous.get("model_policy") not in {POLICY, "seywo-index-4"}:
+    if (any(previous[k] for k in ("items", "phases", "branches", "transitions")) or previous["overview"]["unresolved"]) and previous.get("model_policy") != POLICY:
         raise ValueError("previous_model_policy_incompatible")
     catalog = {"items": []}
     old_count = len(previous["items"])
@@ -864,8 +854,7 @@ def hydrate_organization(output, request):
             target_id = targets[index]
             prior = next((i for i in previous["items"] if i["id"] == target_id), None)
             if (binding["action"] not in {"keep", "propose"} or prior is None
-                    or target_id in locked_items
-                    or request.get("organization_policy") != "seywo-stop-8"):
+                    or target_id in locked_items):
                 continue
             deps = dependency_ids(candidate["dependencies"])
             if (any(candidate.get(f) != prior.get(f) for f in ("type", "title", "attribution"))

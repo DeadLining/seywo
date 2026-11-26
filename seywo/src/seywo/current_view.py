@@ -58,53 +58,38 @@ def project_current(doc, selection, identities, *, locks=()):
     by_id = {i['id']: i for i in doc['items'] if not i.get('hidden')}
     overview = doc['overview']
     locked = {lock['field'] for lock in locks if lock.get('entity') == 'overview'}
-    if selection is None:
-        # Compatibility for stored v1 outputs: derive a bounded current-phase
-        # view. Historical open status alone never means "current priority".
-        focus = overview['focus']
-        locations = {p['item_id']: p for p in doc['placements']}
-        active = [i for i in by_id.values() if i.get('status') == 'open'
-                  and locations.get(i['id'], {}).get('phase_id') == focus.get('phase_id')
-                  and locations.get(i['id'], {}).get('branch_id') == focus.get('branch_id')]
-        picked = {key: [i['id'] for i in reversed(active) if i['type'] in TYPES[key]][:limit]
-                  for key, limit in LIMITS.items()}
-    else:
-        # The model chooses identities and priority, not a second copy of
-        # each item's type. Legacy typed lists are only selection evidence.
-        if 'priority_indexes' in selection:
-            goals = [] if selection['goal_index'] is None else [selection['goal_index']]
-            priorities = selection['priority_indexes']
-        else:
-            goals = selection['goal_indexes']
-            priorities = selection['question_indexes'] + selection['next_step_indexes']
-        picked = {key: [] for key in LIMITS}
+    if not isinstance(selection, dict) or set(selection) != {'goal_index', 'priority_indexes'}:
+        raise ValueError('compact_invalid_current_fields')
+    goals = [] if selection['goal_index'] is None else [selection['goal_index']]
+    priorities = selection['priority_indexes']
+    picked = {key: [] for key in LIMITS}
 
-        def selected(index):
-            item = by_id.get(canonical_item(doc, identities.get(index))) if type(index) is int else None
-            if item is None:
+    def selected(index):
+        item = by_id.get(canonical_item(doc, identities.get(index))) if type(index) is int else None
+        if item is None:
+            raise ValueError('compact_invalid_current_item')
+        return item if item.get('status', 'open') == 'open' else None
+
+    for index in goals:
+        item = selected(index)
+        if item is not None:
+            if item['type'] not in TYPES['goal_indexes']:
                 raise ValueError('compact_invalid_current_item')
-            return item if item.get('status', 'open') == 'open' else None
-
-        for index in goals:
-            item = selected(index)
-            if item is not None:
-                if item['type'] not in TYPES['goal_indexes']:
-                    raise ValueError('compact_invalid_current_item')
-                picked['goal_indexes'].append(item['id'])
-        # Dedup against the goal that will actually be published after locks.
-        effective_goals = overview['goal_item_ids'] if 'goal_item_ids' in locked else picked['goal_indexes']
-        seen = set(effective_goals)
-        for index in priorities:
-            item = selected(index)
-            if item is None or item['id'] in seen:
-                continue
-            seen.add(item['id'])
-            # Priority is an explicit work role. An unresolved fault may be
-            # categorized as an observation; never discard that selected
-            # concern merely because its information type is not question.
-            key = 'next_step_indexes' if item['type'] in TYPES['next_step_indexes'] else 'question_indexes'
-            if len(picked[key]) < LIMITS[key]:
-                picked[key].append(item['id'])
+            picked['goal_indexes'].append(item['id'])
+    # Dedup against the goal that will actually be published after locks.
+    effective_goals = overview['goal_item_ids'] if 'goal_item_ids' in locked else picked['goal_indexes']
+    seen = set(effective_goals)
+    for index in priorities:
+        item = selected(index)
+        if item is None or item['id'] in seen:
+            continue
+        seen.add(item['id'])
+        # Priority is an explicit work role. An unresolved fault may be
+        # categorized as an observation; never discard that selected
+        # concern merely because its information type is not question.
+        key = 'next_step_indexes' if item['type'] in TYPES['next_step_indexes'] else 'question_indexes'
+        if len(picked[key]) < LIMITS[key]:
+            picked[key].append(item['id'])
     for key, field in FIELDS.items():
         if field not in locked:
             overview[field] = picked[key]

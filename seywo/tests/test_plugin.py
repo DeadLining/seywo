@@ -1,6 +1,7 @@
 """Plugin bootstrap behavior; setup must never run merely on connection."""
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -135,6 +136,76 @@ def test_selection_cannot_rebind_a_running_process(tmp_path):
             await server.call_tool('seywo_select_project', {'project_root': str(other)})
     asyncio.run(check())
     assert not (other / '.seywo').exists()
+
+
+def test_cached_binding_refuses_replacement_at_same_address(tmp_path):
+    root = tmp_path / 'project'
+    initialize(root)
+    server = create_plugin_server(root)
+    root.rename(tmp_path / 'original')
+    root.mkdir()
+    opened = asyncio.run(server.call_tool('seywo_open', {})).structuredContent
+    assert opened.get('state') == 'reconnect_required'
+    assert not (root / '.seywo').exists()
+
+
+def test_copy_of_project_state_does_not_bind_same_named_directory(tmp_path):
+    import shutil
+    root = tmp_path / 'first' / 'project'
+    initialize(root)
+    copy = tmp_path / 'second' / 'project'
+    shutil.copytree(root, copy)
+    with pytest.raises(ValueError, match='foreign'):
+        create_plugin_server(copy)
+
+
+@pytest.mark.parametrize('setup', ['seywo_open', 'seywo_initialize_project'])
+def test_first_initialization_pins_project_id_immediately(tmp_path, setup):
+    server = create_plugin_server(tmp_path)
+    asyncio.run(server.call_tool(setup, {}))
+    (tmp_path / '.seywo').rename(tmp_path / '.original-state')
+    initialize(tmp_path)
+    result = asyncio.run(server.call_tool('seywo_open', {}))
+    assert result.structuredContent.get('state') == 'reconnect_required'
+
+
+def test_mcp_and_hook_publish_to_one_binding_across_host_spellings(tmp_path, monkeypatch):
+    from seywo import hook, maintain
+    from seywo.config import load_config
+    from test_compact_maintain import CompactTransport, make_source
+    from test_worktree_binding import precompact
+    root = tmp_path / 'Seywo workspace'
+    root.mkdir()
+    if os.name == 'nt':
+        from seywo.windows_paths import extended_windows_path
+        alternate = Path(extended_windows_path(root))
+    else:
+        alias = tmp_path / 'alternate parent'
+        alias.symlink_to(root.parent, target_is_directory=True)
+        alternate = alias / root.name
+    server = create_plugin_server(alternate)
+    monkeypatch.setattr('seywo.plugin.host_workspace', lambda _: root)
+    opened = asyncio.run(server.call_tool('seywo_open', {})).structuredContent
+    assert opened['project_name'] == root.name
+    config = root / '.seywo/config.json'
+    before = load_config(config)['project_id']
+    source = make_source(root, 'example')
+    assert precompact(monkeypatch, alternate, source, 'example')
+    assert hook.find_config(str(alternate)).samefile(config)
+    transport = CompactTransport()
+    monkeypatch.setattr(maintain, 'Transport', lambda *args, **kwargs: transport)
+    monkeypatch.setattr(maintain, 'read_provider', lambda config=None: {
+        'endpoint': 'http://127.0.0.1:1/responses', 'model': transport.model,
+        'timeout': 5, 'max_output_tokens': 1200, '_api_key': 'fixture',
+    })
+    assert maintain.run_chat(load_config(config), 'example')['version'] == 1
+    assert precompact(monkeypatch, root, source, 'example')
+    assert maintain.run_chat(load_config(config), 'example')['calls'] == 0
+    assert transport.calls == 1
+    assert call(server, 'seywo_select_project', project_root=str(root))['initialized']
+    assert call(server, 'seywo_panel_data', view='chats')['project_name'] == root.name
+    assert call(server, 'seywo_panel_data', view='maintenance', chat_id='example')['published_version'] == 1
+    assert load_config(alternate / '.seywo/config.json')['project_id'] == before
 
 
 def test_workspace_uri_validation(tmp_path):

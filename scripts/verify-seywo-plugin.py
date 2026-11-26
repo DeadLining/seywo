@@ -135,7 +135,8 @@ def verify(repository=REPOSITORY, *, binary='codex', probe=None):
                             if hook.get('pluginId') == 'seywo@seywo-local']
                 declared = json.loads((installed / 'hooks.json').read_text())['hooks']
                 expected_events = sorted(name[0].lower() + name[1:] for name in declared)
-                assert sorted(hook['eventName'] for hook in reviewed) == expected_events
+                actual_events = sorted(hook['eventName'] for hook in reviewed)
+                assert actual_events == expected_events, {'expected': expected_events, 'actual': actual_events}
                 for hook in reviewed:
                     request('config/value/write', {
                         'keyPath': 'hooks.state.' + json.dumps(hook['key']) + '.trusted_hash',
@@ -243,7 +244,7 @@ def verify(repository=REPOSITORY, *, binary='codex', probe=None):
                 open_meta = running['tools']['seywo_open']['_meta']
                 assert open_meta['openai/ui']['entrypoints'] == [{'type': 'thread'}]
                 assert running['tools']['seywo_open']['title'] == 'Seywo'
-                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v9.html'
+                assert open_meta['ui']['resourceUri'] == 'ui://seywo/panel-v11.html'
                 assert running['tools']['seywo_panel_data']['_meta']['ui']['visibility'] == ['app']
                 assert running['tools']['seywo_retry_maintenance']['_meta']['ui']['visibility'] == ['app']
                 opened = raw_tool('seywo_open', chat_id='plugin-acceptance')
@@ -275,10 +276,10 @@ from seywo.compact_pipeline import _turn_packets, apply_compact
 from seywo.understanding import Understanding
 with Store(load_config(Path(sys.argv[2]))) as store:
     turns = _turn_packets(store.db.execute('SELECT * FROM current_sources ORDER BY record_no').fetchall())
-    output = {'segments':[{'title':'插件开发','turn_indexes':[0],'action':'continue'}],
+    output = {'segments':[{'title':'插件开发','turn_indexes':[0],'action':'continue','anchor_index':None}],
               'changes':[{'operation':'new','title':'验证插件主线','type':'goal',
-                          'attribution':'user','turn_indexes':[0],'target_index':None,'open':True}],
-              'focus_segment':0}
+                          'attribution':'user','turn_indexes':[0],'target_index':None,'open':True,'merge_indexes':[]}],
+              'current':{'goal_index':0,'priority_indexes':[]}}
     doc,_,_ = apply_compact(empty(), output, turns, [], 'plugin-ui-fixture')
     service = Narrative(store)
     with store.db:

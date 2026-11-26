@@ -1,7 +1,6 @@
 """Short human-facing titles; evidence and detail remain independent."""
 
 TITLE_MAX = 40
-LEGACY_TITLE = "历史事项（待补标题）"
 
 
 def validate_title(value):

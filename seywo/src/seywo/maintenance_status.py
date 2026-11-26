@@ -31,6 +31,8 @@ REASONS = {
     'provider_not_configured': '模型尚未配置，请检查模型设置。',
     'missing_provider_credential': '模型凭据不可用，请检查模型设置。',
     'source_missing': '原始对话暂时无法读取，请确认对话文件仍然可用。',
+    'source_capture_format_unsupported': '对话快照格式不受支持，未修改原数据。请从原始日志建立新索引。',
+    'source_project_unverified': '无法确认对话日志归属当前项目，请核对工作目录后重试。',
     'source_archive_capacity': '待保留的对话记录超出归档容量，未能导入。请保留原对话，后续工作可在新对话中继续整理。',
     'source_record_too_large': '原始对话中有单条记录超出导入上限，未能导入。请保留原对话，后续工作可在新对话中继续整理。',
     'chat_identity_unresolved': '暂时无法确认这段对话的身份，请重新打开当前对话。',
@@ -114,8 +116,8 @@ def _load(path):
         return {'state': 'interrupted', 'error_code': 'status_unavailable', 'revision': 'unreadable'}
 
 
-def _legacy(config, chat_id, db=None, *, include_inbox=True):
-    """Read existing durable failures on upgrade; never migrate on a read."""
+def _durable_status(config, chat_id, db=None, *, include_inbox=True):
+    """Recover status from durable work if the worker did not write its receipt."""
     from . import inbox
     if not isinstance(config, dict):
         config = {"_path": str(config)}
@@ -123,12 +125,13 @@ def _legacy(config, chat_id, db=None, *, include_inbox=True):
     last_success = None
     if db is not None and db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='compact_batches'").fetchone():
         last_success = db.execute("SELECT max(updated_at) FROM compact_batches WHERE chat_id=? AND state='done'", (chat_id,)).fetchone()[0]
-        row = db.execute("SELECT state,error_code,updated_at,published_version FROM compact_batches WHERE chat_id=? ORDER BY updated_at DESC LIMIT 1", (chat_id,)).fetchone()
+        row = db.execute("SELECT state,error_code,updated_at,published_version FROM compact_batches WHERE chat_id=? AND state IN ('failed','done') ORDER BY updated_at DESC,rowid DESC LIMIT 1", (chat_id,)).fetchone()
         if row:
             selected = {'state': 'failed' if row[0] == 'failed' else 'done',
                         'error_code': safe_code(row[1]) if row[1] else None,
                         'updated_at': row[2], 'published_version': row[3]}
     candidates = inbox.failed(config, chat_id) + inbox._open_for(config, chat_id) if include_inbox else []
+    candidates = [item for item in candidates if not item.get('imported_snapshot_id') or not selected]
     if candidates:
         item = max(candidates, key=lambda item: item.get('updated_at', 0))
         if item.get('updated_at', 0) >= (selected.get('updated_at') or 0):
@@ -136,7 +139,7 @@ def _legacy(config, chat_id, db=None, *, include_inbox=True):
                         'error_code': safe_code(item['error_code']) if item.get('error_code') else None,
                         'updated_at': item.get('updated_at')}
     if selected:
-        selected.update(last_success_at=last_success, revision='legacy:' + str(selected.get('updated_at')))
+        selected.update(last_success_at=last_success, revision='ledger:' + str(selected.get('updated_at')))
     return selected
 
 
@@ -155,7 +158,7 @@ def _stamp(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
 
 
-def record(config, chat_id, state, *, error_code=None, report=None):
+def record(config, chat_id, state, *, error_code=None, report=None, retry_capture=False):
     """Replace one small receipt atomically; never append event/transcript logs."""
     if state not in STATES:
         raise ValueError('invalid_maintenance_state')
@@ -169,6 +172,8 @@ def record(config, chat_id, state, *, error_code=None, report=None):
                 'notified': old.get('notified'), 'published_version': old.get('published_version')}
         if state == 'done':
             data['last_success_at'] = data['updated_at']
+        if retry_capture:
+            data['retry_capture'] = True
         if report:
             if type(report.get('version')) is int and report['version'] >= 0:
                 data['published_version'] = report['version']
@@ -188,17 +193,12 @@ def safe_record(config, chat_id, state, **kwargs):
 def read(config, chat_id, *, db=None):
     path = _path(config, chat_id)
     data = _load(path)
-    # A done receipt in older releases could acknowledge only source import.
-    # A failed publication ledger remains authoritative until a successful
-    # transaction replaces it; queued/running receipts represent a newer retry.
-    stale_receipt = data.get('state') in {'idle', 'done'} or (
-        data.get('state') in {'partial', 'failed'}
-        and data.get('error_code') in {None, 'operation_failed', 'model_output'})
-    generic_failure = data.get('state') == 'failed' and data.get('error_code') in {None, 'operation_failed'}
-    legacy = (_legacy(config, chat_id, db, include_inbox=not data or generic_failure)
-              if not data or generic_failure or (db is not None and stale_receipt) else {})
-    if not data or (legacy.get('state') == 'failed' and stale_receipt):
-        data = legacy
+    generic_failure = data.get('state') == 'failed' and data.get('error_code') in {None, 'operation_failed', 'model_output'}
+    if not data or generic_failure or db is not None:
+        durable = _durable_status(config, chat_id, db, include_inbox=not data or generic_failure)
+        if durable and (not data or (generic_failure and durable['state'] == 'failed') or
+                        (_stamp(durable.get('updated_at')) or 0) > (_stamp(data.get('updated_at')) or 0)):
+            data = durable
     state = data.get('state', 'idle')
     code = safe_code(data['error_code']) if data.get('error_code') else None
     if (_config_path(config).parent / 'disabled').exists() or (
@@ -218,9 +218,11 @@ def read(config, chat_id, *, db=None):
     elif state == 'queued':
         message = '任务已保存，正在等待后台整理。'
     from .storage_lifecycle import status as storage_status
+    waiting = state == 'partial' and code == 'awaiting_turn_complete'
     return {'storage': storage_status(config if isinstance(config, dict) else {'_path': str(config)}),
-            'chat_id': chat_id, 'state': state, 'title': TITLES[state], 'message': message,
-            'retryable': state in FAILURES and code != 'storage_schema_unsupported', 'waiting_for_turn': state == 'partial' and code == 'awaiting_turn_complete', 'updated_at': _stamp(data.get('updated_at')),
+            'chat_id': chat_id, 'state': state, 'title': '等待本轮回答结束' if waiting else TITLES[state], 'message': message,
+            'retryable': state in FAILURES and code != 'storage_schema_unsupported', 'waiting_for_turn': waiting, 'updated_at': _stamp(data.get('updated_at')),
+            'retry_capture': waiting or (state == 'failed' and data.get('retry_capture') is True),
             'last_success_at': _stamp(data.get('last_success_at')),
             'published_version': data.get('published_version') if type(data.get('published_version')) is int else None,
             'stale_view': state in FAILURES | {'queued', 'running'}, 'model_calls': 0}
@@ -235,7 +237,7 @@ def take_notice(config, chat_id):
         result = read(config, chat_id)
         if result['state'] not in FAILURES or result.get('waiting_for_turn') or not result['retryable']:
             return None
-        data = _load(path) or _legacy(config, chat_id)
+        data = _load(path) or _durable_status(config, chat_id)
         key = f"{result['state']}:{data.get('revision', 'unreadable')}"
         if data.get('notified') == key:
             return None

@@ -17,6 +17,7 @@ from uuid import uuid4
 from .runtime_platform import replace_file, sync_directory
 
 from .locking import file_lock, lifecycle
+from .project_scope import SourceOwnerMismatch
 from .store import digest
 
 EVENTS = {"PreCompact", "PostCompact", "SessionEnd", "Stop"}
@@ -66,16 +67,19 @@ def _serialized(function):
 
 def snapshot(config, source: Path, chat_id: str, unique: bool = False) -> str | None:
     """Freeze only dialogue and provenance, using shared immutable blocks."""
+    from .store import Store
+    with Store(config, read_only=True) as store:
+        return _snapshot(store, source, chat_id)
+
+
+def _snapshot(store, source, chat_id):
     try:
-        target, _ = capture_dialogue(config, source, chat_id)
+        target, _ = store.capture_source(source, chat_id, dialogue=True)
         return str(target)
+    except SourceOwnerMismatch:
+        raise  # A foreign source is not a transient snapshot failure.
     except (OSError, ValueError):
         return None
-
-
-def capture_dialogue(config, source, chat_id):
-    from .archive import content_capture
-    return content_capture(source, snapshot_dir(config), chat_id, dialogue=True)
 
 
 def record(config, chat_id: str, event: str, transcript: str) -> dict:
@@ -95,12 +99,13 @@ def _record(config, chat_id: str, event: str, transcript: str) -> dict:
         with Store(config, read_only=True) as store:
             if store.chat_deleted(chat_id):
                 return {"chat_id": chat_id, "state": "excluded", "error_code": "chat_deleted"}
+            fingerprint = _fingerprint(source)
+            frozen = _snapshot(store, source, chat_id)
         # Capture before deduplication: metadata can be restored after a rewrite,
         # and a source path alone identifies neither the bytes nor the boundary.
         boundary = {
             "chat_id": chat_id, "event": event, "transcript": str(source),
-            "fingerprint": _fingerprint(source),
-            "snapshot": snapshot(config, source, chat_id),
+            "fingerprint": fingerprint, "snapshot": frozen,
         }
         if boundary["snapshot"] is None:
             # Keep the boundary durable even when the hook cannot freeze the
@@ -170,11 +175,10 @@ def _prune(folder: Path) -> None:
         stale.unlink(missing_ok=True)
 
 
-CLAIM_TTL = 3600
 
 
 def pending(config, chat_id: str | None = None) -> list[dict]:
-    """Pending records; a claim older than an hour is treated as crashed."""
+    """Only durable pending records are claimable. The chat lock owns recovery."""
     folder = root(config) / "pending"
     if not folder.is_dir():
         return []
@@ -183,8 +187,6 @@ def pending(config, chat_id: str | None = None) -> list[dict]:
         item = _read(path)
         if not item:
             continue
-        if item.get("state") == "claimed" and time.time() - item.get("updated_at", 0) > CLAIM_TTL:
-            item["state"] = "pending"
         if item.get("state") != "pending":
             continue
         if chat_id is not None and item.get("chat_id") != chat_id:
@@ -389,7 +391,9 @@ def resume_turn(config, chat_id: str, transcript: str | None = None) -> bool:
     for source in sorted(sources):
         # Do not recover a foreign/subagent transcript or silently freeze a
         # missing path in place of the original compact evidence.
-        if chat_identity(source, chat_id) != chat_id or not Path(source).is_file():
+        if not Path(source).is_file():
             raise ValueError('source_missing')
+        if chat_identity(source, chat_id) != chat_id:
+            raise ValueError('chat_identity_unresolved')
         record(config, chat_id, 'Stop', source)
     return True

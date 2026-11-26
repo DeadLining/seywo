@@ -8,7 +8,7 @@ from seywo.config import initialize, load_config
 from seywo.store import SCHEMA_VERSION, Store
 
 
-@pytest.mark.parametrize('version', [1, 7, 9])
+@pytest.mark.parametrize('version', [1, 8, SCHEMA_VERSION + 1])
 @pytest.mark.parametrize('read_only', [True, False])
 def test_open_refuses_noncurrent_indexes_without_writes(tmp_path, version, read_only):
     config = load_config(Path(initialize(tmp_path)['config']))

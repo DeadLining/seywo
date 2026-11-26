@@ -27,8 +27,8 @@ def main(report):
             requests.append({'skill_catalog_present': any('<skills_instructions>' in text for text in messages),
                 'input_chars': sum(len(text) for text in messages),
                 'tools': [tool.get('name', tool.get('type')) for tool in body.get('tools', [])]})
-            output = {'segments': [], 'changes': [], 'focus_segment': None,
-                      'current': {'goal_indexes': [], 'question_indexes': [], 'next_step_indexes': []}}
+            output = {'segments': [], 'changes': [],
+                      'current': {"goal_index": None, "priority_indexes": []}}
             message = {'id': 'msg', 'type': 'message', 'role': 'assistant', 'status': 'completed',
                        'content': [{'type': 'output_text', 'text': json.dumps(output), 'annotations': []}]}
             result = {'id': 'response', 'status': 'completed', 'model': body['model'], 'output': [message],

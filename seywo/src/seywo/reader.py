@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlparse
 from .config import load_config
 from .narrative import Narrative
 from .store import Store
-from .titles import LEGACY_TITLE, TITLE_MAX
+from .titles import TITLE_MAX
 
 HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Seywo · 看清你的工作</title><style>
@@ -16,7 +16,7 @@ HTML = r'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="v
 <h1>Seywo</h1><p class="muted">看清你的工作 · 主线、支线与当前停点</p><div class="top"><button id="refresh">查看当前版本</button><label>历史版本 <input id="version" type="number" min="1" style="width:75px"></label><button id="history">查看</button></div><div id="error" role="alert"></div><main id="main"></main><dialog id="editor"><form id="editform"><h2 id="editTitle"></h2><div id="fields"></div><p class="muted">修正会生成新版本并保留历史；修改文字不代表批准执行或确认结论。</p><button type="submit">保存修正</button><button type="button" id="cancel">取消</button></form></dialog>
 <script>
 const token=TOKEN, chat=CHAT;let view, pending;
-const nodeTitle=i=>i.title||LEGACY_LABEL;
+const nodeTitle=i=>i.title;
 const el=(tag,text,cls)=>{let n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
 const gapLabels={compact_reference_not_original:'宿主压缩记录，原文另行定位',host_envelope_needs_adapter:'宿主封装尚待适配',unsupported_event:'尚未适配的事件记录',media_not_supported:'媒体正文尚未理解'};
 const labels={active:'进行中',waiting:'等待',resolved:'已解决（待核对）',abandoned:'已放弃',needs_review:'需核对',unreviewed:'自动整理',manual:'人工补充',user_statement:'用户陈述',assistant_statement:'助手陈述',tool_observation:'工具观察',inference:'推断',enter:'进入支线',return:'返回主线',goal_change:'目标转向',reopen:'重新打开',focus:'焦点变化'};
@@ -78,7 +78,7 @@ def make_server_from_config(config, chat_id, *, port=0):
     token = secrets.token_urlsafe(32)
     def literal(value):
         return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
-    html = HTML.replace("TOKEN", literal(token)).replace("CHAT", literal(chat_id)).replace("LEGACY_LABEL", literal(LEGACY_TITLE)).replace("TITLE_LIMIT", str(TITLE_MAX)).encode()
+    html = HTML.replace("TOKEN", literal(token)).replace("CHAT", literal(chat_id)).replace("TITLE_LIMIT", str(TITLE_MAX)).encode()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):

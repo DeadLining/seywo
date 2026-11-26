@@ -6,7 +6,7 @@ import re
 
 # Snapshot adapter revision and per-record body format are independent. A new
 # lifecycle adapter must not duplicate every unchanged historical text payload.
-VERSION = "codex-safe-v5"
+VERSION = "codex-safe-v6"
 BODY_VERSION = "codex-safe-v4"
 # Conservative deterministic patterns, not a guarantee of detecting every secret.
 SECRET = re.compile(
@@ -55,6 +55,16 @@ def sanitize(text: str) -> tuple[str, list[dict]]:
         cursor = match.end()
     parts.append(text[cursor:])
     return "".join(parts), spans
+
+
+def message_channel(payload):
+    channel = payload.get('channel')
+    if channel is not None or payload.get('role') != 'assistant' or payload.get('type') != 'message':
+        return channel
+    phase = payload.get('phase')
+    if phase is None:
+        return None
+    return 'final' if phase == 'final_answer' else 'commentary' if phase == 'commentary' else 'unknown_phase'
 
 
 def project(record: dict) -> dict:
@@ -119,7 +129,7 @@ def project(record: dict) -> dict:
     result.update(
         kind=kind,
         role=payload.get("role", "tool"),
-        channel=payload.get("channel"),
+        channel=message_channel(payload),
         call_id=payload.get("call_id"),
         tool=payload.get("name"),
     )
@@ -251,7 +261,7 @@ def assistant_body_hash(record):
     if (
         payload.get("type") != "message"
         or payload.get("role") != "assistant"
-        or payload.get("channel") not in {None, "final", "commentary"}
+        or message_channel(payload) not in {None, "final", "commentary"}
     ):
         return None
     content = payload.get("content")

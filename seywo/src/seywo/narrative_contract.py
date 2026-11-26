@@ -59,8 +59,7 @@ def validate_layout(doc):
         raise ValueError("cross_kind_identity_collision")
     acyclic(items)
     for item in items.values():
-        if "title" in item:  # Legacy snapshots stay readable and immutable.
-            validate_title(item["title"])
+        validate_title(item.get('title'))
     for p in phases.values():
         exact_keys(p, SCHEMA["phase"])
         string(p["title"])
@@ -165,18 +164,14 @@ def validate_output(output, request):
         candidate = incoming[cid]["item"]
         binding = next(b for b in output["bindings"] if b["candidate_id"] == cid)
         if binding["action"] == "keep":
-            if request.get("organization_policy") == "seywo-stop-8":
-                # Same work identity is decided by stable axes, not copied wording.
-                # An unlocked mismatch gets its own new identity in the hydrator;
-                # a manual lock still has to fail closed.
-                target_item = old_items[target]
-                if (any(candidate.get(field) != target_item.get(field)
-                        for field in ("type", "title", "attribution"))
-                        or [dependency_target(d) for d in candidate["dependencies"]]
-                        != target_item["dependencies"]) and any(
-                            lock["entity"] == "item" and lock["id"] == target
-                            for lock in request["locks"]):
-                    raise ValueError("manual_item_revision_conflict")
+            target_item = old_items[target]
+            if (any(candidate.get(field) != target_item.get(field)
+                    for field in ("type", "title", "attribution"))
+                    or [dependency_target(d) for d in candidate["dependencies"]]
+                    != target_item["dependencies"]) and any(
+                        lock["entity"] == "item" and lock["id"] == target
+                        for lock in request["locks"]):
+                raise ValueError("manual_item_revision_conflict")
             continue
         if binding["action"] == "propose":
             comparable = ("type", "title", "content", "attribution", "scope", "evidence", "dependencies")

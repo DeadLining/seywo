@@ -159,6 +159,112 @@ def test_first_open_from_linked_subdirectory_initializes_only_the_owner(checkout
     assert not (child / '.seywo').exists() and not (linked / '.seywo').exists()
 
 
+def test_removed_worktree_child_requires_live_registration(checkouts, tmp_path, monkeypatch):
+    main, linked = checkouts
+    config = Path(initialize(main, plugin_hook=True)['config'])
+    child = linked / 'ephemeral'
+    child.mkdir()
+    source = make_source(child, CHAT).rename(tmp_path / 'saved.jsonl')
+    with Store(load_config(config)) as store:
+        store.import_source(source, CHAT, 0)
+    child.rmdir()
+    assert precompact(monkeypatch, child, source) == [(config, CHAT)]
+    with source.open('a') as handle:
+        handle.write(json.dumps(message('after removal')) + '\n')
+    with Store(load_config(config)) as store:
+        assert store.import_source(source, CHAT, 0)['chat_id'] == CHAT
+    from seywo.project_scope import source_belongs_to_project
+    (linked / '.git').unlink()
+    assert hook.find_config(str(child)) is None
+    assert not source_belongs_to_project(str(child), str(main))
+
+
+@pytest.mark.parametrize('independent', [False, True])
+def test_first_import_never_inherits_a_vanished_scope(checkouts, tmp_path, monkeypatch, independent):
+    main, linked = checkouts
+    config = load_config(Path(initialize(main, plugin_hook=True)['config']))
+    child = linked / 'temporary'
+    child.mkdir()
+    if independent:
+        initialize(child, plugin_hook=True)
+    source = make_source(child, CHAT).rename(tmp_path / 'source.jsonl')
+    child.rename(tmp_path / 'relocated')
+    with Store(config) as store:
+        with pytest.raises(ValueError, match='source cwd differs'):
+            store.import_source(source, CHAT, 0)
+        assert store.db.execute('SELECT count(*) FROM chats').fetchone()[0] == 0
+    assert precompact(monkeypatch, child, source) == []
+    assert not inbox.pending(config, CHAT)
+
+
+def test_existing_dotdot_cwd_admitted_by_hook_and_import(tmp_path, monkeypatch):
+    root = tmp_path / 'actual'
+    path = Path(initialize(root, plugin_hook=True)['config'])
+    (root / 'build').mkdir()
+    cwd = root / 'build' / '..'
+    source = make_source(cwd, CHAT)
+    assert precompact(monkeypatch, cwd, source) == [(path, CHAT)]
+    with Store(load_config(path)) as store:
+        assert store.import_source(source, CHAT, 0)['chat_id'] == CHAT
+
+
+def test_subdirectory_hook_and_compact_share_one_owner(tmp_path, monkeypatch):
+    root = tmp_path / 'top'
+    path = Path(initialize(root, plugin_hook=True)['config'])
+    child = root / 'src'
+    child.mkdir()
+    transport = CompactTransport()
+    monkeypatch.setattr(maintain, 'Transport', lambda *a, **kw: transport)
+    monkeypatch.setattr(maintain, 'read_provider', lambda config=None: {
+        'endpoint': 'http://127.0.0.1:1/responses', 'model': transport.model,
+        'timeout': 5, 'max_output_tokens': 1200, '_api_key': 'fixture',
+    })
+    source = make_source(child, CHAT)
+    assert precompact(monkeypatch, child, source) == [(path, CHAT)]
+    assert maintain.run_chat(load_config(path), CHAT)['version'] == 1
+    monkeypatch.setattr('seywo.plugin.host_workspace', lambda _: child)
+    server = create_plugin_server()
+    monkeypatch.setattr(server, 'get_context', lambda: context(thread_id=CHAT))
+    info = asyncio.run(server.call_tool('seywo_open', {})).structuredContent
+    assert info['project_root'] == str(root) and info['chat_id'] == CHAT
+    assert not (child / '.seywo').exists()
+
+
+@pytest.mark.parametrize('entry', ['hook', 'store'])
+def test_directory_replaced_by_file_never_admitted(checkouts, tmp_path, monkeypatch, entry):
+    main, linked = checkouts
+    config = load_config(Path(initialize(main, plugin_hook=True)['config']))
+    child = linked / 'once-a-directory'
+    child.mkdir()
+    source = make_source(child, CHAT).rename(tmp_path / 'transcript.jsonl')
+    child.rmdir()
+    child.touch()
+    if entry == 'hook':
+        assert not precompact(monkeypatch, child, source)
+        assert not inbox.pending(config, CHAT)
+    else:
+        with Store(config) as store:
+            with pytest.raises(ValueError, match='source cwd differs'):
+                store.import_source(source, CHAT, 0)
+            assert not store.has_admitted_source(CHAT)
+
+
+def test_registered_backlink_uses_marker_identity(checkouts):
+    main, linked = checkouts
+    config = Path(initialize(main, plugin_hook=True)['config'])
+    marker = linked / '.git'
+    alternate = linked / '.GIT'
+    if not alternate.exists():
+        alternate.hardlink_to(marker)
+    admin = Path(marker.read_text().removeprefix('gitdir: ').strip())
+    (admin / 'gitdir').write_text(str(alternate) + '\n')
+    assert hook.find_config(str(linked)) == config
+    wrong = linked / 'unrelated'
+    wrong.touch()
+    (admin / 'gitdir').write_text(str(wrong) + '\n')
+    assert hook.find_config(str(linked)) is None
+
+
 def test_explicit_nested_scope_still_owns_its_own_data(checkouts):
     main, linked = checkouts
     initialize(main, plugin_hook=True)

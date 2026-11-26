@@ -30,12 +30,12 @@ def turns():
 
 def change(title='原始事项', operation='new', indexes=None, target=None, is_open=True):
     return dict(operation=operation, title=title, type='goal', attribution='user',
-                turn_indexes=indexes or [0], target_index=target, open=is_open)
+                turn_indexes=indexes or [0], target_index=target, open=is_open, merge_indexes=[])
 
 
 def output(changes, segments=None):
-    return dict(segments=segments or [dict(title='当前主线', turn_indexes=[0], action='continue')],
-                changes=changes, focus_segment=0)
+    return dict(segments=segments or [dict(title='当前主线', turn_indexes=[0], action='continue', anchor_index=None)],
+                changes=changes, current=dict(goal_index=None, priority_indexes=[]))
 
 
 def run():
@@ -45,8 +45,8 @@ def run():
         checks.append(dict(id=identity, passed=bool(passed), expected=expected, actual=actual))
 
     out = output([change(indexes=[0, 1])], [
-        dict(title='第一个片段', turn_indexes=[0], action='continue'),
-        dict(title='第二个片段', turn_indexes=[1], action='continue')])
+        dict(title='第一个片段', turn_indexes=[0], action='continue', anchor_index=None),
+        dict(title='第二个片段', turn_indexes=[1], action='continue', anchor_index=None)])
     try:
         validated = validate(out, [0, 1], set())
         doc, _, _ = apply_compact(empty(), validated, turns(), [], 'cross-segment')

@@ -34,6 +34,14 @@ function fixture() {
     };
     return { dom, calls, root: dom.window.document.querySelector('#root'), call };
 }
+test('header uses the verified project label in normal and error states', async () => {
+    const info = { project_root: String.raw`\\?\D:\workspace\项目`, project_name: '项目' };
+    for (const state of [undefined, 'initialization_failed']) {
+        const f = fixture();
+        await mountPanel(f.root, async args => ({...await f.call(args), ...info}), {...info, state});
+        assert.equal(f.root.querySelector('[data-project]').textContent, info.project_name);
+    }
+});
 test('requires explicit Chat selection, then shows focused narrative and evidence safely', async () => {
     const f = fixture();
     await mountPanel(f.root, f.call);
@@ -160,6 +168,17 @@ test('native entrypoint can bind an existing project without automatic initializ
     assert.match(f.root.textContent,/选择一个 Chat/);
     assert.equal(f.calls.filter(c=>c.view==='narrative').length,0);
 
+});
+test('changed binding requires reconnection without data requests, picker or refresh', async () => {
+    const f=fixture();
+    const controller=await mountPanel(f.root,f.call,{state:'reconnect_required'});
+    assert.equal(f.calls.length,0);
+    assert.match(f.root.textContent,/重新连接/);
+    assert.equal(f.root.querySelector('[data-project-path]'),null);
+    assert.equal(f.root.querySelector('[data-refresh]').hidden,true);
+    await controller.open({state:'project_required'});
+    assert.equal(f.root.querySelector('[data-refresh]').hidden,false);
+    assert.ok(f.root.querySelector('[data-project-path]'));
 });
 test('refresh cancels an old Chat page without leaving pagination disabled', async () => {
     const f=fixture();let finish;

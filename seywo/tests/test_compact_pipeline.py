@@ -24,11 +24,11 @@ def output(*, action="continue", operation="new", title="确定Compact主线", i
            attribution="user", target_index=None, open=False, turn_indexes=None):
     indexes = [0] if turn_indexes is None else turn_indexes
     return {
-        "segments": [{"title": "Compact主线", "turn_indexes": indexes, "action": action}],
+        "segments": [{"title": "Compact主线", "turn_indexes": indexes, "action": action, "anchor_index": None}],
         "changes": [{"operation": operation, "title": title, "type": item_type,
                       "attribution": attribution, "turn_indexes": indexes,
-                      "target_index": target_index, "open": open}],
-        "focus_segment": 0,
+                      "target_index": target_index, "open": open, "merge_indexes": []}],
+        "current": {"goal_index": None, "priority_indexes": []},
     }
 
 
@@ -73,10 +73,10 @@ def test_one_compact_can_cover_multiple_turns_and_create_one_condensed_item():
              source(2, "user", "要求低token并保留定位", turn="t2"), source(3, "assistant", "运行时保存来源坐标", turn="t2")),
     ]
     semantic = {
-        "segments": [{"title": "片段级Compact", "turn_indexes": [0, 1], "action": "continue"}],
+        "segments": [{"title": "片段级Compact", "turn_indexes": [0, 1], "action": "continue", "anchor_index": None}],
         "changes": [{"operation": "new", "title": "低token片段整理", "type": "goal",
-                      "attribution": "user", "turn_indexes": [0, 1], "target_index": None, "open": True}],
-        "focus_segment": 0,
+                      "attribution": "user", "turn_indexes": [0, 1], "target_index": None, "open": True, "merge_indexes": []}],
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     doc, added, touched = apply_compact(empty(), semantic, turns, [], "compact-test")
     assert (added, touched) == (1, 0)
@@ -120,8 +120,8 @@ def test_chunking_is_bounded_and_preserves_turn_order():
 def test_validate_requires_complete_turn_coverage_and_short_schema():
     valid = output(turn_indexes=[0, 1])
     valid["segments"] = [
-        {"title": "第一段", "turn_indexes": [0], "action": "continue"},
-        {"title": "第二段", "turn_indexes": [1], "action": "continue"},
+        {"title": "第一段", "turn_indexes": [0], "action": "continue", "anchor_index": None},
+        {"title": "第二段", "turn_indexes": [1], "action": "continue", "anchor_index": None},
     ]
     valid["changes"][0]["turn_indexes"] = [0]
     assert validate(valid, [0, 1], set())["segments"][1]["title"] == "第二段"
@@ -137,14 +137,14 @@ def test_same_compact_can_finalize_new_item_without_duplicate_node():
         turn("t2", "目标已经完成", "确认完成", source(11, "user", "目标已经完成", turn="t2")),
     ]
     semantic = {
-        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue"}],
+        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue", "anchor_index": None}],
         "changes": [
             {"operation": "new", "title": "目标事项", "type": "goal", "attribution": "user",
-             "turn_indexes": [0], "target_index": None, "open": True},
+             "turn_indexes": [0], "target_index": None, "open": True, "merge_indexes": []},
             {"operation": "resolve", "title": "目标事项已完成", "type": "goal", "attribution": "user",
-             "turn_indexes": [1], "target_index": 0, "open": False},
+             "turn_indexes": [1], "target_index": 0, "open": False, "merge_indexes": []},
         ],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     doc, added, touched = apply_compact(empty(), semantic, turns, [], "same-batch-final")
     assert (added, touched) == (1, 1)
@@ -159,23 +159,23 @@ def test_merge_preserves_history_and_evidence_on_surviving_item():
         turn("t2", "事项二", "记录二", source(21, "user", "事项二", turn="t2")),
     ]
     semantic = {
-        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue"}],
+        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue", "anchor_index": None}],
         "changes": [
             {"operation": "new", "title": "重复事项一", "type": "goal", "attribution": "user",
-             "turn_indexes": [0], "target_index": None, "open": True},
+             "turn_indexes": [0], "target_index": None, "open": True, "merge_indexes": []},
             {"operation": "new", "title": "重复事项二", "type": "goal", "attribution": "user",
-             "turn_indexes": [1], "target_index": None, "open": True},
+             "turn_indexes": [1], "target_index": None, "open": True, "merge_indexes": []},
         ],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     doc, _, _ = apply_compact(empty(), semantic, turns, [], "merge-source")
     first, second = doc["items"]
     merge = {
-        "segments": [{"title": "当前主线", "turn_indexes": [0], "action": "continue"}],
+        "segments": [{"title": "当前主线", "turn_indexes": [0], "action": "continue", "anchor_index": None}],
         "changes": [{"operation": "merge", "title": "合并后的事项", "type": "goal", "attribution": "user",
                       "turn_indexes": [0], "target_index": 0, "open": True,
                       "merge_indexes": [1]}],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     merged, added, touched = apply_compact(
         doc, merge, [turn("t3", "合并事项", "已合并", source(22, "user", "合并事项", turn="t3"))],
@@ -197,8 +197,8 @@ def test_first_batch_can_record_already_resolved_item_without_target():
     ]
     semantic = {
         "segments": [
-            {"title": "旧目标收尾", "turn_indexes": [0], "action": "continue"},
-            {"title": "团队权限新目标", "turn_indexes": [1], "action": "new_phase"},
+            {"title": "旧目标收尾", "turn_indexes": [0], "action": "continue", "anchor_index": None},
+            {"title": "团队权限新目标", "turn_indexes": [1], "action": "new_phase", "anchor_index": 1},
         ],
         "changes": [
             {"operation": "resolve", "title": "旧目标已完成", "type": "goal", "attribution": "user",
@@ -206,7 +206,7 @@ def test_first_batch_can_record_already_resolved_item_without_target():
             {"operation": "new", "title": "团队权限目标", "type": "goal", "attribution": "user",
              "turn_indexes": [1], "target_index": None, "open": True, "merge_indexes": []},
         ],
-        "focus_segment": 1,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     # The model boundary allows the first closed item to have no historical target.
     from seywo.compact_model import validate
@@ -226,9 +226,9 @@ def test_return_segment_updates_focus_without_a_new_item():
     ]
     semantic = {
         "segments": [
-            {"title": "主线", "turn_indexes": [0], "action": "continue"},
-            {"title": "支线", "turn_indexes": [1, 2], "action": "branch"},
-            {"title": "回到主线", "turn_indexes": [3], "action": "return"},
+            {"title": "主线", "turn_indexes": [0], "action": "continue", "anchor_index": None},
+            {"title": "支线", "turn_indexes": [1, 2], "action": "branch", "anchor_index": None},
+            {"title": "回到主线", "turn_indexes": [3], "action": "return", "anchor_index": None},
         ],
         "changes": [
             {"operation": "new", "title": "主线目标", "type": "goal", "attribution": "user",
@@ -236,7 +236,7 @@ def test_return_segment_updates_focus_without_a_new_item():
             {"operation": "new", "title": "支线问题", "type": "observation", "attribution": "user",
              "turn_indexes": [1, 2], "target_index": None, "open": False, "merge_indexes": []},
         ],
-        "focus_segment": 2,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     doc, _, _ = apply_compact(empty(), semantic, turns, [], "return-focus")
     assert doc["overview"]["focus"]["branch_id"] is None
@@ -248,10 +248,10 @@ def test_return_segment_updates_focus_without_a_new_item():
 def test_first_batch_update_without_target_materializes_one_item():
     turns = [turn("t1", "连续核验同一目标", "已验证正常", source(50, "user", "连续核验同一目标"), source(51, "assistant", "已验证正常"))]
     semantic = {
-        "segments": [{"title": "连续核验", "turn_indexes": [0], "action": "continue"}],
+        "segments": [{"title": "连续核验", "turn_indexes": [0], "action": "continue", "anchor_index": None}],
         "changes": [{"operation": "update", "title": "连续核验正常", "type": "observation", "attribution": "assistant",
                       "turn_indexes": [0], "target_index": None, "open": False, "merge_indexes": []}],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     from seywo.compact_model import validate
     validated = validate(semantic, [0], set())
@@ -261,29 +261,30 @@ def test_first_batch_update_without_target_materializes_one_item():
     assert doc["items"][0]["status"] == "resolved"
 
 
-def test_completed_assistant_statement_cannot_remain_unresolved():
+def test_assistant_completion_words_do_not_override_explicit_item_status():
     turns = [turn("t1", "继续处理", "已实现流式写出，验证通过", source(51, "assistant", "已实现流式写出，验证通过"))]
     semantic = {
-        "segments": [{"title": "流式写出", "turn_indexes": [0], "action": "continue"}],
+        "segments": [{"title": "流式写出", "turn_indexes": [0], "action": "continue", "anchor_index": None}],
         "changes": [{"operation": "new", "title": "已实现流式写出", "type": "action", "attribution": "assistant",
                       "turn_indexes": [0], "target_index": None, "open": True, "merge_indexes": []}],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
-    doc, _, _ = apply_compact(empty(), semantic, turns, [], "completed-assistant")
-    assert doc["items"][0]["status"] == "resolved"
-    assert doc["overview"]["unresolved"] == []
+    for is_open, expected in [(True, 'open'), (False, 'resolved')]:
+        semantic['changes'][0]['open'] = is_open
+        doc, _, _ = apply_compact(empty(), semantic, turns, [], "completed-assistant")
+        assert doc['items'][0]['status'] == expected
 
 
 def test_new_with_target_is_canonicalized_to_update_without_duplicate():
     semantic = {
-        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue"}],
+        "segments": [{"title": "当前主线", "turn_indexes": [0, 1], "action": "continue", "anchor_index": None}],
         "changes": [
             {"operation": "new", "title": "初始事项", "type": "goal", "attribution": "user",
              "turn_indexes": [0], "target_index": None, "open": True, "merge_indexes": []},
             {"operation": "new", "title": "事项已更新", "type": "goal", "attribution": "user",
              "turn_indexes": [1], "target_index": 0, "open": False, "merge_indexes": []},
         ],
-        "focus_segment": 0,
+        "current": {"goal_index": None, "priority_indexes": []},
     }
     validated = validate(semantic, [0, 1], set())
     assert validated["changes"][1]["operation"] == "update"

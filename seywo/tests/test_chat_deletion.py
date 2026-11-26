@@ -32,7 +32,7 @@ def project(tmp_path):
         ])
     for chat in (DELETED, KEPT, QUEUED):
         source = host / f'{chat}.jsonl'
-        source.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': chat}}) + '\n')
+        source.write_text(json.dumps({'type': 'session_meta', 'payload': {'id': chat, 'cwd': str(root)}}) + '\n')
         item = inbox.record(config, chat, 'PreCompact', str(source))
         if chat != QUEUED:
             with Store(config) as store:

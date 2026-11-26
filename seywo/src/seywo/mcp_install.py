@@ -10,7 +10,7 @@ import tomllib
 from .runtime_platform import replace_file
 
 def install(config):
-    root = Path(config["project_root"])
+    root = Path(config["_path"]).parent.parent
     package_root = Path(__file__).resolve().parents[2]
     host = package_root / "bin" / ("seywo-host.cmd" if os.name == "nt" else "seywo-host")
     if not host.is_file():

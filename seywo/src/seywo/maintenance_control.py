@@ -3,6 +3,7 @@ from pathlib import Path
 
 from . import inbox, maintenance_status
 from .locking import file_lock, lifecycle
+from .project_scope import SourceOwnerMismatch
 from .store import Store
 
 
@@ -14,11 +15,13 @@ def retry(config, chat_id):
             current = maintenance_status.read(config, chat_id, db=store.db)
         if not current['retryable']:
             return {'accepted': False, 'maintenance': current, 'model_calls': 0}
-        if current.get('waiting_for_turn'):
+        if current['retry_capture']:
             try:
                 inbox.resume_turn(config, chat_id)
-            except (OSError, ValueError):
-                maintenance_status.safe_record(config, chat_id, 'failed', error_code='source_missing')
+            except (OSError, ValueError) as exc:
+                code = exc.code if isinstance(exc, SourceOwnerMismatch) else (
+                    'source_missing' if isinstance(exc, OSError) else maintenance_status.safe_code(str(exc)))
+                maintenance_status.safe_record(config, chat_id, 'failed', error_code=code, retry_capture=True)
                 return {'accepted': False, 'maintenance': maintenance_status.read(config, chat_id), 'model_calls': 0}
         for item in inbox.failed(config, chat_id):
             inbox.retry(config, item)

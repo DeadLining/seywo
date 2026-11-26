@@ -101,7 +101,8 @@ def test_precompact_records_snapshot_and_spawns_worker(tmp_path, monkeypatch):
 @skipUnless(os.name == "nt", "Windows extended-length paths")
 def test_compact_accepts_windows_project_path_with_or_without_prefix(tmp_path, monkeypatch):
     root = tmp_path / "project"
-    extended_root = Path("\\\\?\\" + str(root))
+    from seywo.windows_paths import extended_windows_path
+    extended_root = Path(extended_windows_path(root))
     config_path = Path(initialize(extended_root, plugin_hook=True)["config"])
     config = load_config(config_path)
     assert config["project_root"] == str(extended_root)

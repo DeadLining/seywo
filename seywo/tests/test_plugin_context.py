@@ -40,11 +40,71 @@ def test_missing_catalog_is_not_created(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_mcp_roots_are_request_evidence_not_a_permanent_selection(tmp_path, monkeypatch):
+    import asyncio
+    from mcp.server.fastmcp.exceptions import ToolError
+    import pytest
+    from seywo.plugin import create_plugin_server
+
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    roots = [SimpleNamespace(uri=first.as_uri())]
+
+    async def list_roots():
+        return SimpleNamespace(roots=roots)
+
+    server = create_plugin_server()
+    ctx = SimpleNamespace(session=SimpleNamespace(list_roots=list_roots))
+    monkeypatch.setattr(server, 'get_context', lambda: ctx)
+
+    async def check():
+        assert (await server.call_tool('seywo_open', {})).structuredContent['project_root'] == str(first)
+        roots[:] = [SimpleNamespace(uri=second.as_uri())]
+        assert (await server.call_tool('seywo_open', {})).structuredContent['state'] == 'reconnect_required'
+        with pytest.raises(ToolError, match='reconnect'):
+            await server.call_tool('seywo_status', {})
+        assert not (second / '.seywo').exists()
+        roots.clear()
+        assert (await server.call_tool('seywo_open', {})).structuredContent['state'] == 'project_required'
+
+    asyncio.run(check())
+
+
 def test_catalog_relative_path_is_rejected(tmp_path):
     with sqlite3.connect(tmp_path / 'state_5.sqlite') as db:
         db.execute('CREATE TABLE threads(id TEXT PRIMARY KEY,cwd TEXT)')
         db.execute('INSERT INTO threads VALUES (?,?)', (CHAT, 'relative'))
     assert host_workspace(context(thread_id=CHAT), home=tmp_path) is None
+
+
+def test_catalog_and_mcp_roots_share_enclosing_owner(tmp_path, monkeypatch):
+    import asyncio
+    from seywo.config import initialize
+    from seywo.plugin import create_plugin_server
+
+    initialize(tmp_path)
+    child = tmp_path / 'src'
+    child.mkdir()
+
+    async def list_roots():
+        return SimpleNamespace(roots=[SimpleNamespace(uri=child.as_uri())])
+
+    ctx = SimpleNamespace(session=SimpleNamespace(list_roots=list_roots))
+    async def check():
+        server = create_plugin_server()
+        monkeypatch.setattr(server, 'get_context', lambda: ctx)
+        for catalog in [child, None]:
+            monkeypatch.setattr('seywo.plugin.host_workspace', lambda _: catalog)
+            result = (await server.call_tool('seywo_open', {})).structuredContent
+            assert result.get('project_root') == str(tmp_path), result
+        fresh = create_plugin_server()
+        monkeypatch.setattr(fresh, 'get_context', lambda: ctx)
+        assert (await fresh.call_tool('seywo_open', {})).structuredContent['project_root'] == str(tmp_path)
+        assert not (child / '.seywo').exists()
+        explicit = create_plugin_server(child)
+        assert (await explicit.call_tool('seywo_open', {})).structuredContent['project_root'] == str(child)
+    asyncio.run(check())
 
 
 def test_real_stdio_request_automatically_binds_project_and_chat(tmp_path):
@@ -91,7 +151,7 @@ def test_real_stdio_request_automatically_binds_project_and_chat(tmp_path):
                 assert json.loads(page.content[0].text)['default_chat_id'] == CHAT
                 # A process cannot silently leak its selected project into another Chat.
                 result = await session.call_tool('seywo_open', {}, meta={'thread_id': other_chat})
-                assert result.structuredContent['state'] == 'project_required'
+                assert result.structuredContent['state'] == 'reconnect_required'
                 assert result.structuredContent['project_root'] is None
     asyncio.run(check())
     assert not (other / '.seywo').exists()

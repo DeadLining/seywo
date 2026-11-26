@@ -25,7 +25,7 @@ def boundary(tmp_path):
 
 def write_source(path, text):
     records = [
-        {"type": "session_meta", "payload": {"id": "chat"}},
+        {"type": "session_meta", "payload": {"id": "chat", "cwd": str(path.parent / 'project')}},
         {"type": "turn_context", "payload": {"turn_id": f"turn-{text}"}},
         {"type": "response_item", "payload": {
             "type": "message", "role": "user",
@@ -191,11 +191,10 @@ def test_two_queued_compactions_import_all_original_segments(boundary):
     queued = inbox.pending(config, "chat")
     assert len(queued) == 4
 
-    from seywo.archive import content_capture
     with Store(config) as store:
         for item in queued:
             claimed = inbox.claim(config, item)
-            path, manifest = content_capture(Path(claimed["snapshot"]), inbox.snapshot_dir(config), "chat")
+            path, manifest = store.capture_source(Path(claimed["snapshot"]), "chat", dialogue=True)
             store._import_compact_capture(path, manifest, "chat", claimed["transcript"])
             inbox.finish(config, claimed, state="done")
         texts = [row[0] for row in store.db.execute(

@@ -200,32 +200,29 @@ def instructions():
     return INSTRUCTIONS
 
 
-def validate(output, turn_indexes, active_indexes, *, require_current=False):
+def validate(output, turn_indexes, active_indexes):
     output = deepcopy(output)
     if (not isinstance(output, dict) or not {"segments", "changes"} <= set(output)
-            or set(output) - {"segments", "changes", "current", "focus_segment"}):
+            or set(output) - {"segments", "changes", "current"}):
         raise ValueError("compact_invalid_fields")
-    if require_current and "current" not in output:
+    if "current" not in output:
         raise ValueError("compact_current_required")
     allowed = set(turn_indexes)
     segments = output["segments"]
     if not isinstance(segments, list) or not segments or len(segments) > MAX_SEGMENTS:
         raise ValueError("compact_invalid_segments")
     seen = []
-    for segment in segments:
-        if not isinstance(segment, dict) or set(segment) not in (
-            {"title", "turn_indexes", "action"},
-            {"title", "turn_indexes", "action", "anchor_index"},
-        ):
+    for segment_index, segment in enumerate(segments):
+        if isinstance(segment, dict) and segment.get('action') == 'new_phase' and 'anchor_index' not in segment:
+            raise CompactValidationError('compact_new_phase_requires_user_objective',
+                                         segment_index=segment_index, reason='anchor_required')
+        if not isinstance(segment, dict) or set(segment) != {"title", "turn_indexes", "action", "anchor_index"}:
             raise ValueError("compact_invalid_segment_fields")
-        # Stored v1/v2 fixtures omit the structural anchor.
-        segment.setdefault("anchor_index", None)
         segment["title"] = _bound_title(segment["title"])
-        # The live name describes its destination; stored/runtime actions
-        # retain return for compatibility with existing graphs and clients.
+        # Map the wire action to the narrative transition kind.
         if segment["action"] == "mainline":
             segment["action"] = "return"
-        if segment["action"] not in ACTIONS:
+        elif segment["action"] not in ("continue", "new_phase", "branch"):
             raise ValueError("compact_invalid_segment_action")
         indexes = segment["turn_indexes"]
         if not isinstance(indexes, list) or not indexes or len(indexes) != len(set(indexes)):
@@ -248,9 +245,6 @@ def validate(output, turn_indexes, active_indexes, *, require_current=False):
     for change in changes:
         if not isinstance(change, dict):
             raise ValueError("compact_invalid_change_fields")
-        # Accept the v1 fixture shape at the boundary, then canonicalize it.
-        if set(change) == {"operation", "title", "type", "attribution", "turn_indexes", "target_index", "open"}:
-            change["merge_indexes"] = []
         if set(change) != {
             "operation", "title", "type", "attribution", "turn_indexes", "target_index", "open", "merge_indexes"
         }:
@@ -305,36 +299,13 @@ def validate(output, turn_indexes, active_indexes, *, require_current=False):
         anchor = segment["anchor_index"]
         if anchor is not None and (type(anchor) is not int or anchor not in offered):
             raise ValueError("compact_invalid_anchor_index")
-    if require_current:
-        validate_phase_anchors(output, active_indexes)
-    # Legacy saved outputs may contain this field. It is not a selection:
-    # final focus comes exclusively from ordered structural replay and locks.
-    focus = output.get("focus_segment")
-    if focus is not None and type(focus) is not int:
-        raise ValueError("compact_invalid_focus")
-    if "current" in output:
-        current = output["current"]
-        legacy_limits = {"goal_indexes": 1, "question_indexes": 3, "next_step_indexes": 3}
-        if not isinstance(current, dict):
-            raise ValueError("compact_invalid_current_fields")
-        if set(current) == {"goal_index", "priority_indexes"}:
-            goal = current["goal_index"]
-            if goal is not None and (type(goal) is not int or goal not in offered):
-                raise ValueError("compact_invalid_current_indexes")
-            refs = current["priority_indexes"]
-            # Preserve priority order and repeated references; runtime owns
-            # identity deduplication, classification, and resolved filtering.
-            if (not isinstance(refs, list) or len(refs) > 6
-                    or any(type(i) is not int or i not in offered for i in refs)):
-                raise ValueError("compact_invalid_current_indexes")
-        elif set(current) == set(legacy_limits):
-            # Stored outputs retain their explicit identities without aliasing.
-            for key, limit in legacy_limits.items():
-                refs = current[key]
-                if (not isinstance(refs, list) or len(refs) > limit
-                        or any(type(i) is not int or i not in offered for i in refs)
-                        or len(refs) != len(set(refs))):
-                    raise ValueError("compact_invalid_current_indexes")
-        else:
-            raise ValueError("compact_invalid_current_fields")
+    validate_phase_anchors(output, active_indexes)
+    current = output['current']
+    if not isinstance(current, dict) or set(current) != {'goal_index', 'priority_indexes'}:
+        raise ValueError('compact_invalid_current_fields')
+    goal, refs = current['goal_index'], current['priority_indexes']
+    if (goal is not None and (type(goal) is not int or goal not in offered)
+            or not isinstance(refs, list) or len(refs) > 6
+            or any(type(i) is not int or i not in offered for i in refs)):
+        raise ValueError('compact_invalid_current_indexes')
     return output

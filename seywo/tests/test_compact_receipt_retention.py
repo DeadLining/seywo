@@ -34,15 +34,15 @@ def test_receipts_do_not_duplicate_semantics_and_retention_is_per_chat():
     assert db.execute('SELECT count(*) FROM compact_batches WHERE chat_id="other"').fetchone()[0] == 1
 
 
-def test_existing_receipts_are_trimmed_transactionally_without_losing_retry_state():
+def test_setup_does_not_rewrite_receipts_or_commit_outer_transaction():
     db = database()
     for i in range(4):
         db.execute('INSERT INTO compact_batches VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', (*receipt(str(i)), '[]'))
     db.commit()
     db.execute('BEGIN IMMEDIATE')
+    before = db.total_changes
     setup(db)
     assert db.in_transaction
-    assert db.execute('SELECT count(*) FROM compact_batches').fetchone()[0] == 1
-    assert db.execute('SELECT segments_json,changes_json FROM compact_batches').fetchone() == ('[]', '[]')
+    assert db.total_changes == before
     db.rollback()
     assert db.execute('SELECT count(*) FROM compact_batches').fetchone()[0] == 4

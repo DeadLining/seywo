@@ -1,8 +1,8 @@
 """Select a committed prefix of native dialogue, separate from source ingestion.
 
 The physical cursor is advanced only past closed turns. Lifecycle metadata never
-enters semantic text. An old cursor inside a turn is repaired by rehydrating its
-user/final sources, without decoding tool payloads or replaying other turns.
+enters semantic text. A new visible body in a previously seen turn may still
+need its earlier user/final sources, but never tool payloads.
 """
 import json
 
@@ -33,22 +33,6 @@ def closed_rows(store, chat_id, cursor):
     candidates = {row['turn_id'] for row in fresh if row['turn_id'] and model_eligible(row)
                   and row.get('channel') in (None, 'final')}
     candidates.update(row['turn_id'] for row in fresh if row['turn_id'] and row['reason'] == 'unterminated_record')
-    if cursor:
-        terminals = {row.get('event_turn_id') or row['turn_id'] for row in fresh
-                     if row.get('turn_event') in {'task_complete', 'turn_aborted'}}
-        for turn_id in terminals - candidates - {None}:
-            committed = store.db.execute(
-                'SELECT 1 FROM compact_turn_commits WHERE chat_id=? AND turn_id=?', (chat_id, turn_id)).fetchone()
-            # Legacy cursors have no turn receipt. A previously complete answer
-            # proves the terminal is only trailing metadata; otherwise restore
-            # the interrupted request before advancing the semantic cursor.
-            answer = store.db.execute(
-                "SELECT 1 FROM current_sources WHERE chat_id=? AND turn_id=? AND role='assistant' "
-                "AND (channel IS NULL OR channel='final') AND state='projected' "
-                "AND (ordinal<? OR (ordinal=? AND record_no<=?)) LIMIT 1",
-                (chat_id, turn_id, cursor[0], cursor[0], cursor[1])).fetchone()
-            if not committed and not answer:
-                candidates.add(turn_id)
     prior = []
     if cursor and candidates:
         # Only turns with a new visible body can need old context. A trailing
@@ -95,9 +79,9 @@ def closed_rows(store, chat_id, cursor):
         events = {r.get('turn_event') for r in group
                   if r.get('event_turn_id') in (None, key)}
         final = any(r['role'] == 'assistant' and r.get('channel') == 'final' for r in visible)
-        legacy_answer = ('task_started' not in events
+        unmarked_answer = ('task_started' not in events
                          and any(r['role'] == 'assistant' for r in visible))
-        closed = final or legacy_answer or bool(events & {'task_complete', 'turn_aborted'})
+        closed = final or unmarked_answer or bool(events & {'task_complete', 'turn_aborted'})
         # A subsequent native turn also seals an interrupted prior request.
         if not closed and position == len(order) - 1:
             blocked = min((r['ordinal'], r['record_no']) for r in group)
@@ -105,15 +89,3 @@ def closed_rows(store, chat_id, cursor):
     if blocked is None:
         return rows, False
     return [r for r in rows if (r['ordinal'], r['record_no']) < blocked], True
-
-
-def commit_turns(db, chat_id, rows):
-    """Progress metadata only; no dialogue/output duplication or Compact diary."""
-    ends = {}
-    for row in rows:
-        if row['turn_id']:
-            ends[row['turn_id']] = (row['ordinal'], row['record_no'])
-    db.executemany('INSERT INTO compact_turn_commits VALUES(?,?,?,?) '
-        'ON CONFLICT(chat_id,turn_id) DO UPDATE SET through_ordinal=excluded.through_ordinal,'
-        'through_record=excluded.through_record',
-        [(chat_id, turn, *end) for turn, end in ends.items()])

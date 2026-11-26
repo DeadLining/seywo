@@ -1,7 +1,7 @@
 /** Project panel controller. Transport is supplied by the MCP Apps entrypoint. */
 export async function mountPanel(root, call, initial = {}, actions = {}) {
     const doc = root.ownerDocument;
-    const state = { chat: initial.chat_id || '', chats: [], version: null, phase: null, branch: null, offset: 0, epoch: 0, chatEpoch: 0, bootstrapEpoch: 0, data: null, project: '', chatPage: null, recordsOpen: false };
+    const state = { chat: initial.chat_id || '', chats: [], version: null, phase: null, branch: null, offset: 0, epoch: 0, chatEpoch: 0, bootstrapEpoch: 0, data: null, chatPage: null, recordsOpen: false };
     const labels = { open: '进行中', resolved: '已记录结果', active: '进行中', waiting: '等待中', abandoned: '已放弃', added: '新增', updated: '更新', merged: '合并', hidden: '隐藏', removed: '移除' };
     const el = (tag, text, cls) => { const n = doc.createElement(tag); if (text !== undefined)
         n.textContent = text; if (cls)
@@ -67,7 +67,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         if (maintenanceProblem) copy.append(el('small', maintenanceProblem));
         maintenanceBox.append(copy);
         if (maintenanceStatus?.retryable && actions.maintenanceRetry) {
-            const retry = button(maintenanceSubmitting ? '正在提交…' : '重试整理', retryMaintenance, 'more');
+            const retry = button(maintenanceSubmitting ? '正在提交…' : maintenanceStatus.waiting_for_turn ? '检查新进展' : '重试整理', retryMaintenance, 'more');
             retry.dataset.maintenanceRetry = ''; retry.disabled = maintenanceSubmitting;
             maintenanceBox.append(retry);
         }
@@ -650,11 +650,10 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
                 const currentIsImported = state.currentChat && data.results.some(chat => chat.chat_id === state.currentChat);
                 state.chat = data.default_chat_id || (currentIsImported ? state.currentChat : '');
             }
-            state.project = data.project_root;
             state.chats = data.results;
             state.chatPage = data.retrieval;
             populateChats();
-            root.querySelector('[data-project]').textContent = state.project.split('/').filter(Boolean).at(-1) || '项目记忆';
+            root.querySelector('[data-project]').textContent = data.project_name || '项目记忆';
             if (!state.chat && data.current_chat_id) {
                 empty('当前对话尚未收录', '整理当前对话后会在这里显示。也可以从上方查看项目中的其他对话。');
                 await startMaintenance(data.current_chat_id);
@@ -668,7 +667,7 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         }
     }
     function initializationError(info) {
-        root.querySelector('[data-project]').textContent=info.project_root?.split('/').filter(Boolean).at(-1)||'项目记忆';
+        root.querySelector('[data-project]').textContent=info.project_name || '项目记忆';
         empty('项目记忆暂时无法启用', info.error || '无法初始化当前项目，请重试。');
         const retry=button('重试',()=>reopen());retry.dataset.retry='';content.append(retry);
     }
@@ -714,6 +713,15 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
         state.epoch++;state.chatEpoch++;state.bootstrapEpoch++;state.drawerEpoch++;
         state.chat=info.chat_id||'';state.version=null;drawer.hidden=true;
         content.removeAttribute('aria-busy');clearNotice();
+        const reconnect=info.state==='reconnect_required';
+        root.querySelector('[data-refresh]').hidden=reconnect;
+        chatSwitcher.hidden=reconnect;
+        settings.hidden=reconnect || !actions.modelStatus;
+        if(reconnect){
+            root.querySelector('[data-project]').textContent='项目记忆';
+            empty('需要重新连接 Seywo','项目已变更。请重新连接 Seywo 插件；也可以重启 Codex 后再打开当前项目。');
+            return;
+        }
         if(info.state==='project_required'){projectPicker();return;}
         if(info.state==='initialization_failed'){initializationError(info);return;}
         if(info.state==='initialization_required'){await reopen(true);return;}
@@ -723,7 +731,6 @@ export async function mountPanel(root, call, initial = {}, actions = {}) {
     }
     root.querySelector('[data-refresh]').onclick = actions.openCurrent ? ()=>reopen() : bootstrap;
     settings.ontoggle = () => { if (settings.open) void loadSettings(); };
-    if (!actions.modelStatus) settings.hidden = true;
     await open(initial);
     return { refresh: bootstrap, selectChat, open, state };
 }
