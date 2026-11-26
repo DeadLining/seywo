@@ -99,9 +99,11 @@ def validate_dependencies(path):
     """Execute a bounded import probe with only stdlib + private dependency path."""
     code = ('import importlib.metadata,site,sys; site.addsitedir(sys.argv[1]); '
             'from mcp.server.fastmcp import FastMCP; '
-            'assert importlib.metadata.version("mcp")=="1.28.1"')
+            'assert "mcp==" + importlib.metadata.version("mcp") in sys.argv[2:]; '
+            'FastMCP("Seywo")')
     try:
-        result = subprocess.run([sys.executable, '-IBS', '-c', code, str(path)],
+        pins = LOCK.with_suffix('.in').read_text(encoding='utf-8').splitlines()
+        result = subprocess.run([sys.executable, '-IBS', '-c', code, str(path), *pins],
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=20)
         return result.returncode == 0

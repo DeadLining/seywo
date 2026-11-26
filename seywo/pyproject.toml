@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-mcp = ["mcp>=1.28.1,<2"]
+mcp = ["mcp>=1.30.0,<2"]
 
 [project.scripts]
 seywo = "seywo.cli:main"
@@ -21,3 +21,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+filterwarnings = ["error:Field 'lifespan' has an incomplete definition:pydantic_settings.exceptions.IncompleteFieldDefinitionWarning"]
